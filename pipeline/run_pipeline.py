@@ -1611,6 +1611,11 @@ def x_store_items(config: dict[str, Any], fetched_at: str) -> list[SourceItem]:
                         "tweet_id": row["tweet_id"],
                         "author": author,
                         "author_name": row["author_name"],
+                        "author_avatar": (
+                            (raw.get("author") or {}).get("profilePicture")
+                            if isinstance(raw.get("author"), dict)
+                            else None
+                        ),
                         "created_at": row["created_at"],
                         "age_hours": round(age_hours or 0, 2),
                         "like_count": metrics.get("likes"),
@@ -3626,6 +3631,36 @@ def export_dashboard_v3(scored: list[dict[str, Any]], run_id: str, fetched_at: s
     }
     .account-row { grid-template-columns: minmax(0, 1fr) auto; align-items: center; }
     .status-row { grid-template-columns: minmax(160px, 220px) minmax(80px, 100px) minmax(0, 1fr); }
+    .x-person {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      min-width: 0;
+      max-width: 100%;
+    }
+    .x-avatar {
+      width: 22px;
+      height: 22px;
+      border-radius: 999px;
+      object-fit: cover;
+      flex: 0 0 auto;
+      background: var(--panel2);
+      border: 1px solid var(--line);
+    }
+    .x-avatar-fallback {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 600;
+      line-height: 1;
+    }
+    .x-person-name {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
     .query-row .field { margin-bottom: 6px; }
     .small-button { padding: 5px 7px; font-size: 12px; }
     .danger-button { color: var(--warn); }
@@ -3924,6 +3959,39 @@ def export_dashboard_v3(scored: list[dict[str, Any]], run_id: str, fetched_at: s
       const text = String(value || '#');
       return text.startsWith('http://') || text.startsWith('https://') ? text.replace(/"/g, '%22') : '#';
     }
+    let xAvatarCache = null;
+    function xAvatarMap() {
+      if (xAvatarCache) return xAvatarCache;
+      const map = {};
+      for (const item of data.items || []) {
+        const metaObj = item.metadata || {};
+        const author = String(metaObj.author || metaObj.username || '').replace(/^@/, '').toLowerCase();
+        if (author && metaObj.author_avatar && !map[author]) map[author] = metaObj.author_avatar;
+        const rawAuthor = item.raw?.author || {};
+        const rawHandle = String(rawAuthor.userName || rawAuthor.username || '').replace(/^@/, '').toLowerCase();
+        if (rawHandle && rawAuthor.profilePicture && !map[rawHandle]) map[rawHandle] = rawAuthor.profilePicture;
+      }
+      xAvatarCache = map;
+      return xAvatarCache;
+    }
+    function xAvatarForHandle(handle) {
+      const wanted = String(handle || '').replace(/^@/, '').toLowerCase();
+      if (!wanted) return '';
+      return xAvatarMap()[wanted] || '';
+    }
+    function avatarHtml(handle, url = '') {
+      const clean = String(handle || '').replace(/^@/, '');
+      const label = clean ? `@${clean}` : '';
+      const safeUrl = escapeUrl(url || xAvatarForHandle(clean));
+      const initials = escapeText((clean.slice(0, 2) || '?').toUpperCase());
+      if (safeUrl !== '#') return `<img class="x-avatar" src="${safeUrl}" alt="${escapeText(label)}" loading="lazy" referrerpolicy="no-referrer">`;
+      return `<span class="x-avatar x-avatar-fallback" aria-hidden="true">${initials}</span>`;
+    }
+    function xPersonHtml(handle, avatarUrl = '') {
+      const clean = String(handle || '').replace(/^@/, '');
+      if (!clean) return '';
+      return `<span class="x-person">${avatarHtml(clean, avatarUrl)}<span class="x-person-name">@${escapeText(clean)}</span></span>`;
+    }
     function cloneJson(value) {
       return JSON.parse(JSON.stringify(value ?? {}));
     }
@@ -4041,7 +4109,7 @@ def export_dashboard_v3(scored: list[dict[str, Any]], run_id: str, fetched_at: s
       npm_search: [rank('搜索排名', 'npm registry search API 在当前 query 里的返回顺序。npm 的排序由文本匹配和 score 共同决定，不是下载量榜，也不是增长榜；看 weekly/monthly downloads 才是使用量。'), name('Package'), desc(), c('搜索词', '命中这行的 npm registry search query，例如 mcp 或 ai agent。它决定这个包为什么被抓进来；改 query 后下一次 run 生效。', 'm.query_label'), c('版本', 'npm package.version，当前包版本号。版本高低本身不代表质量，要结合更新时间和下载看。', 'm.version'), c('周下载', 'npm search API downloads.weekly，过去一周下载量。它是使用/依赖热度的粗信号；包管理器自动安装会放大成熟包。', 'm.weekly_downloads', 'num', 'num'), c('月下载', 'npm search API downloads.monthly，过去一月下载量。比周下载更平滑，但对刚冒头项目反应更慢。', 'm.monthly_downloads', 'num', 'num'), c('dependents', 'npm search API dependents，依赖这个包的包数量。高值表示生态嵌入深，但新项目通常还很低。', 'm.dependents', 'num', 'num'), c('score', 'npm search API 的 score.final 或 searchScore，是 npm 自己的搜索排序分。它混合文本匹配、质量、流行度、维护等因素；不是下载速度。', 'm.score_final', 'num', 'num'), c('quality', 'npm search API score.detail.quality，npm 自己的质量子分。通常和包元数据、测试/文档等健康度相关；不是我们计算。', 'm.score_quality', 'num', 'num'), c('popularity', 'npm search API score.detail.popularity，npm 自己的流行度子分。通常受下载量、dependents 等影响；成熟包会更占优。', 'm.score_popularity', 'num', 'num'), c('maintenance', 'npm search API score.detail.maintenance，npm 自己的维护子分。通常反映最近发布和维护活跃；低值可能表示不活跃。', 'm.score_maintenance', 'num', 'num'), c('license', 'npm package.license。用于判断复用风险，不是热度或质量分。', 'm.license'), c('keywords', 'npm package.keywords，包作者设置的关键词。用于快速判断领域；可能缺失或营销化。', 'm.keywords', '', 'list'), c('date', 'npm package.date，npm 返回的包更新时间。新近更新配合下载增长更值得看。', 'm.package_date', '', 'date'), detail()],
       pypi_newest: pypiCols('Newest'),
       pypi_updates: pypiCols('Updates'),
-      x_seed_accounts: [rank('粉丝排名', 'Settings 里的 X seed account 顺序。当前按粉丝数和 AI 相关初筛得到，用来决定监控哪些个人账号；这是账号池管理信息，不是项目榜。'), name('账号'), desc(), c('username', 'X username，不带 @ 的账号名。这个列表来自你的 following 候选池，按粉丝数筛出 AI 相关个人账号。', 'm.username'), c('followers', 'X 账号 followers_count，粉丝数。它只用于 seed account 选择，不代表某条 tweet 的项目价值。', 'm.followers_count', 'num', 'num'), c('following', 'X 账号 following_count，关注数。用于了解账号规模和行为，不作为项目打分。', 'm.following_count', 'num', 'num'), c('AI 关键词分', '本地轻量 AI 相关度分：从账号 bio/name 等文本里匹配 AI/agent/coding 等关键词。它只用于初筛 seed accounts，不是 LLM 判断。', 'm.keyword_score', 'num', 'num'), detail()],
+      x_seed_accounts: [rank('粉丝排名', 'Settings 里的 X seed account 顺序。当前按粉丝数和 AI 相关初筛得到，用来决定监控哪些个人账号；这是账号池管理信息，不是项目榜。'), name('账号'), desc(), c('username', 'X username，不带 @ 的账号名。头像优先来自已抓到的 X tweet author.profilePicture；没有本轮 tweet 的账号会显示 initials fallback。', 'm.username', '', 'handle'), c('followers', 'X 账号 followers_count，粉丝数。它只用于 seed account 选择，不代表某条 tweet 的项目价值。', 'm.followers_count', 'num', 'num'), c('following', 'X 账号 following_count，关注数。用于了解账号规模和行为，不作为项目打分。', 'm.following_count', 'num', 'num'), c('AI 关键词分', '本地轻量 AI 相关度分：从账号 bio/name 等文本里匹配 AI/agent/coding 等关键词。它只用于初筛 seed accounts，不是 LLM 判断。', 'm.keyword_score', 'num', 'num'), detail()],
       x_tweets: [rank('tweet 排名', 'X Tweets tab 里的当前展示顺序。采集时先按 seed account 和时间窗拿 tweet，再按配置导出；它不是 engagement 排名。读这个 tab 重点看作者、原文和提及对象。'), win(), name('Tweet'), desc(), c('作者', 'tweet author username。因为这些作者是 seed accounts，本身就是信号；我们暂时不把 engagement 当主指标。', 'm.author', '', 'handle'), c('created', 'tweet created_at，tweet 发布时间。配合时间窗看它是 24h、7d 还是 30d 内的信号。', 'm.created_at', '', 'date'), c('提及对象', '本地规则从 tweet 文本抽出的对象：@handle、hashtag、非 X 域名、GitHub repo URL、已知项目词。不是 LLM 实体识别，只是帮助快速扫原文。', 'm.mentioned_projects', '', 'projects'), detail()],
       settings_source_health: [rank('序号', 'Settings Source Health 的行号，只用于浏览运行状态。它不是 source 优先级，也不会影响采集顺序或 dashboard 排名。'), c('Source', 'pipeline adapter 名称，例如 github_search、hn_firebase、product_hunt。每个 adapter 对应一个外部数据源或一个数据抓取逻辑。', '$name'), desc(), c('状态', '最近一次该 adapter 的运行状态。正常表示无错误；注意可能是 disabled、API 错误、缺文件或可忽略的 optional source 失败。', 'm.status'), c('说明', '错误、禁用或状态备注。用于判断为什么某个 source 没数据；这不是项目信号。', 'm.note', 'desc'), c('默认节奏', '当前产品假设是每 24 小时跑一次完整 pipeline；现在还没有启用 cron，所以需要手动 run。', 'm.default_schedule'), c('生效规则', 'Settings 改动会写入 pipeline/config.json；下一次 pipeline run 才会使用新配置，当前已导出的 dashboard 不会自动刷新。', 'm.takes_effect'), detail()],
       settings_search_terms: [rank('序号', 'Settings Search Terms 的行号，只用于浏览配置项。它不是搜索词权重；是否抓取由“启用”和配置文件决定。'), c('设置项', '这个配置项的名字。Search Terms 里的行会真实影响抓取 query，不是宽泛的关注关键词。', '$name'), desc(), c('组', '这个 search term 属于哪个入口：GitHub Search、HN Algolia、npm Search 或 X keyword queries。不同组会调用不同 API。', 'm.group'), c('启用', '这个配置项当前是否启用。启用后下一次 pipeline run 会使用；关闭后不会抓对应 query。', 'm.enabled'), c('默认节奏', '当前产品假设是每 24 小时跑一次完整 pipeline；cron 还没启用。', 'm.default_schedule'), c('生效规则', '修改、增加、删除 search term 后，需要保存到 pipeline/config.json，并在下一次 pipeline run 才生效。', 'm.takes_effect'), detail()],
@@ -4229,7 +4297,7 @@ def export_dashboard_v3(scored: list[dict[str, Any]], run_id: str, fetched_at: s
       if (column.kind === 'list') return escapeText(arr(value));
       if (column.kind === 'object') return escapeText(objPairs(value));
       if (column.kind === 'accounts') return escapeText(arr((value || []).map(x => `@${x}`), 8));
-      if (column.kind === 'handle') return escapeText(value ? `@${value}` : '');
+      if (column.kind === 'handle') return xPersonHtml(value, meta(item, 'author_avatar'));
       if (column.kind === 'projects') return escapeText(projectText(value));
       if (column.kind === 'detail') return detailHtml(item);
       return escapeText(value ?? '');
@@ -4400,27 +4468,8 @@ def export_dashboard_v3(scored: list[dict[str, Any]], run_id: str, fetched_at: s
     }
     function renderCards() {
       const cards = document.getElementById('cards');
-      const ok = Object.entries(data.source_errors).filter(([, e]) => !e).length;
-      const bad = Object.entries(data.source_errors).filter(([, e]) => e).length;
-      if (activeSection === 'settings') {
-        cards.hidden = true;
-        cards.innerHTML = '';
-        return;
-      }
-      cards.hidden = false;
-      const channelTotal = channelRows().length;
-      const rows = windowedRows();
-      const page = pagedRows();
-      const sourceItems = data.items.filter(item => sourceChannelIds.has(item.channel));
-      const items = [
-        {label: '当前筛选条目', value: rows.length, sub: `频道总数 ${channelTotal} · 第 ${currentState().page}/${page.totalPages} 页`, help: '当前 source tab 在时间筛选后的行数。它是当前页面可浏览的数据量；翻页只改变显示范围，不会丢数据。'},
-        {label: '当前频道', value: channelLabel(active), sub: '只展示本渠道事实', help: '当前正在看的 source。Source dashboard 只展示这个 source 自己返回或直接解析出的事实，不做跨渠道加权评分。'},
-        {label: '时间窗分布', value: windowSummary(rows), sub: '24h / 7d / 30d / 30d+ / current', help: '当前筛选结果里各时间窗的行数。24h/7d/30d 是近期窗口，30d+ 是超过 30 天的历史 X tweet，current 是当前快照；比较增长字段时要在同一窗口内比较。'},
-        {label: '当前页大小', value: currentState().pageSize, sub: '可切 50 / 100 / 200 / 500', help: '每页显示多少行。它只影响浏览体验，不影响抓取数量、数据库数量或排序结果。'},
-        {label: 'Source 总条目', value: sourceItems.length, sub: '不含 Settings', help: '当前 dashboard 里所有项目/讨论/包/tweet 类 source 的总行数，不含 Settings 配置行，也不代表去重后的项目数。'},
-        {label: '总收集条目', value: data.items.length, sub: '含 Settings 行', help: '当前 dashboard payload 的全部行数，包含 source rows 和 Settings rows。这个数主要用于判断页面体量和导出大小。'},
-      ];
-      cards.innerHTML = items.map(item => `<div class="card"><div class="label">${escapeText(item.label)} ${tip(item.help)}</div><div class="value">${escapeText(item.value)}</div><div class="sub">${escapeText(item.sub)}</div></div>`).join('');
+      cards.hidden = true;
+      cards.innerHTML = '';
     }
     function renderStatus() {
       const box = document.getElementById('statusList');
@@ -4511,7 +4560,7 @@ def export_dashboard_v3(scored: list[dict[str, Any]], run_id: str, fetched_at: s
     }
     function renderXMonitoringSettings() {
       const accounts = getConfig('apify.x_seed_accounts', []) || [];
-      const accountRows = accounts.map((account, index) => `<div class="account-row"><div><strong>@${escapeText(account)}</strong><div class="setting-help">apify.x_seed_accounts[${index}]</div></div><button type="button" class="small-button danger-button" data-action="remove-account" data-index="${index}">移除</button></div>`).join('') || '<div class="empty">还没有 seed account。</div>';
+      const accountRows = accounts.map((account, index) => `<div class="account-row"><div>${xPersonHtml(account)}<div class="setting-help">apify.x_seed_accounts[${index}]</div></div><button type="button" class="small-button danger-button" data-action="remove-account" data-index="${index}">移除</button></div>`).join('') || '<div class="empty">还没有 seed account。</div>';
       const windows = ['24h', '7d', '30d', '30d+'];
       const selectedWindows = new Set(getConfig('apify.x_tweets.windows', []) || []);
       const windowToggles = windows.map(win => `<label class="toggle-row"><input type="checkbox" data-action="toggle-x-window" data-window="${win}" ${selectedWindows.has(win) ? 'checked' : ''}><span>${win}</span></label>`).join('');
