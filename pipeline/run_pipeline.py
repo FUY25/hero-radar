@@ -1762,7 +1762,7 @@ def channel_description(channel: str) -> str:
         ),
         "github_movers_repofomo": (
             "来源：RepoFOMO leaderboard。口径：抓公开榜单里的 FomoRank、repo、总 star、7d / 30d / 60d 新增 star、age 等字段。"
-            "怎么看：适合补周级/月级 movers，尤其是已经脱离当天 GitHub Trending 但仍在增长的 repo。"
+            "怎么看：适合补周级/月级 movers；dashboard 的 7d / 30d / 60d 是 RepoFOMO 原生字段 lens，切换后按对应新增 star 重排当前榜。"
         ),
         "github_search": (
             "来源：GitHub Search API。口径：按 Settings 里的 query 抓 repository search，目前按 stars desc 请求，保留 star、fork、topics、创建/更新时间、README 描述等 API 字段。"
@@ -2114,12 +2114,16 @@ def score_rows(
     scored.sort(key=lambda x: (channel_index.get(x["channel"], 999), x["_sort_key"]))
 
     channel_ranks: dict[str, int] = {}
+    channel_window_ranks: dict[tuple[str, str], int] = {}
     if write_scores:
         conn.execute("delete from scores where run_id = ?", (run_id,))
     for global_rank, row in enumerate(scored, start=1):
         channel_ranks[row["channel"]] = channel_ranks.get(row["channel"], 0) + 1
+        window_key = (str(row["channel"]), str(row.get("window") or "current"))
+        channel_window_ranks[window_key] = channel_window_ranks.get(window_key, 0) + 1
         row["rank"] = global_rank
         row["channel_rank"] = channel_ranks[row["channel"]]
+        row["window_rank"] = channel_window_ranks[window_key]
         row.pop("_sort_key", None)
         if write_scores:
             conn.execute(
@@ -3327,7 +3331,8 @@ def export_dashboard_v3(scored: list[dict[str, Any]], run_id: str, fetched_at: s
     .channel-tabs button { padding: 5px 8px; font-size: 13px; position: relative; }
     .channel-tabs button[data-tip]::after {
       content: attr(data-tip);
-      display: none;
+      visibility: hidden;
+      opacity: 0;
       position: absolute;
       left: 0;
       top: calc(100% + 8px);
@@ -3345,10 +3350,13 @@ def export_dashboard_v3(scored: list[dict[str, Any]], run_id: str, fetched_at: s
       font-weight: 400;
       z-index: 50;
       pointer-events: none;
+      transform: translateY(-2px);
+      transition: opacity .08s ease, transform .08s ease, visibility 0s linear .08s;
     }
     .channel-tabs button[data-tip]::before {
       content: "";
-      display: none;
+      visibility: hidden;
+      opacity: 0;
       position: absolute;
       left: 14px;
       top: calc(100% + 3px);
@@ -3360,11 +3368,18 @@ def export_dashboard_v3(scored: list[dict[str, Any]], run_id: str, fetched_at: s
       transform: rotate(45deg);
       z-index: 51;
       pointer-events: none;
+      transition: opacity .08s ease, visibility 0s linear .08s;
     }
     .channel-tabs button[data-tip]:hover::after,
     .channel-tabs button[data-tip]:focus-visible::after,
     .channel-tabs button[data-tip]:hover::before,
-    .channel-tabs button[data-tip]:focus-visible::before { display: block; }
+    .channel-tabs button[data-tip]:focus-visible::before {
+      visibility: visible;
+      opacity: 1;
+      transition-delay: .45s, .45s, 0s;
+    }
+    .channel-tabs button[data-tip]:hover::after,
+    .channel-tabs button[data-tip]:focus-visible::after { transform: translateY(0); }
     body.rail-collapsed .rail { padding: 12px 6px; overflow-x: hidden; }
     body.rail-collapsed .rail-head {
       flex-direction: column;
@@ -3912,6 +3927,7 @@ def export_dashboard_v3(scored: list[dict[str, Any]], run_id: str, fetched_at: s
     let activeSettings = localStorage.getItem('heroRadarSettingsTab') || 'settings_run_sources';
     let active = activeSection === 'settings' ? activeSettings : activeSource;
     const channelState = {};
+    const rangeRankCache = {};
     const pageSizes = [50, 100, 200, 500];
     document.body.dataset.theme = localStorage.getItem('heroRadarTheme') || 'light';
     if (localStorage.getItem('heroRadarRail') === 'collapsed') document.body.classList.add('rail-collapsed');
@@ -4066,7 +4082,7 @@ def export_dashboard_v3(scored: list[dict[str, Any]], run_id: str, fetched_at: s
     function meta(item, key) { return (item.metadata || {})[key]; }
     function raw(item, key) { return (item.raw || {})[key]; }
     function val(item, path) {
-      if (path === '$rank') return item.channel_rank;
+      if (path === '$rank') return rangeRankValue(item);
       if (path === '$window') return item.window || 'current';
       if (path === '$source') return item.source;
       if (path === '$name') return item.name;
@@ -4088,7 +4104,7 @@ def export_dashboard_v3(scored: list[dict[str, Any]], run_id: str, fetched_at: s
     function link(url, label) { return `<a href="${escapeUrl(url)}" target="_blank" rel="noreferrer">${escapeText(label)}</a>`; }
     function tip(text) { return `<span class="hint" data-tip="${escapeText(text)}">?</span>`; }
     function c(label, help, path, cls = '', kind = 'text') { return {label, help, path, cls, kind}; }
-    function rank(label = '排名', help = '这个数字是本 tab 里的固定原始序号：采集时按该 source 的原生 rank 或默认返回顺序生成。它不是跨 source 总分；数值越小表示该 source 原本越靠前。点排序按钮后行会重排，但这个原始序号保留。') { return c(label, help, '$rank', 'num tight', 'num'); }
+    function rank(label = '排名', help = '这个数字是当前 source + 当前时间范围内的原生顺序。切换 24h / 7d / 30d 后会重新从 1 开始；它不是跨 source 总分，也不是我们额外加权。点其他列排序后，这个数字仍保留 source 原本的窗口内顺序。') { return c(label, help, '$rank', 'num tight', 'num'); }
     function win() { return c('时间窗', '这行数据对应的取数窗口。24h / 7d / 30d 表示对应时间范围；30d+ 表示超过 30 天的历史 X tweet；current 表示只有当前快照。看新增、速度、榜单时必须先看窗口，否则数值不可比。', '$window', 'tight', 'pill'); }
     function src() { return c('来源', '底层 adapter/source 名称，例如 github_search 或 hn_algolia。主 tab 已经按 source 分组，所以这个字段通常只在详情或 fallback 表里出现。', '$source', 'tight', 'pill'); }
     function name(label = '条目') { return c(label, '条目的原始名称和链接。点击会打开 source 给出的原始 URL；这里不做跨平台实体合并，所以同一个项目在不同 source 可能出现多次。', '$name', 'wide', 'link'); }
@@ -4096,11 +4112,11 @@ def export_dashboard_v3(scored: list[dict[str, Any]], run_id: str, fetched_at: s
     function detail() { return c('详情', '展开后看该 source 的保留字段、样例 tweet、原始 facts 和补充链接。主表只放最常用字段，长文本和调试字段都放这里。', '$detail', 'wide', 'detail'); }
 
     const columnsByChannel = {
-      github_trending: [rank('GitHub 排名', 'GitHub Trending 页面在当前 since 窗口里的原始顺序。我们只是按页面顺序抓取并编号；它不是我们打分，也不是全 GitHub 项目的全量排名。数值越小表示 GitHub Trending 页面越靠前。'), win(), name('Repo'), desc(), c('GitHub 原文窗口', 'GitHub Trending 的 since 参数：daily 显示 stars today，weekly 显示 stars this week，monthly 显示 stars this month。它说明下一列新增 star 对应哪个窗口。', 'm.period', '', 'githubPeriod'), c('原生新增 star', '从 GitHub Trending 页面解析出的窗口新增 star，例如 X stars today / this week / this month。这是 GitHub 页面给出的原生数，不是我们用历史快照算的 velocity；越高表示该窗口内新增关注越多。', 'm.period_stars', 'num', 'num'), c('总 star', 'GitHub Trending 页面显示的当前仓库总 stargazer 数。它是绝对体量，不代表最近增长；老项目通常会更高。', 'm.stars_total', 'num', 'num'), detail()],
-      github_movers_trending_repos: [rank('TR 排名', 'Trending Repos 自己的 momentum 榜原始顺序。我们按 daily / weekly / monthly 三个榜单抓取后保留 source rank；它不是我们二次排序的结果。数值越小表示 Trending Repos 越靠前。'), win(), name('Repo'), desc(), c('增量曲线', 'Trending Repos 原生 sparkline 数组，页面用它画近期新增 star 曲线。我们按当前筛选行里的最大增量统一缩放，右侧数字是最后一个点；看末段抬升、连续上升、单日尖峰或回落。', 'm.sparkline', 'spark', 'sparkline'), c('总 star', 'Trending Repos 原生 starsCount，表示当前仓库总 star。它说明体量，不等于增长速度。', 'm.stars_count', 'num', 'num'), c('总 fork', 'Trending Repos 原生 forksCount，表示当前仓库总 fork。fork 往往比 star 更偏开发者实际尝试，但也可能来自模板或镜像。', 'm.forks_count', 'num', 'num'), c('TR score', 'Trending Repos 原生 score。官方说明大致由 star delta 的 EMA、fork delta 的 EMA、freshness_bonus 组合而成，用来排它自己的 momentum 榜；越高表示它认为近期动量越强，不是我们的最终评分。', 'm.source_score', 'num', 'num'), c('star velocity', 'Trending Repos 原生 scoreComponents.starsVelocity，表示近期 star 增量的平滑动量分量。它不是简单 stars/hour；越高表示近期 star 增长越快。', 'm.stars_velocity', 'num', 'num'), c('fork velocity', 'Trending Repos 原生 scoreComponents.forksVelocity，表示近期 fork 增量的平滑动量分量。fork 增长更像开发者试用信号，越高越值得看。', 'm.forks_velocity', 'num', 'num'), c('freshness_bonus', 'Trending Repos 原生 scoreComponents.freshnessBonus，新 repo 的 recency 加成，会随 repo age 衰减。高值说明项目较新或被 source 判定更 fresh；它不是质量分，只是新鲜度修正。', 'm.freshness_bonus', 'num', 'num'), c('topics', 'Trending Repos 返回的 GitHub topics。用于快速判断领域；topic 是仓库维护者/平台标签，不是我们分类。', 'm.topics', '', 'list'), detail()],
-      github_movers_repofomo: [rank('FomoRank', 'RepoFOMO 原生 leaderboard 排名。数值越小表示 RepoFOMO 认为这个 repo 越值得关注；它基于该站自己的 star/fork mover 逻辑，不是我们计算。'), name('Repo'), desc(), c('Info', 'RepoFOMO 原生 info/pitch 文案，通常是对仓库用途的短描述。用于快速理解项目，不参与本地计算。', 'm.info', 'desc'), c('总 star', 'RepoFOMO 原生 tot_stars，表示当前总 star。体量越大说明已有关注越多，但不代表它现在仍在加速。', 'm.stars_total', 'num', 'num'), c('7d 新增', 'RepoFOMO 原生 7d_new，表示过去 7 天新增 star 数。它是周级 mover 信号；越高说明最近一周增长越强。', 'm.stars_7d', 'num', 'num'), c('30d 新增', 'RepoFOMO 原生 30d_new，表示过去 30 天新增 star 数。它比 7d 更平滑，适合看月级持续增长。', 'm.stars_30d', 'num', 'num'), c('60d 新增', 'RepoFOMO 原生 60d_new，表示过去 60 天新增 star 数。它更偏中期趋势，适合区分短期尖峰和持续升温。', 'm.stars_60d', 'num', 'num'), c('7d %', 'RepoFOMO 原生 7d% 增长率，表示过去 7 天 star 的相对增长。小 repo 容易很高，所以要和 7d 新增一起看。', 'm.growth_7d_percent', 'num', 'num'), c('30d %', 'RepoFOMO 原生 30d% 增长率，表示过去 30 天 star 的相对增长。用于看月级相对加速，小体量项目可能被放大。', 'm.growth_30d_percent', 'num', 'num'), c('forks', 'RepoFOMO 原生 forks，表示当前 fork 总数。它是开发者复制/尝试的粗信号，不等同于活跃用户。', 'm.forks', 'num', 'num'), c('new forks', 'RepoFOMO 原生 new_forks，表示近期新增 fork。和新增 star 一起看，可以判断是否只是围观，还是有人开始动手试。', 'm.new_forks', 'num', 'num'), c('star age', 'RepoFOMO 原生 star_age，单位天，用作新旧程度参考。数值越小越新；新项目增长快更值得关注，但也更容易是假尖峰。', 'm.star_age_days', 'num', 'num'), detail()],
+      github_trending: [rank('GitHub 排名', 'GitHub Trending 页面在当前时间范围里的原始顺序。切换 24h / 7d / 30d 会进入不同榜单，并从 1 重新开始；它不是我们打分，也不是全 GitHub 项目的全量排名。'), name('Repo'), desc(), c('GitHub 原文窗口', 'GitHub Trending 的 since 参数：daily 显示 stars today，weekly 显示 stars this week，monthly 显示 stars this month。它说明下一列新增 star 对应哪个窗口。', 'm.period', '', 'githubPeriod'), c('原生新增 star', '从 GitHub Trending 页面解析出的窗口新增 star，例如 X stars today / this week / this month。这是 GitHub 页面给出的原生数，不是我们用历史快照算的 velocity；越高表示该窗口内新增关注越多。', 'm.period_stars', 'num', 'num'), c('总 star', 'GitHub Trending 页面显示的当前仓库总 stargazer 数。它是绝对体量，不代表最近增长；老项目通常会更高。', 'm.stars_total', 'num', 'num'), detail()],
+      github_movers_trending_repos: [rank('TR 排名', 'Trending Repos 自己的当前时间范围 momentum 榜原始顺序。切换 24h / 7d / 30d 会进入不同榜单，并从 1 重新开始；它不是我们二次排序的结果。'), name('Repo'), desc(), c('增量曲线', 'Trending Repos 原生 sparkline 数组，页面用它画近期新增 star 曲线。我们按当前筛选行里的最大增量统一缩放，右侧数字是最后一个点；看末段抬升、连续上升、单日尖峰或回落。', 'm.sparkline', 'spark', 'sparkline'), c('总 star', 'Trending Repos 原生 starsCount，表示当前仓库总 star。它说明体量，不等于增长速度。', 'm.stars_count', 'num', 'num'), c('总 fork', 'Trending Repos 原生 forksCount，表示当前仓库总 fork。fork 往往比 star 更偏开发者实际尝试，但也可能来自模板或镜像。', 'm.forks_count', 'num', 'num'), c('TR score', 'Trending Repos 原生 score。官方说明大致由 star delta 的 EMA、fork delta 的 EMA、freshness_bonus 组合而成，用来排它自己的 momentum 榜；越高表示它认为近期动量越强，不是我们的最终评分。', 'm.source_score', 'num', 'num'), c('star velocity', 'Trending Repos 原生 scoreComponents.starsVelocity，表示近期 star 增量的平滑动量分量。它不是简单 stars/hour；越高表示近期 star 增长越快。', 'm.stars_velocity', 'num', 'num'), c('fork velocity', 'Trending Repos 原生 scoreComponents.forksVelocity，表示近期 fork 增量的平滑动量分量。fork 增长更像开发者试用信号，越高越值得看。', 'm.forks_velocity', 'num', 'num'), c('freshness_bonus', 'Trending Repos 原生 scoreComponents.freshnessBonus，新 repo 的 recency 加成，会随 repo age 衰减。高值说明项目较新或被 source 判定更 fresh；它不是质量分，只是新鲜度修正。', 'm.freshness_bonus', 'num', 'num'), c('topics', 'Trending Repos 返回的 GitHub topics。用于快速判断领域；topic 是仓库维护者/平台标签，不是我们分类。', 'm.topics', '', 'list'), detail()],
+      github_movers_repofomo: [rank('范围排名', 'RepoFOMO 当前原生范围内的排名。切换 7d / 30d / 60d 后，分别按 7d_new / 30d_new / 60d_new 从高到低重新编号；这不是我们加权，只是把 RepoFOMO 同一张表里的原生窗口字段作为 lens。'), name('Repo'), desc(), c('Info', 'RepoFOMO 原生 info/pitch 文案，通常是对仓库用途的短描述。用于快速理解项目，不参与本地计算。', 'm.info', 'desc'), c('总 star', 'RepoFOMO 原生 tot_stars，表示当前总 star。体量越大说明已有关注越多，但不代表它现在仍在加速。', 'm.stars_total', 'num', 'num'), c('7d 新增', 'RepoFOMO 原生 7d_new，表示过去 7 天新增 star 数。它是周级 mover 信号；越高说明最近一周增长越强。', 'm.stars_7d', 'num', 'num'), c('30d 新增', 'RepoFOMO 原生 30d_new，表示过去 30 天新增 star 数。它比 7d 更平滑，适合看月级持续增长。', 'm.stars_30d', 'num', 'num'), c('60d 新增', 'RepoFOMO 原生 60d_new，表示过去 60 天新增 star 数。它更偏中期趋势，适合区分短期尖峰和持续升温。', 'm.stars_60d', 'num', 'num'), c('7d %', 'RepoFOMO 原生 7d% 增长率，表示过去 7 天 star 的相对增长。小 repo 容易很高，所以要和 7d 新增一起看。', 'm.growth_7d_percent', 'num', 'num'), c('30d %', 'RepoFOMO 原生 30d% 增长率，表示过去 30 天 star 的相对增长。用于看月级相对加速，小体量项目可能被放大。', 'm.growth_30d_percent', 'num', 'num'), c('forks', 'RepoFOMO 原生 forks，表示当前 fork 总数。它是开发者复制/尝试的粗信号，不等同于活跃用户。', 'm.forks', 'num', 'num'), c('new forks', 'RepoFOMO 原生 new_forks，表示近期新增 fork。和新增 star 一起看，可以判断是否只是围观，还是有人开始动手试。', 'm.new_forks', 'num', 'num'), c('star age', 'RepoFOMO 原生 star_age，单位天，用作新旧程度参考。数值越小越新；新项目增长快更值得关注，但也更容易是假尖峰。', 'm.star_age_days', 'num', 'num'), detail()],
       github_search: [rank('搜索排名', 'GitHub Search API 在当前 query 里的返回顺序。我们请求 sort=stars、order=desc，所以它基本按总 star 排；这不是 trending，也不是新增速度。'), name('Repo'), desc(), c('搜索词', '命中这行的 GitHub Search 配置 query，例如 agent stars:>20。这个字段说明它是被哪个主动搜索入口抓进来的；改 query 后下一次 run 生效。', 'm.query_label'), c('stars', 'GitHub REST API 的 stargazers_count，当前总 star 数。它是体量指标，不是最近新增。', 'm.stars', 'num', 'num'), c('forks', 'GitHub REST API 的 forks_count，当前总 fork 数。fork 更偏开发者尝试/复用信号，但不代表近期增速。', 'm.forks', 'num', 'num'), c('watchers', 'GitHub API 原生 watchers_count。GitHub 这个字段常和 star 口径接近，不建议当成独立趋势指标；主要用于完整保留 API 事实。', 'r.watchers_count', 'num', 'num'), c('issues', 'GitHub API open_issues_count，通常包含 open issues 和 pull requests。高值可能表示活跃，也可能表示维护压力，需要结合 repo 内容看。', 'r.open_issues_count', 'num', 'num'), c('license', 'GitHub API license 字段，通常是 SPDX id 或 license 名称。用于判断能否复用/研究，不是热度信号。', 'r.license'), c('created', 'GitHub created_at，仓库创建时间。新仓库高增长更接近早期机会；老仓库高 star 更多是存量体量。', 'm.created_at', '', 'date'), c('updated', 'GitHub updated_at，仓库元数据或内容最近更新时间。只能说明近期有变化，不一定是代码 push。', 'r.updated_at', '', 'date'), c('pushed', 'GitHub pushed_at，最近一次代码 push 时间。比 updated 更接近开发活跃度；很久没 push 的项目即使 star 高也要谨慎。', 'm.pushed_at', '', 'date'), c('topics', 'GitHub topics，仓库维护者/平台标签。用于快速判断领域和关键词，不是我们自动分类。', 'm.topics', '', 'list'), detail()],
-      hn_search: [rank('搜索排名', 'HN Algolia search_by_date 在当前 query 和时间窗里的返回顺序。这个 endpoint 偏按时间返回搜索命中，不是按 points 排名；看 points/comments 才知道讨论强度。'), win(), name('HN/URL'), desc(), c('搜索词', '命中这行的 HN Algolia query，例如 agent。它说明这个 HN story 是由哪个主动搜索词抓到的；改 query 后下一次 run 生效。', 'm.query_label'), c('points', 'HN Algolia 原生 points，也就是 HN story 当前得分。分数越高说明 HN 社区投票越强，但它会受时间、标题和社区偏好影响。', 'm.points', 'num', 'num'), c('comments', 'HN Algolia 原生 num_comments，表示评论数。评论多说明讨论强，但可能是争议、质疑或负面反馈；需要读评论。', 'm.comments', 'num', 'num'), c('作者', 'HN author，提交这个 story 的 HN 用户名。可用于判断是否是项目作者、熟悉账号或普通转发者。', 'm.author'), c('created', 'HN Algolia created_at，story 创建时间。结合 points/comments 和时间窗判断热度是否刚发生。', 'm.created_at', '', 'date'), c('HN 链接', 'Hacker News item 页面链接。打开后可以看完整评论区；后续 LLM 深挖也应从这里拉 comments。', 'm.hn_url', '', 'url'), detail()],
+      hn_search: [rank('搜索排名', 'HN Algolia search_by_date 在当前 query 和时间范围里的返回顺序。切换 24h / 7d / 30d 会进入不同搜索窗口，并从 1 重新开始；这个 endpoint 偏按时间返回搜索命中，不是按 points 排名。'), name('HN/URL'), desc(), c('搜索词', '命中这行的 HN Algolia query，例如 agent。它说明这个 HN story 是由哪个主动搜索词抓到的；改 query 后下一次 run 生效。', 'm.query_label'), c('points', 'HN Algolia 原生 points，也就是 HN story 当前得分。分数越高说明 HN 社区投票越强，但它会受时间、标题和社区偏好影响。', 'm.points', 'num', 'num'), c('comments', 'HN Algolia 原生 num_comments，表示评论数。评论多说明讨论强，但可能是争议、质疑或负面反馈；需要读评论。', 'm.comments', 'num', 'num'), c('作者', 'HN author，提交这个 story 的 HN 用户名。可用于判断是否是项目作者、熟悉账号或普通转发者。', 'm.author'), c('created', 'HN Algolia created_at，story 创建时间。结合 points/comments 和时间窗判断热度是否刚发生。', 'm.created_at', '', 'date'), c('HN 链接', 'Hacker News item 页面链接。打开后可以看完整评论区；后续 LLM 深挖也应从这里拉 comments。', 'm.hn_url', '', 'url'), detail()],
       hn_top: [rank('榜单排名', 'HN Firebase list 内的原始位置。topstories/newstories/beststories 各自都有自己的顺序；数值越小表示在该 list 里越靠前。'), name('HN/URL'), desc(), c('榜单', 'HN Firebase 原生列表来源：topstories、newstories 或 beststories。top 偏当前热度，new 偏最新，best 偏长期质量。', 'm.list'), c('score', 'HN Firebase item.score，HN story 当前分数。越高表示投票越强；要结合发布时间看，老帖天然更容易累积分。', 'm.score', 'num', 'num'), c('comments', 'HN Firebase item.descendants，表示该 story 的评论总数。它不是情绪分；高评论可能是兴奋，也可能是争议。', 'm.comments', 'num', 'num'), c('作者', 'HN Firebase item.by，提交这个 story 的 HN 用户名。可辅助判断是不是项目作者或高信号账号。', 'm.author'), c('created', 'HN Firebase item.time，Unix 秒时间戳；这里转换成 UTC 时间。用于判断上榜速度和是否新发生。', 'm.created_at_unix', '', 'unix'), c('HN 链接', 'Hacker News item 页面链接。评论树入口在 raw.kids，主表不展示；需要深挖时再拉评论。', 'm.hn_url', '', 'url'), detail()],
       product_hunt: [rank('PH 排名', 'Product Hunt tab 的固定顺序。采集请求使用 order=VOTES，并优先使用 dailyRank；数值越小越靠前。另看 daily rank / weekly rank 判断日榜和周榜位置。'), name('产品'), desc(), c('votes', 'Product Hunt GraphQL votesCount，当前投票数。它是 PH 社区的启动当天/近期关注信号，不等同于真实使用。', 'm.votes', 'num', 'num'), c('comments', 'Product Hunt GraphQL commentsCount，当前评论数。评论多说明讨论更多，但需要看内容判断是赞同、提问还是质疑。', 'm.comments', 'num', 'num'), c('daily rank', 'Product Hunt dailyRank，产品在 PH 日榜的原生排名。数值越小越靠前；为空时说明 API 没返回该字段。', 'm.daily_rank', 'num', 'num'), c('weekly rank', 'Product Hunt weeklyRank，产品在 PH 周榜的原生排名。比 daily 更平滑，但更滞后。', 'm.weekly_rank', 'num', 'num'), c('created', 'Product Hunt createdAt，PH post 创建时间。用于判断它是不是刚发布。', 'm.created_at', '', 'date'), c('featured', 'Product Hunt featuredAt，PH featured 时间。featured 后票数可能突然增加，所以看增长时要注意这个事件。', 'm.featured_at', '', 'date'), c('website', 'Product Hunt 返回的产品官网链接。用于看真实产品，不是 PH 页面。', 'm.website', '', 'url'), detail()],
       huggingface_models: hfCols('Model'),
@@ -4110,7 +4126,7 @@ def export_dashboard_v3(scored: list[dict[str, Any]], run_id: str, fetched_at: s
       pypi_newest: pypiCols('Newest'),
       pypi_updates: pypiCols('Updates'),
       x_seed_accounts: [rank('粉丝排名', 'Settings 里的 X seed account 顺序。当前按粉丝数和 AI 相关初筛得到，用来决定监控哪些个人账号；这是账号池管理信息，不是项目榜。'), name('账号'), desc(), c('username', 'X username，不带 @ 的账号名。头像优先来自已抓到的 X tweet author.profilePicture；没有本轮 tweet 的账号会显示 initials fallback。', 'm.username', '', 'handle'), c('followers', 'X 账号 followers_count，粉丝数。它只用于 seed account 选择，不代表某条 tweet 的项目价值。', 'm.followers_count', 'num', 'num'), c('following', 'X 账号 following_count，关注数。用于了解账号规模和行为，不作为项目打分。', 'm.following_count', 'num', 'num'), c('AI 关键词分', '本地轻量 AI 相关度分：从账号 bio/name 等文本里匹配 AI/agent/coding 等关键词。它只用于初筛 seed accounts，不是 LLM 判断。', 'm.keyword_score', 'num', 'num'), detail()],
-      x_tweets: [rank('tweet 排名', 'X Tweets tab 里的当前展示顺序。采集时先按 seed account 和时间窗拿 tweet，再按配置导出；它不是 engagement 排名。读这个 tab 重点看作者、原文和提及对象。'), win(), name('Tweet'), desc(), c('作者', 'tweet author username。因为这些作者是 seed accounts，本身就是信号；我们暂时不把 engagement 当主指标。', 'm.author', '', 'handle'), c('created', 'tweet created_at，tweet 发布时间。配合时间窗看它是 24h、7d 还是 30d 内的信号。', 'm.created_at', '', 'date'), c('提及对象', '本地规则从 tweet 文本抽出的对象：@handle、hashtag、非 X 域名、GitHub repo URL、已知项目词。不是 LLM 实体识别，只是帮助快速扫原文。', 'm.mentioned_projects', '', 'projects'), detail()],
+      x_tweets: [rank('tweet 排名', 'X Tweets 当前时间范围里的展示顺序。切换 24h / 7d / 30d / 30d+ 会重新从 1 开始；它不是 engagement 排名。读这个 tab 重点看作者、原文和提及对象。'), name('Tweet'), desc(), c('作者', 'tweet author username。因为这些作者是 seed accounts，本身就是信号；我们暂时不把 engagement 当主指标。', 'm.author', '', 'handle'), c('created', 'tweet created_at，tweet 发布时间。配合当前时间范围看它是 24h、7d 还是 30d 内的信号。', 'm.created_at', '', 'date'), c('提及对象', '本地规则从 tweet 文本抽出的对象：@handle、hashtag、非 X 域名、GitHub repo URL、已知项目词。不是 LLM 实体识别，只是帮助快速扫原文。', 'm.mentioned_projects', '', 'projects'), detail()],
       settings_source_health: [rank('序号', 'Settings Source Health 的行号，只用于浏览运行状态。它不是 source 优先级，也不会影响采集顺序或 dashboard 排名。'), c('Source', 'pipeline adapter 名称，例如 github_search、hn_firebase、product_hunt。每个 adapter 对应一个外部数据源或一个数据抓取逻辑。', '$name'), desc(), c('状态', '最近一次该 adapter 的运行状态。正常表示无错误；注意可能是 disabled、API 错误、缺文件或可忽略的 optional source 失败。', 'm.status'), c('说明', '错误、禁用或状态备注。用于判断为什么某个 source 没数据；这不是项目信号。', 'm.note', 'desc'), c('默认节奏', '当前产品假设是每 24 小时跑一次完整 pipeline；现在还没有启用 cron，所以需要手动 run。', 'm.default_schedule'), c('生效规则', 'Settings 改动会写入 pipeline/config.json；下一次 pipeline run 才会使用新配置，当前已导出的 dashboard 不会自动刷新。', 'm.takes_effect'), detail()],
       settings_search_terms: [rank('序号', 'Settings Search Terms 的行号，只用于浏览配置项。它不是搜索词权重；是否抓取由“启用”和配置文件决定。'), c('设置项', '这个配置项的名字。Search Terms 里的行会真实影响抓取 query，不是宽泛的关注关键词。', '$name'), desc(), c('组', '这个 search term 属于哪个入口：GitHub Search、HN Algolia、npm Search 或 X keyword queries。不同组会调用不同 API。', 'm.group'), c('启用', '这个配置项当前是否启用。启用后下一次 pipeline run 会使用；关闭后不会抓对应 query。', 'm.enabled'), c('默认节奏', '当前产品假设是每 24 小时跑一次完整 pipeline；cron 还没启用。', 'm.default_schedule'), c('生效规则', '修改、增加、删除 search term 后，需要保存到 pipeline/config.json，并在下一次 pipeline run 才生效。', 'm.takes_effect'), detail()],
     };
@@ -4124,7 +4140,7 @@ def export_dashboard_v3(scored: list[dict[str, Any]], run_id: str, fetched_at: s
     const sortOptionsByChannel = {
       github_trending: [['native', '原生顺序', '$rank', 'asc'], ['period_stars', '窗口新增 star', 'm.period_stars', 'desc'], ['total_stars', '总 star', 'm.stars_total', 'desc'], ['name', '名称', '$name', 'asc']],
       github_movers_trending_repos: [['native', '原生顺序', '$rank', 'asc'], ['source_score', 'TR score', 'm.source_score', 'desc'], ['stars_velocity', 'star velocity', 'm.stars_velocity', 'desc'], ['forks_velocity', 'fork velocity', 'm.forks_velocity', 'desc'], ['freshness', 'freshness_bonus', 'm.freshness_bonus', 'desc'], ['stars_count', '总 star', 'm.stars_count', 'desc']],
-      github_movers_repofomo: [['native', 'FomoRank', '$rank', 'asc'], ['stars_7d', '7d 新增', 'm.stars_7d', 'desc'], ['stars_30d', '30d 新增', 'm.stars_30d', 'desc'], ['stars_60d', '60d 新增', 'm.stars_60d', 'desc'], ['stars_total', '总 star', 'm.stars_total', 'desc']],
+      github_movers_repofomo: [['native', '范围排名', '$rank', 'asc'], ['stars_7d', '7d 新增', 'm.stars_7d', 'desc'], ['stars_30d', '30d 新增', 'm.stars_30d', 'desc'], ['stars_60d', '60d 新增', 'm.stars_60d', 'desc'], ['stars_total', '总 star', 'm.stars_total', 'desc']],
       github_search: [['native', '搜索顺序', '$rank', 'asc'], ['stars', 'stars', 'm.stars', 'desc'], ['forks', 'forks', 'm.forks', 'desc'], ['open_issues', 'issues', 'r.open_issues_count', 'desc'], ['updated', 'updated', 'r.updated_at', 'desc']],
       hn_search: [['native', '搜索顺序', '$rank', 'asc'], ['points', 'points', 'm.points', 'desc'], ['comments', 'comments', 'm.comments', 'desc'], ['created', 'created', 'm.created_at', 'desc']],
       hn_top: [['native', '榜单顺序', '$rank', 'asc'], ['score', 'score', 'm.score', 'desc'], ['comments', 'comments', 'm.comments', 'desc'], ['created', 'created', 'm.created_at_unix', 'desc']],
@@ -4139,6 +4155,14 @@ def export_dashboard_v3(scored: list[dict[str, Any]], run_id: str, fetched_at: s
       x_tweets: [['native', 'tweet 顺序', '$rank', 'asc'], ['created', '发布时间', 'm.created_at', 'desc']],
       settings_source_health: [['native', '配置顺序', '$rank', 'asc'], ['status', '状态', 'm.status', 'asc']],
       settings_search_terms: [['native', '配置顺序', '$rank', 'asc'], ['group', '组', 'm.group', 'asc'], ['name', '名称', '$name', 'asc']],
+    };
+
+    const nativeRangeOptionsByChannel = {
+      github_movers_repofomo: [
+        {id: '7d', label: '7d', kind: 'metric', path: 'm.stars_7d', dir: 'desc', onlyPositive: true},
+        {id: '30d', label: '30d', kind: 'metric', path: 'm.stars_30d', dir: 'desc', onlyPositive: true},
+        {id: '60d', label: '60d', kind: 'metric', path: 'm.stars_60d', dir: 'desc', onlyPositive: true},
+      ],
     };
 
     function activeChannelGroup() { return activeSection === 'settings' ? settingsPanelDefs() : visibleSourceChannels(); }
@@ -4165,8 +4189,13 @@ def export_dashboard_v3(scored: list[dict[str, Any]], run_id: str, fetched_at: s
     }
     function currentState() {
       const defaultPageSize = Number(localStorage.getItem('heroRadarDefaultPageSize') || 100);
-      if (!channelState[active]) channelState[active] = {window: 'all', sort: 'native', sortDir: undefined, page: 1, pageSize: pageSizes.includes(defaultPageSize) ? defaultPageSize : 100};
-      return channelState[active];
+      if (!channelState[active]) channelState[active] = {window: undefined, sort: 'native', sortDir: undefined, page: 1, pageSize: pageSizes.includes(defaultPageSize) ? defaultPageSize : 100};
+      const state = channelState[active];
+      const ranges = availableRanges();
+      const rangeIds = ranges.map(range => range.id);
+      const defaultWindow = rangeIds.includes('24h') ? '24h' : rangeIds[0] || 'all';
+      if (!state.window || state.window === 'all' || (rangeIds.length && !rangeIds.includes(state.window))) state.window = defaultWindow;
+      return state;
     }
     function columnWidthKey() { return `heroRadarColumnWidths:${active}`; }
     function readColumnWidths() {
@@ -4239,13 +4268,49 @@ def export_dashboard_v3(scored: list[dict[str, Any]], run_id: str, fetched_at: s
     function channelRows() { return data.items.filter(item => item.channel === active); }
     function availableWindows() {
       const seen = new Set(channelRows().map(item => item.window || 'current'));
-      const order = ['24h', '7d', '30d', 'current', '7d+30d+60d'];
+      const order = ['24h', '7d', '30d', '30d+', '7d+30d+60d', 'current'];
       return [...seen].sort((a, b) => (order.indexOf(a) === -1 ? 99 : order.indexOf(a)) - (order.indexOf(b) === -1 ? 99 : order.indexOf(b)) || String(a).localeCompare(String(b)));
     }
-    function windowedRows() {
+    function availableRanges() {
+      if (nativeRangeOptionsByChannel[active]) return nativeRangeOptionsByChannel[active];
+      return availableWindows().map(value => ({id: value, label: value, kind: 'window', value}));
+    }
+    function selectedRangeOption() {
       const state = currentState();
-      const rows = channelRows();
-      return state.window === 'all' ? rows : rows.filter(item => (item.window || 'current') === state.window);
+      return availableRanges().find(range => range.id === state.window) || availableRanges()[0] || null;
+    }
+    function numericAt(item, path) {
+      const value = path?.startsWith('m.') ? meta(item, path.slice(2)) : val(item, path);
+      const num = Number(value);
+      return Number.isFinite(num) ? num : 0;
+    }
+    function rowMatchesRange(item) {
+      const range = selectedRangeOption();
+      if (!range) return true;
+      if (range.kind === 'metric') {
+        const num = numericAt(item, range.path);
+        return range.onlyPositive ? num > 0 : Number.isFinite(num);
+      }
+      return (item.window || 'current') === range.id;
+    }
+    function windowedRows() {
+      return channelRows().filter(rowMatchesRange);
+    }
+    function rangeRankValue(item) {
+      const range = selectedRangeOption();
+      if (!range || range.kind !== 'metric') return item.window_rank || item.source_rank || item.channel_rank;
+      const key = `${active}:${range.id}`;
+      if (!rangeRankCache[key]) {
+        const dir = range.dir || 'desc';
+        const rows = channelRows().filter(rowMatchesRange).sort((a, b) => {
+          const av = numericAt(a, range.path);
+          const bv = numericAt(b, range.path);
+          const diff = dir === 'asc' ? av - bv : bv - av;
+          return diff || Number(a.source_rank || a.channel_rank || 999999) - Number(b.source_rank || b.channel_rank || 999999);
+        });
+        rangeRankCache[key] = new Map(rows.map((row, index) => [String(row.item_id), index + 1]));
+      }
+      return rangeRankCache[key].get(String(item.item_id)) || item.source_rank || item.channel_rank;
     }
     function sortValue(item, path) {
       const value = val(item, path);
@@ -4454,9 +4519,15 @@ def export_dashboard_v3(scored: list[dict[str, Any]], run_id: str, fetched_at: s
       }
       controls.hidden = false;
       const state = currentState();
-      const windows = [['all', '全部'], ...availableWindows().map(w => [w, w])];
-      const windowButtons = windows.map(([value, label]) => `<button type="button" class="control-button ${state.window === value ? 'active' : ''}" data-control="window" data-value="${escapeText(value)}">${escapeText(label)}</button>`).join('');
-      controls.innerHTML = `<div class="control-group"><span class="control-label">时间窗</span>${windowButtons}</div>`;
+      const ranges = availableRanges();
+      if (ranges.length <= 1) {
+        controls.hidden = true;
+        controls.innerHTML = '';
+        return;
+      }
+      const label = nativeRangeOptionsByChannel[active] ? '原生范围' : '时间范围';
+      const windowButtons = ranges.map(range => `<button type="button" class="control-button ${state.window === range.id ? 'active' : ''}" data-control="window" data-value="${escapeText(range.id)}">${escapeText(range.label)}</button>`).join('');
+      controls.innerHTML = `<div class="control-group"><span class="control-label">${label}</span>${windowButtons}</div>`;
       controls.querySelectorAll('button').forEach(btn => {
         btn.onclick = () => {
           const control = btn.dataset.control;

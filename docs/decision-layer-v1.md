@@ -165,15 +165,21 @@ Seed the rules directly from `docs/benchmark-hermes-openclaw.md`
 ("High-Recall Closer-Look Rules"). Trigger families:
 
 ```text
-github_acceleration   star acceleration high, or backfilled 24h/7d velocity in high tail
-mover_board           Trending Repos rank/velocity thresholds; RepoFOMO window thresholds
+github                three independent GitHub sources (github_trending, trending_repos,
+                      repofomo), each its own threshold, OR-combined (section 4.5)
 package_family        npm daily downloads > 10k rising, or version/scoped-package burst in 24-48h
-hn                    >= 3 matching stories in 7d, or a story same-day as a github acceleration
+hn                    hn_algolia: >= 3 matching stories in 7d (per entity);
+                      hn_firebase: HN front page + score >= ~100, or same-day as a github accel
 product_hunt          launch with daily_rank <= 5 or clear launch metadata
 hugging_face          >= 2 matching resources in 48h, or 1 canonical resource same-day as another signal
 x_social              >= N distinct credible (seed-list) authors mention the entity in 7d,
                       or a 24h mention burst vs the prior baseline (see section 4.4)
 cross_source          any two weak signals from different source families within 48h
+
+discovery (not a level rule):
+github_search         widest net; feeds the entity universe + stargazers-backfill
+                      shortlist for off-board movers (section 4.8)
+excluded from v1:     pypi (benchmark: late/weak; kept for L3 explore only)
 ```
 
 Triggers are evaluated over the whole entity cluster (all alias rows), not per raw row.
@@ -186,17 +192,26 @@ sometimes split into several un-merged entities. If the level required multiple
 families to fire on one merged entity, every split fragment would fail. So:
 
 ```text
-The level is decided by ONE primary dimension (momentum), taken as the MAX over
-an entity's individual signals. A single source, single slice can reach Potential
-on its own. Aggregation / corroboration only adds confidence and priority; it is
+Each source has its OWN independent criterion on its OWN scale (sources differ;
+two GitHub boards are black boxes with different definitions). Each source casts a
+LEVEL vote (none/watch/potential/high) using its own thresholds. The entity level
+is the MAX over those LEVEL votes -- an ordinal max over comparable levels, NOT a
+max over incomparable raw numbers. Any single source reaching a band promotes the
+entity (OR semantics). Corroboration only adds confidence and priority; it is
 NEVER required to reach the base level.
 ```
 
+Why ordinal-max, not raw-number-max: MAX(a,b,c) >= T with one SHARED cutoff T is
+mathematically identical to "a>=T OR b>=T OR c>=T". That is fine, but using ONE
+shared cutoff across heterogeneous black-box metrics is wrong. So each source gets
+its OWN cutoff, the comparison becomes a per-source pass/fail -> level vote, and we
+max over the (comparable) level votes.
+
 ```text
-none            momentum below watch floor
-watch           momentum in watch band
-potential       momentum in potential band   (one signal is enough)
-high_potential  momentum in high band        (one strong signal is enough)
+none            no source votes above its watch threshold
+watch           some source votes watch
+potential       some source votes potential   (one source is enough)
+high_potential  some source votes high         (one source is enough)
 ```
 
 The exact momentum definition, normalization, and bands are in section 4.5 and
@@ -302,36 +317,55 @@ that the benchmark says fires before the (too-late) velocity peak.
 
 Starting proposal, to calibrate against the observation table:
 
+GitHub: THREE independent sources, each its own scale, OR-combined (do NOT compare
+their raw numbers). Calibrated and counted on the 2026-05-30 latest snapshot.
+
 ```text
-github_repo  (sourcing per section 4.7: free B-class fields first, stargazers
-              backfill only for the shortlist / off-board movers)
-  velocity criterion       stars_24h floor; benchmark anchor: Claude Code detection
-                           ~92 stars/hour (~2.2k/day). Set floor below the peak for
-                           recall, e.g. watch 300 / potential 1000 / high 3000 per 24h.
-                           Source: sparkline latest / RepoFOMO stars_7d/7 / Trending
-                           stars_today, else stargazers backfill.
-  acceleration criterion   recent rate >= K x trailing baseline for the SAME repo
-                           (K ~ 2). Anchored to the Hermes second-derivative lift
-                           (peak 0.6439 stars/hour^2) caught at ONSET, not the late
-                           velocity peak. Source: sparkline slope or r7>r30>r60
-                           (single snapshot), else stargazers backfill.
-                           Self-relative => quiet-day safe, no prior snapshot needed.
-mover_board (Trending Repos)
-                           daily_rank <= 100 OR monthly_rank <= 75 OR language_rank <= 30,
-                           with stars_velocity >= 150 or forks_velocity >= 50
-repofomo                   stars_7d >= 200 OR stars_30d >= 1000 OR stars_60d >= 5000 OR new_forks >= 100
-npm                        daily_downloads > 10k rising, OR >= 3 versions in 48h,
-                           OR >= 2 scoped packages of one family in 24h
-hn                         >= 3 matching stories in 7d, OR a story same-day as a github accel
-product_hunt               daily_rank <= 5
-hugging_face               >= 2 matching resources in 48h
-x_social                   credible_authors_7d >= N (open Q6), OR mention_acceleration burst
+github_trending   GitHub-native stars_today (transparent)
+                  watch >= 300 | potential >= 1000 | high >= 3000   (stars/24h)
+                  2026-05-30 hits: 19 / 3 / 0
+trending_repos    black-box stars_velocity (daily) + sparkline (7-pt) for accel
+                  watch >= 300 | potential >= 800 | high >= 2500     (its daily velocity)
+                  2026-05-30 hits: 55 / 20 / 2 ; accel = sparkline slope rising
+repofomo          black-box stars_7d -- a 7-day CUMULATIVE window, so it is laggy
+                  velocity: watch >= 200 (stars_7d); standalone TOPS OUT AT WATCH.
+                  potential ONLY if also accelerating now (r7>r30>r60).
+                  high >= 5000 (stars_7d). 2026-05-30 hits: 302 / (s7>=1000) 68 / 8
+                  -> RepoFOMO's threshold is the pool-size LEVER; held to
+                     watch-unless-accel keeps the pool sane.
+github_search     DISCOVERY only, NOT a level rule. Feeds the universe + the
+                  stargazers-backfill shortlist for off-board movers (section 4.8).
+precise github accel  for the backfill shortlist: 24h rate >= K x prior-6d daily
+                  rate (K ~ 2), from stargazers starred_at. Anchored to Hermes
+                  0.6439 stars/hour^2 at onset.
 ```
 
 ```text
-level bands: each criterion carries a watch / potential / high_potential absolute
-threshold in rules.json. All absolute, all benchmark-traceable, all versioned.
-entity level = the highest band reached by ANY of its signals (D4).
+OR-deduped GitHub pool on 2026-05-30 (per-source thresholds above):
+  watch 327 / potential 82 / high 10.
+  With RepoFOMO held watch-unless-accel, potential drops to ~20-40 (target size).
+  Benchmark check: NousResearch/hermes-agent = 1290 stars/day -> potential. OK.
+```
+
+Non-GitHub sources (each its own criterion; per-entity ones need Layer 0 first):
+
+```text
+npm           daily_downloads > 10k rising, OR >= 3 versions in 48h,
+              OR >= 2 scoped packages of one family in 24h. (strong parts need npm
+              API backfill; local npm_search only has weekly_downloads.)
+hn_algolia    >= 3 matching stories in 7d (per entity, needs L0)
+hn_firebase   on the HN front page (top/best) with score >= ~100, OR any front-page
+              story same-day as a GitHub accel. (NEW; see section 4.8 gap 2.)
+product_hunt  daily_rank <= 5
+hugging_face  >= 2 matching resources in 48h (per entity, needs L0)
+x_social      credible_authors_7d >= N (open Q6), OR mention_acceleration burst
+pypi          EXCLUDED from v1 triggers (benchmark: late/weak); kept for L3 explore.
+```
+
+```text
+level bands: each source carries its own watch / potential / high_potential
+threshold in rules.json. All absolute, benchmark-traceable, versioned. Entity
+level = the highest LEVEL VOTE across its sources (section 4.2 ordinal max).
 ```
 
 Still open (Q-c): whether ecosystem-echo sources (e.g. HF derivative resources)
@@ -422,6 +456,54 @@ evaluation windows (P1/P4 decided)
 Caveat (benchmark): B-class board fields and sparkline are snapshot_only. They are
 used going forward, absence must never count against a candidate, and they are not
 claimed as historical replay.
+
+### 4.8 Source coverage and gaps (DECIDED)
+
+Audit of every source we already collect vs whether a rule covers it.
+
+```text
+source              data   rule          role
+github_trending     yes    yes           github main axis
+trending_repos      yes    yes           github main axis (black box)
+repofomo            yes    yes           github main axis (black box, pool lever)
+hn_algolia          yes    yes (L0)      hn family (story-count per entity)
+huggingface x3      yes    yes           hf family
+npm_search          yes    partial       strong parts need npm API backfill
+product_hunt        yes    yes           weak corroboration
+x_tweets            yes    yes (L0)      x_social
+github_search       yes    NO  -> gap 1
+hn_firebase         yes    NO  -> gap 2
+pypi newest/updates yes    NO  -> gap 3
+x_seed_accounts     yes    n/a           it is the monitoring list (config), not a signal
+```
+
+Decisions:
+
+```text
+gap 1  github_search -- DO (early-discovery backbone)
+  Only has stars_total (point-in-time), so NO level rule. Its value: the widest
+  net, the only way to catch a repo NOT yet on any black-box board. Role:
+    a) the entity universe; b) the off-board stargazers-backfill shortlist
+       (section 4.7): "created within N days AND stars >= X AND not on any board"
+       -> enqueue for stargazers backfill.
+  This is how an OpenClaw-style pre-board mover is caught early.
+
+gap 2  hn_firebase -- DO (strong and cheap)
+  HN front page (top/new/best) with score, distinct from hn_algolia search.
+  Front-page presence + score >= ~100 is a strong "happening now" signal, and the
+  story URL resolves to a GitHub repo via L0. Added as a rule in the hn family
+  (section 4.5).
+
+gap 3  pypi -- SKIP for v1
+  Benchmark: PyPI is late/not-useful for both calibration cases. No standalone
+  trigger in v1. Keep raw data for L3 explore and as a possible weak ecosystem-echo
+  later.
+```
+
+Reframe: the black-box boards only cover repos that ALREADY ranked = confirmation.
+Early recall comes from github_search discovery + event sources (hn_firebase / npm
+/ HF / X) + stargazers backfill. So github_search is the early-discovery entry, not
+an uncovered edge case.
 
 ## 5. LLM Harness and Providers
 
@@ -643,23 +725,66 @@ Note: Human Status (section 8 item 3) is now PER-ACCOUNT. The radar level/priori
 ## 10. UI
 
 Hosted web app behind invite-only auth. All API endpoints are authenticated and
-carry the user_id; the radar data they read is global, the state they write
-(status, chat, feedback) is per-account.
+carry the user_id; the radar data they read is GLOBAL, the state they write
+(status, chat, feedback) is PER-ACCOUNT.
+
+Core stance: make the deterministic reasoning legible and the daily review fast.
+
+### 10.1 Principles
 
 ```text
-Tab: Daily Feed     GET /api/feed            (global feed; per-user status overlay)
-  today_focus / secondary / backlog
-  per card: level, fired families, DeepSeek priority + thesis,
-            evidence chips, caveats, actions (open source, deep-dive, mark noise,
-            promote, watch)  -- actions write per-account human_status
-
-Tab: Explore Agent  POST /api/chat           (per-account session + quota)
-  free-form agent over ALL collected data (not only the pool); read-only tools by
-  default, propose-only for rule/prompt edits. Same agent is exposed over an
-  authenticated HTTP API for external callers; CLI/MCP are thin wrappers (section 7).
+P-a  Ranked feed. Default = the full pool ranked by LLM Priority. Per-account
+     human_status (unreviewed / watching / dismissed) and "new / moved-up since
+     last visit" are FILTERS and markers on top of the ranked list, not the frame.
+P-b  Three numbers stay visually SEPARATE on every card (section 8): Level badge
+     (rule), Priority chip (LLM), Status (you). Never one blended score.
+P-c  Card = scannable; Drawer = full evidence. One click from any item to the
+     deterministic evidence that reconstructs "why in pool".
+P-d  L0 imperfection is visible and correctable in the UI; corrections feed the
+     proposal / feedback loop.
 ```
 
-The existing source-native tabs stay as-is.
+### 10.2 Navigation: four peer top-level entries
+
+```text
+1. Feed                  GET /api/feed   (global ranked feed + per-user status overlay)
+   flat list ranked by LLM Priority; buckets today_focus / secondary / backlog.
+   filters/markers: New, Moved-up, Unreviewed, Watching (per-account human_status).
+   card: name, canonical entity, Level badge, LLM Priority chip, one-line thesis,
+         evidence chips ("GH +1290/d", "HN front page 142", "npm 70k/d"),
+         source-family icons, Human Status.
+   actions: open source, deep-dive in chat, mark noise, promote, watch
+         -> write per-account human_status / feedback_events.
+   -> Project Drawer  GET /api/entity/{id}: per-source LEVEL-VOTE table with raw
+      numbers + source links (the evidence), full DeepSeek analysis, velocity-over-
+      time, alias pack + merge confidence (L0 visible), evidence_rows, "deep-dive
+      with chatbot" (carries entity context).
+
+2. Explore               POST /api/chat  (per-account session + quota)
+   free-form agent over ALL collected data (not only the pool); read-only tools by
+   default, propose-only for rule/prompt edits. Same agent exposed over an
+   authenticated HTTP API for external callers; CLI is a thin wrapper (section 7).
+
+3. Sources               the existing source-native dashboard (each source's own
+   facts/ranks/links). A first-class peer entry for raw inspection / transparency.
+
+4. Settings              global config + governance + account:
+   - monitored universe (config.json: sources, queries, seed accounts) -- v1 all-admin
+   - rules / prompts: current version, chat-proposed diffs, run benchmark replay,
+     approve -> new version (section 7.3 / 14 H3)
+   - LLM provider / model choice (section 5)
+   - account, quota / usage view
+```
+
+### 10.3 Decided UI choices
+
+```text
+F1  Frontend = small SPA (React + Vite).
+F2  Feed = flat ranked-by-Priority list; human_status (new / moved-up / unreviewed
+    / watching) are filters and markers, NOT the primary frame.
+F3  Nav = Feed | Explore | Sources | Settings, four peer entries. Sources (the raw
+    dashboard) is a first-class peer, not buried; Settings is the fourth.
+```
 
 ## 11. Benchmark as Regression, Not Goal
 
@@ -730,11 +855,16 @@ P4  cadence = one full run per day.
 
 Metric design (section 4.5):
 Q-a  RESOLVED: velocity and acceleration are two independent criteria (D1), not a
-     blend. Remaining: calibrate the exact numbers against the observation table
-     (docs/benchmark-hermes-openclaw-observation-table.md), and confirm the
-     acceleration form (self-relative speed-up, K ~ 2).
-Q-b  RESOLVED: absolute benchmark floors gate membership (D2); percentile is
-     ranking-only and optional (D3). Quiet days produce a small/empty pool.
+     blend. Per-source independent thresholds, OR-combined; level = ordinal max of
+     per-source level votes (section 4.2), NOT a max of raw black-box numbers.
+Q-b  RESOLVED: absolute thresholds gate membership (D2); percentile ranking-only (D3).
+Q-d  RESOLVED (calibrated on 2026-05-30): GitHub three-source thresholds and counts
+     in section 4.5. RepoFOMO stars_7d is the pool-size lever -> held watch-unless-
+     accelerating. Remaining: calibrate npm / hn / hf / x_social thresholds once
+     Layer 0 and backfill exist (they need per-entity grouping / API backfill).
+Q-e  RESOLVED (section 4.8 source coverage): github_search = discovery + backfill
+     shortlist (no level rule); hn_firebase = new HN front-page rule; pypi excluded
+     from v1.
 Q-c  OPEN: do ecosystem-echo sources (e.g. HF derivative resources) get a
      per-source max_level cap so they cannot reach high_potential alone?
      User undecided; to discuss.
