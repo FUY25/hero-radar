@@ -143,15 +143,6 @@ def actor_flavor(actor_id: str) -> str:
     return "fastdata"
 
 
-def since_date_to_datetime(value: str | None, fallback_days: int) -> dt.datetime:
-    if value:
-        try:
-            return dt.datetime.fromisoformat(value).replace(tzinfo=dt.timezone.utc)
-        except Exception:
-            pass
-    return utc_now() - dt.timedelta(days=fallback_days)
-
-
 def build_input(
     config: dict[str, Any],
     actor_id: str,
@@ -167,7 +158,7 @@ def build_input(
     include_retweets = bool(settings.get("include_retweets", True))
     flavor = actor_flavor(actor_id)
     if flavor == "kaito":
-        since_dt = since_date_to_datetime(since_date, since_days)
+        since_dt = utc_now() - dt.timedelta(days=since_days)
         until_dt = utc_now() + dt.timedelta(hours=1)
         filters: list[str] = []
         if not include_replies:
@@ -579,12 +570,15 @@ def export(
     include_replies: bool = True,
     include_retweets: bool = True,
     max_tweets_per_author: int | None = None,
+    max_tweet_age_hours: float | None = None,
     max_newest_age_hours: float | None = None,
 ) -> bool:
     RAW_DIR.mkdir(parents=True, exist_ok=True)
     EXPORT_DIR.mkdir(parents=True, exist_ok=True)
     now = utc_now()
     tweets = normalize_tweets(raw_rows, now, include_replies=include_replies, include_retweets=include_retweets)
+    if max_tweet_age_hours is not None:
+        tweets = [tweet for tweet in tweets if float(tweet.get("age_hours") or 0) <= max_tweet_age_hours]
     tweets = cap_tweets_per_author(tweets, max_tweets_per_author)
 
     raw_path = RAW_DIR / f"x_tweets_{run_id}.json"
@@ -606,6 +600,7 @@ def export(
             "include_replies": include_replies,
             "include_retweets": include_retweets,
             "max_tweets_per_author": max_tweets_per_author,
+            "max_tweet_age_hours": max_tweet_age_hours,
             "newest_created_at": iso(newest_created) if newest_created else None,
             "newest_age_hours": round(newest_age_hours, 2) if newest_age_hours is not None else None,
             "max_newest_age_hours": max_newest_age_hours,
@@ -642,6 +637,7 @@ def export(
         "include_replies": include_replies,
         "include_retweets": include_retweets,
         "max_tweets_per_author": max_tweets_per_author,
+        "max_tweet_age_hours": max_tweet_age_hours,
         "items": tweets,
         "mentions": mentions,
     }
@@ -715,7 +711,6 @@ def main() -> int:
         raw_rows = fetch_dataset_items(args.dataset_id, token)
         run = fetch_run(args.apify_run_id, token) if args.apify_run_id else None
         if run:
-            actor_id = str(run.get("actId") or actor_id)
             input_payload = fetch_kv_json(str(run.get("defaultKeyValueStoreId") or ""), "INPUT", token) or payload
             started_at = parse_tweet_time(run.get("startedAt")) or utc_now()
             run_id = iso(started_at).replace(":", "").replace("-", "")
@@ -733,6 +728,7 @@ def main() -> int:
             include_replies=bool(settings.get("include_replies", False)),
             include_retweets=bool(settings.get("include_retweets", True)),
             max_tweets_per_author=args.per_account,
+            max_tweet_age_hours=args.since_days * 24.0,
             max_newest_age_hours=max_newest_age_hours,
         )
         return 0 if ok else 3
@@ -761,6 +757,7 @@ def main() -> int:
         include_replies=bool(settings.get("include_replies", False)),
         include_retweets=bool(settings.get("include_retweets", True)),
         max_tweets_per_author=args.per_account,
+        max_tweet_age_hours=args.since_days * 24.0,
         max_newest_age_hours=max_newest_age_hours,
     )
     if not ok:

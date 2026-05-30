@@ -29,6 +29,11 @@ Non-goals and explicit reframes:
   The LLM explains, ranks, and proposes; it never silently changes production logic.
 ```
 
+Deployment target (changed from the personal-local assumption in product-spec-v0.7):
+this is now a HOSTED, multi-account web app, invite-only. The radar data is GLOBAL
+(one shared copy for all accounts); multi-tenancy is a thin per-account overlay.
+See section 14 for the full hosting and multi-tenancy model.
+
 ## 1. Shape
 
 ```text
@@ -442,11 +447,20 @@ Tier 2  Agentic harness (tool-using, model-swappable). ONE shared architecture,
 
   2b  Explore agent (flexible)
       Backs Layer 3. Broad tool set over ALL collected data, multi-step,
-      free-form, higher autonomy. Also the externally-callable surface
-      (CLI-first, section 7).
+      free-form, higher autonomy. Externally callable over an authenticated
+      HTTP API (section 7; the local CLI is a thin wrapper around it).
 
   Both share the harness and tool registry; they differ in tool scope, autonomy,
   and output contract. Model is swappable (DeepSeek / Claude / others) on both.
+
+  Framework choice (recommendation): a thin self-written tool-loop over a provider
+  abstraction (LiteLLM-style) for model-swap; NOT LangGraph, NOT the DeepSeek SDK
+  as a framework. The one genuinely code-heavy capability (2b "explain / search OUR
+  code") is delegated to a coding agent used as a single tool. In hosted mode this
+  tool runs IN-PROCESS via the Claude Agent SDK (or an API-based file-reading tool
+  over a server-side repo checkout); it does NOT shell out to a local coding CLI
+  per request (that does not isolate or scale on a shared server). 2a needs only
+  github API + web-fetch + DB tools, no coding agent.
 
 Hard rule: Layer 0 Stage A and Layer 1 import nothing from either tier. They are
 LLM-free and fully deterministic.
@@ -592,42 +606,57 @@ Keep these three independent. Mixing them makes the system undebuggable.
 
 ## 9. Storage
 
-New tables only. Do not alter existing `items / scores / snapshots / settings`.
+Hosted target: Postgres (multi-account concurrency + pipeline-write/user-read).
+SQLite stays usable for local dev. Tables split into GLOBAL (one shared copy,
+written by the daily pipeline) and PER-ACCOUNT (keyed by user_id). See section 14.
 
 ```text
-entities                cluster id, canonical_entity, canonical_key, key_type, first_seen
-alias_links             entity_id, source, external_id/handle, confidence, origin (stageA/stageB), approved
-entity_merge_proposals  Stage B LLM proposals (orphan, target, confidence, reason, status)
-potential_candidates    entity_id, run_id, level, fired_families_json, first_trigger_at
-entity_mentions         entity_id, window (7d/24h), distinct_authors, credible_authors,
-                        mention_count, mention_acceleration, run_id (X social aggregates, section 4.4)
-evidence_rows           per section 4.3
-daily_feed              run_id, entity_id, bucket, priority, analysis_id
-rule_versions           version, rules_json, created_at, note
-prompt_versions         version, kind, prompt_text, created_at, note
-rule_proposals          diff, rationale, status, created_from_feedback
-prompt_proposals        diff, rationale, status
-feedback_events         user feedback that triggered a proposal
+GLOBAL (shared radar; cost does not scale with users)
+  entities                cluster id, canonical_entity, canonical_key, key_type, first_seen
+  alias_links             entity_id, source, external_id/handle, confidence, origin, approved
+  entity_merge_proposals  Stage B LLM proposals (orphan, target, confidence, reason, status)
+  potential_candidates    entity_id, run_id, level, fired_families_json, first_trigger_at
+  entity_mentions         entity_id, window (7d/24h), distinct_authors, credible_authors,
+                          mention_count, mention_acceleration, run_id (section 4.4)
+  evidence_rows           per section 4.3
+  daily_feed              run_id, entity_id, bucket, priority, analysis_id
+  rule_versions           version, rules_json, created_at, author, note   (v1: global, any admin)
+  prompt_versions         version, kind, prompt_text, created_at, author, note
+  rule_proposals          diff, rationale, status, created_from_feedback
+  prompt_proposals        diff, rationale, status
+
+PER-ACCOUNT (multi-tenant, keyed by user_id)
+  accounts                id, email, invite/auth, role, created_at
+  sessions                auth/session tokens
+  chat_sessions           user_id, messages, created_at (L3 history)
+  human_status            user_id, entity_id, status (watch/dismiss/promote/...)  (was global in §8)
+  feedback_events         user_id, payload, created_at
+  saved_views             user_id, config
+  usage_quota             user_id, llm_calls, tokens, window (per-account metering for L3)
 ```
 
-Reuse `analyses` for the LLM analysis text/judgment.
+Reuse `analyses` (global) for the LLM analysis text/judgment.
+
+Note: Human Status (section 8 item 3) is now PER-ACCOUNT. The radar level/priority
+(items 1-2) stay GLOBAL.
 
 ## 10. UI
 
-Reuse the existing dashboard v3 generator. Add two tabs that fetch from new
-endpoints:
+Hosted web app behind invite-only auth. All API endpoints are authenticated and
+carry the user_id; the radar data they read is global, the state they write
+(status, chat, feedback) is per-account.
 
 ```text
-Tab: Daily Feed     GET /api/feed
+Tab: Daily Feed     GET /api/feed            (global feed; per-user status overlay)
   today_focus / secondary / backlog
   per card: level, fired families, DeepSeek priority + thesis,
             evidence chips, caveats, actions (open source, deep-dive, mark noise,
-            promote, watch)
+            promote, watch)  -- actions write per-account human_status
 
-Tab: Explore Agent  POST /api/chat
+Tab: Explore Agent  POST /api/chat           (per-account session + quota)
   free-form agent over ALL collected data (not only the pool); read-only tools by
-  default, propose-only for rule/prompt edits. Same harness is also exposed as an
-  MCP / agent endpoint for external callers (section 7).
+  default, propose-only for rule/prompt edits. Same agent is exposed over an
+  authenticated HTTP API for external callers; CLI/MCP are thin wrappers (section 7).
 ```
 
 The existing source-native tabs stay as-is.
@@ -709,4 +738,68 @@ Q-b  RESOLVED: absolute benchmark floors gate membership (D2); percentile is
 Q-c  OPEN: do ecosystem-echo sources (e.g. HF derivative resources) get a
      per-source max_level cap so they cannot reach high_potential alone?
      User undecided; to discuss.
+```
+
+## 14. Hosting and Multi-Tenancy (DECIDED)
+
+Deployment is a hosted web app. Decisions taken:
+
+```text
+H1  Universe = GLOBAL (option A). Every account sees the SAME radar: one shared
+    config.json, one set of sources/queries, ONE daily pipeline run for everyone.
+    Pipeline + Potential pool + feed cost is a constant, it does NOT scale with
+    the number of users. (Per-account custom monitoring was option B; rejected
+    for v1 because it would make the pipeline run per-account and cost O(users).)
+H2  Signup = invite-only. No open registration in v1.
+H3  Rule/prompt governance:
+      v1: every account is admin and edits the GLOBAL rules/prompts (shared).
+      v2: each user can edit their OWN version (per-account fork of rules/prompts).
+    So rule_versions/prompt_versions are global in v1; v2 adds an optional
+    user_id-scoped overlay.
+```
+
+Global vs per-account split (the core of cheap multi-tenancy):
+
+```text
+GLOBAL (one copy, daily pipeline writes, all accounts read):
+  all radar data + analysis + rules/prompts (see section 9 GLOBAL block).
+  The expensive work (collection, entity resolution, Potential, L2 feed) runs
+  ONCE per day server-side. Cost independent of user count.
+
+PER-ACCOUNT (keyed by user_id):
+  auth/session, chat history, human_status, feedback, saved views, usage quota
+  (see section 9 PER-ACCOUNT block). This is a thin overlay on the global radar.
+```
+
+Cost model:
+
+```text
+- L0 / L1 / L2 (pipeline + feed): GLOBAL, once/day. Constant cost.
+- L3 chat: PER-USER, interactive. Cost ~ active users x usage.
+  -> per-account usage_quota / rate limiting is a HARD requirement (section 9).
+- System holds the API keys (DeepSeek / GitHub / etc.) server-side; users do not
+  bring their own in v1. Quotas, not per-user keys, control spend.
+```
+
+Stack changes from the personal-local assumption:
+
+```text
+- DB:        SQLite -> Postgres (SQLite stays for local dev).
+- Backend:   the 159-line http.server toy -> a real web framework (FastAPI/Flask)
+             + ASGI server, auth middleware, per-account session + quota.
+- Pipeline:  local manual run -> a server-side scheduled job (one global daily run)
+             + a worker; users read the latest completed run_id.
+- External:  the Layer 3 agent is callable over an AUTHENTICATED HTTP API.
+             The local CLI and any future MCP are thin wrappers over that API
+             (flips the earlier "CLI-first" note, which assumed local single-user).
+- Secrets:   .env on a laptop -> server-side secret management.
+```
+
+What does NOT change from hosting:
+
+```text
+The entire deterministic core (L0 Stage A, L1, momentum, section 4.7 temporal
+model, sparkline sourcing, rules.json structure), the metric design (4.5/4.7),
+the benchmark calibration, the provider abstraction / model-swap, and the 0/1/2/3
+layering are all unaffected. They were already global batch computation.
 ```

@@ -1745,6 +1745,73 @@ def channel_label(channel: str) -> str:
     }.get(channel, channel)
 
 
+def channel_description(channel: str) -> str:
+    return {
+        "github_trending": (
+            "来源：GitHub Trending 网页。口径：按 GitHub 自己的 daily / weekly / monthly trending 页面抓 repo、描述、语言、总 star、"
+            "以及页面显示的 stars today / this week / this month。怎么看：适合看 GitHub 官方趋势榜上的项目；注意它不是全量 GitHub star 速度榜。"
+        ),
+        "github_movers_trending_repos": (
+            "来源：trending-repos.com。口径：抓它的 daily / weekly / monthly momentum 榜，保留 repo、描述、总 star/fork、"
+            "scoreComponents 里的 starsVelocity / forksVelocity / freshnessBonus 和 sparkline。怎么看：这是当前最接近“star 动量/曲线形状”的 GitHub 外部榜。"
+        ),
+        "github_movers_repofomo": (
+            "来源：RepoFOMO leaderboard。口径：抓公开榜单里的 FomoRank、repo、总 star、7d / 30d / 60d 新增 star、age 等字段。"
+            "怎么看：适合补周级/月级 movers，尤其是已经脱离当天 GitHub Trending 但仍在增长的 repo。"
+        ),
+        "github_search": (
+            "来源：GitHub Search API。口径：按 Settings 里的 query 抓 repository search，目前按 stars desc 请求，保留 star、fork、topics、创建/更新时间、README 描述等 API 字段。"
+            "怎么看：这是主动关注关键词入口，不是自动 trending；query 设得好坏会直接影响结果。"
+        ),
+        "hn_search": (
+            "来源：HN Algolia API。口径：按 Settings 里的 query 和 24h / 7d / 30d 窗口搜索 story，保留 points、comments、author、created_at、story_text/highlight 等字段。"
+            "怎么看：适合看某个概念或关键词在 HN 上是否刚被讨论。"
+        ),
+        "hn_top": (
+            "来源：Hacker News Firebase API。口径：抓 topstories / newstories / beststories 的前 N 条，保留 score、descendants/comments、author、HN item 链接。"
+            "怎么看：这是 HN 全站热榜/新榜信号，当前不做 AI 过滤。"
+        ),
+        "product_hunt": (
+            "来源：Product Hunt GraphQL API。口径：按 VOTES 请求 posts，保留 votesCount、commentsCount、dailyRank、weeklyRank、createdAt、featuredAt、website/tagline。"
+            "怎么看：偏 launch/消费产品信号，通常比 GitHub/HN 更产品化，但也更容易受 launch 节奏影响。"
+        ),
+        "huggingface_models": (
+            "来源：Hugging Face API models?sort=trendingScore。口径：保留 HF 原生 trendingScore、likes、downloads、pipeline_tag、tags、created/modified。"
+            "怎么看：模型资源趋势；当前默认不放主 dashboard，因为目标更偏产品应用层。"
+        ),
+        "huggingface_datasets": (
+            "来源：Hugging Face API datasets?sort=trendingScore。口径：保留 HF 原生 trendingScore、likes、downloads、tags、created/modified。"
+            "怎么看：数据集趋势；当前默认不放主 dashboard，因为目标更偏产品应用层。"
+        ),
+        "huggingface_spaces": (
+            "来源：Hugging Face API spaces?sort=trendingScore。口径：保留 HF 原生 trendingScore、likes、sdk、tags、created/modified。"
+            "怎么看：比 models/datasets 更接近可体验产品 demo，但仍是 HF 平台内趋势。"
+        ),
+        "npm_search": (
+            "来源：npm registry search API。口径：按 Settings 里的 query 搜包，保留 weekly/monthly downloads、searchScore、quality/popularity/maintenance、links、keywords。"
+            "怎么看：适合发现 JS/TS 生态里新工具包或 agent/MCP 相关依赖，不代表产品本身已经出圈。"
+        ),
+        "pypi_newest": (
+            "来源：PyPI 官方 newest packages RSS，并对前 N 条用 PyPI JSON API enrich。口径：RSS 顺序代表新发布，额外保留 summary、classifiers、project_urls、requires_python。"
+            "怎么看：适合扫刚发布的 Python 包；不是下载量或增长榜。"
+        ),
+        "pypi_updates": (
+            "来源：PyPI 官方 latest updates RSS，并对前 N 条用 PyPI JSON API enrich。口径：RSS 顺序代表最近更新，额外保留 latest version、classifiers、project_urls 等。"
+            "怎么看：适合发现近期活跃维护的 Python 包；更新频繁不等于产品机会。"
+        ),
+        "x_tweets": (
+            "来源：Apify X actor 抓 seed 个人账号 tweets。口径：当前抓 50 个 AI 相关个人账号，最近 30 天，每人最多 30 条，排除 replies；dashboard 按 24h / 7d / 30d 展示。"
+            "怎么看：重点读谁说了什么、提到哪些项目或链接；不把 engagement/views 当主指标。"
+        ),
+        "x_seed_accounts": (
+            "来源：你的 X following 候选池和手动 seed list。口径：筛 AI 相关个人账号，去掉官方账号，按 followers_count 等字段排序。"
+            "怎么看：这是 X Monitoring 的账号池配置，不是项目榜。"
+        ),
+        "settings_source_health": "Settings 内部页：展示每个 adapter 本轮是否成功、错误信息、disabled 状态和 token/API 配置情况。",
+        "settings_search_terms": "Settings 内部页：展示 GitHub/HN/npm/X keyword queries 等搜索词配置；修改后保存，并在下一次 pipeline run 生效。",
+    }.get(channel, f"来源：{channel_label(channel)}。口径：当前没有专门说明，按该 source 的原始返回顺序和字段展示。")
+
+
 def native_metric(row: sqlite3.Row, metadata: dict[str, Any]) -> dict[str, Any]:
     source = row["source"]
     if source == "github_trending":
@@ -3031,22 +3098,22 @@ def export_dashboard_v3(scored: list[dict[str, Any]], run_id: str, fetched_at: s
         window_counts[window] = window_counts.get(window, 0) + 1
 
     channels = [
-        {"id": channel, "label": channel_label(channel), "count": channel_counts[channel]}
+        {"id": channel, "label": channel_label(channel), "count": channel_counts[channel], "description": channel_description(channel)}
         for channel in CHANNEL_ORDER
         if channel in channel_counts and channel not in SOURCE_DASHBOARD_HIDDEN_CHANNELS
     ]
     channels.extend(
-        {"id": channel, "label": channel_label(channel), "count": count}
+        {"id": channel, "label": channel_label(channel), "count": count, "description": channel_description(channel)}
         for channel, count in sorted(channel_counts.items())
         if channel not in CHANNEL_ORDER and channel not in SOURCE_DASHBOARD_HIDDEN_CHANNELS and channel not in SETTINGS_CHANNELS
     )
     settings_channels = [
-        {"id": channel, "label": channel_label(channel), "count": channel_counts[channel]}
+        {"id": channel, "label": channel_label(channel), "count": channel_counts[channel], "description": channel_description(channel)}
         for channel in SETTINGS_CHANNEL_ORDER
         if channel in channel_counts and channel in SETTINGS_CHANNELS
     ]
     settings_channels.extend(
-        {"id": channel, "label": channel_label(channel), "count": count}
+        {"id": channel, "label": channel_label(channel), "count": count, "description": channel_description(channel)}
         for channel, count in sorted(channel_counts.items())
         if channel not in SETTINGS_CHANNEL_ORDER and channel in SETTINGS_CHANNELS
     )
@@ -3252,7 +3319,47 @@ def export_dashboard_v3(scored: list[dict[str, Any]], run_id: str, fetched_at: s
       border-radius: 0;
       box-shadow: var(--shadow);
     }
-    .channel-tabs button { padding: 5px 8px; font-size: 13px; }
+    .channel-tabs button { padding: 5px 8px; font-size: 13px; position: relative; }
+    .channel-tabs button[data-tip]::after {
+      content: attr(data-tip);
+      display: none;
+      position: absolute;
+      left: 0;
+      top: calc(100% + 8px);
+      width: min(420px, calc(100vw - 48px));
+      padding: 9px 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--tip-bg);
+      color: var(--tip-text);
+      box-shadow: var(--shadow);
+      white-space: normal;
+      text-align: left;
+      line-height: 1.45;
+      font-size: 12px;
+      font-weight: 400;
+      z-index: 50;
+      pointer-events: none;
+    }
+    .channel-tabs button[data-tip]::before {
+      content: "";
+      display: none;
+      position: absolute;
+      left: 14px;
+      top: calc(100% + 3px);
+      width: 9px;
+      height: 9px;
+      background: var(--tip-bg);
+      border-left: 1px solid var(--line);
+      border-top: 1px solid var(--line);
+      transform: rotate(45deg);
+      z-index: 51;
+      pointer-events: none;
+    }
+    .channel-tabs button[data-tip]:hover::after,
+    .channel-tabs button[data-tip]:focus-visible::after,
+    .channel-tabs button[data-tip]:hover::before,
+    .channel-tabs button[data-tip]:focus-visible::before { display: block; }
     body.rail-collapsed .rail { padding: 12px 6px; overflow-x: hidden; }
     body.rail-collapsed .rail-head {
       flex-direction: column;
@@ -4257,6 +4364,10 @@ def export_dashboard_v3(scored: list[dict[str, Any]], run_id: str, fetched_at: s
         const btn = document.createElement('button');
         btn.className = channel.id === active ? 'active' : '';
         btn.textContent = channel.label;
+        if (channel.description) {
+          btn.dataset.tip = channel.description;
+          btn.setAttribute('aria-label', `${channel.label}: ${channel.description}`);
+        }
         btn.onclick = () => {
           activeSource = channel.id;
           active = activeSource;
