@@ -1,0 +1,245 @@
+{
+  "min_velocity_hours": 1,
+  "leaderboard_windows": [
+    "24h",
+    "7d",
+    "30d"
+  ],
+  "github_trending": {
+    "periods": [
+      "daily",
+      "weekly",
+      "monthly"
+    ],
+    "languages": [
+      "",
+      "python",
+      "typescript",
+      "javascript",
+      "go",
+      "rust"
+    ]
+  },
+  "github_search": {
+    "per_page": 100,
+    "max_results_per_query": 500,
+    "queries": [
+      {
+        "label": "agent",
+        "query": "agent stars:>20"
+      },
+      {
+        "label": "topic:ai",
+        "query": "topic:ai stars:>20"
+      }
+    ]
+  },
+  "github_movers": {
+    "enabled": true,
+    "trending_repos": {
+      "enabled": true,
+      "url": "https://trending-repos.com/",
+      "periods": [
+        "daily",
+        "weekly",
+        "monthly"
+      ],
+      "limit_per_period": 500
+    },
+    "repofomo": {
+      "enabled": true,
+      "data_url": "https://repofomo.com/data.js",
+      "limit": 500
+    }
+  },
+  "hn": {
+    "algolia_queries": [
+      {
+        "label": "agent",
+        "query": "agent"
+      }
+    ],
+    "algolia_windows": {
+      "24h": 1,
+      "7d": 7,
+      "30d": 30
+    },
+    "algolia_hits_per_page": 500,
+    "firebase_lists": [
+      "topstories",
+      "newstories",
+      "beststories"
+    ],
+    "firebase_limit": 100,
+    "firebase_workers": 12
+  },
+  "product_hunt": {
+    "enabled": true,
+    "first": 100
+  },
+  "huggingface": {
+    "resources": [
+      "models",
+      "datasets",
+      "spaces"
+    ],
+    "limit": 200
+  },
+  "npm": {
+    "enabled": true,
+    "size": 100,
+    "sleep_seconds": 0.5,
+    "queries": [
+      {
+        "label": "agent",
+        "query": "agent"
+      },
+      {
+        "label": "ai agent",
+        "query": "ai agent"
+      },
+      {
+        "label": "mcp",
+        "query": "mcp"
+      },
+      {
+        "label": "claude",
+        "query": "claude"
+      },
+      {
+        "label": "workflow automation",
+        "query": "workflow automation"
+      }
+    ]
+  },
+  "pypi": {
+    "enabled": true,
+    "feeds": [
+      "newest",
+      "updates"
+    ],
+    "limit_per_feed": 200,
+    "json_enrich_limit_per_feed": 40,
+    "json_sleep_seconds": 0.2
+  },
+  "apify": {
+    "enabled": false,
+    "max_results_per_run": 100,
+    "actors_under_consideration": [
+      "kaitoeasyapi/twitter-x-data-tweet-scraper-pay-per-result-cheapest",
+      "scraperx/twitter-user-following-scraper",
+      "brilliant_gum/twitter-followers-scraper",
+      "patient_discovery/twitter-followings",
+      "logiover/product-hunt-daily-launches-scraper"
+    ],
+    "x_following": {
+      "actor_id": "api-ninja/x-twitter-followers-scraper",
+      "source_accounts": [
+        "fu_yuming/following"
+      ],
+      "max_results": 600,
+      "top_n": 100,
+      "use_apify_proxy": true
+    },
+    "x_seed_from_following": {
+      "enabled": true,
+      "candidate_file": "data/exports/x_following_ai_seed_candidates_latest.json",
+      "limit": 50,
+      "sort": "followers_count"
+    },
+    "x_tweets": {
+      "enabled": true,
+      "actor_id": "kaitoeasyapi/twitter-x-data-tweet-scraper-pay-per-result-cheapest",
+      "tweet_file": "data/exports/x_tweets_latest.json",
+      "accounts_limit": 50,
+      "max_tweets_per_account": 30,
+      "windows": [
+        "24h",
+        "7d",
+        "30d",
+        "30d+"
+      ],
+      "dashboard_tweet_limit": 1500,
+      "include_replies": false,
+      "include_retweets": true,
+      "freshness_max_age_hours": 720,
+      "use_since_date_filter": false,
+      "language": null
+    },
+    "x_seed_accounts": [
+      "sama",
+      "karpathy",
+      "AndrewYNg",
+      "ylecun",
+      "demishassabis",
+      "gdb",
+      "reidhoffman",
+      "drfeifei",
+      "fchollet",
+      "alexandr_wang",
+      "Austen",
+      "JeffDean",
+      "DrJimFan",
+      "DarioAmodei",
+      "EMostaque",
+      "soumithchintala",
+      "sarah_edo",
+      "mattpocockuk",
+      "MattPRD",
+      "lilianweng",
+      "mckaywrigley",
+      "dotey",
+      "housecor",
+      "itsolelehmann",
+      "giffmana",
+      "jackclarkSF",
+      "janleike",
+      "RichardSocher",
+      "Thom_Wolf",
+      "danshipper",
+      "_jasonwei",
+      "Barret_China",
+      "PJaccetturo",
+      "ShaneLegg",
+      "SebastienBubeck",
+      "oprydai",
+      "JonathanRoss321",
+      "dotta",
+      "tonyzzhao",
+      "shengjia_zhao",
+      "shakir_za",
+      "berryxia",
+      "shiri_shh",
+      "Jacobsklug",
+      "affaan",
+      "chddaniel",
+      "snsf",
+      "zackbshapiro",
+      "jakevin7",
+      "yucheng"
+    ],
+    "x_following_sources_to_test": [
+      "fu_yuming"
+    ],
+    "x_keyword_queries": [
+      "\"Claude Code\" OR \"coding agent\"",
+      "\"AI agent\" \"open source\"",
+      "\"personal AI assistant\"",
+      "\"browser agent\"",
+      "\"agent workflow\"",
+      "\"MCP\" \"agent\""
+    ]
+  },
+  "ossinsight": {
+    "enabled": true,
+    "periods": [
+      "past_24_hours"
+    ],
+    "languages": [
+      "All",
+      "Python",
+      "TypeScript",
+      "JavaScript"
+    ]
+  }
+}

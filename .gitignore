@@ -1,0 +1,13 @@
+data/*.sqlite
+data/raw/
+data/exports/
+__pycache__/
+*.pyc
+.env
+.DS_Store
+.agents/
+.claude/
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
