@@ -10,7 +10,10 @@ def hn_eval_cases() -> list[dict[str, Any]]:
             "input": {
                 "title": "Show HN: Clawdbot",
                 "url": "https://news.ycombinator.com/item?id=1",
-                "description": "An AI coding assistant with a public repo.",
+                "description": (
+                    "An AI coding assistant with a public repo: "
+                    "https://github.com/owner/clawdbot."
+                ),
             },
             "expected": {
                 "projectness": "project",

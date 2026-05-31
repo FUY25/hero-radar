@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import urllib.parse
 from typing import Any
 
-from pipeline.decision.entity_resolution import entity_id_for_key
+from pipeline.decision.entity_resolution import entity_id_for_key, normalize_github_repo
 from pipeline.decision.llm_cache import (
     cache_key_for,
     get_cached_response,
@@ -127,6 +128,20 @@ def build_hn_prompt_payload(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _derive_link_key(link_type: str, url: str) -> str | None:
+    parsed = urllib.parse.urlparse(url)
+    host = parsed.netloc.lower()
+    path_parts = [part for part in parsed.path.strip("/").split("/") if part]
+    if link_type == "github" and host == "github.com" and len(path_parts) >= 2:
+        return normalize_github_repo(path_parts[0], path_parts[1])
+    if link_type == "domain" and host:
+        return f"domain:{host.removeprefix('www.')}"
+    if link_type == "npm" and host in {"www.npmjs.com", "npmjs.com"} and path_parts[:1] == ["package"]:
+        package = "/".join(path_parts[1:])
+        return f"npm:{package}" if package else None
+    return None
+
+
 def _validate_link(link: Any, *, proposed: bool) -> None:
     if not isinstance(link, dict):
         raise ValueError("link must be an object")
@@ -135,6 +150,11 @@ def _validate_link(link: Any, *, proposed: bool) -> None:
     url = link.get("url")
     if link_type not in LINK_TYPES:
         raise ValueError(f"invalid link type: {link_type!r}")
+    if isinstance(url, str) and (not isinstance(key, str) or not key):
+        derived_key = _derive_link_key(str(link_type), url)
+        if derived_key:
+            link["key"] = derived_key
+            key = derived_key
     if not isinstance(key, str) or not key.startswith(f"{link_type}:"):
         raise ValueError(f"malformed link key: {key!r}")
     if not isinstance(url, str) or not url.startswith(("http://", "https://")):

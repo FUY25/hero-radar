@@ -256,6 +256,29 @@ class HnClassifierTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 validate_hn_output(bad)
 
+    def test_validate_hn_output_derives_missing_github_key_from_url(self) -> None:
+        from pipeline.decision.hn_classifier import validate_hn_output
+
+        output = validate_hn_output(
+            {
+                "item_id": 1,
+                "projectness": "project",
+                "confidence": 0.9,
+                "canonical_name": "Demo",
+                "deterministic_links": [
+                    {
+                        "type": "github",
+                        "key": None,
+                        "url": "https://github.com/Owner/Repo",
+                    }
+                ],
+                "proposed_links": [],
+                "summary": "Project with a GitHub URL.",
+            }
+        )
+
+        self.assertEqual(output["deterministic_links"][0]["key"], "github:owner/repo")
+
     def test_build_hn_prompt_payload_is_reviewable_without_api_call(self) -> None:
         from pipeline.decision.hn_classifier import build_hn_prompt_payload, candidate_hn_rows
 

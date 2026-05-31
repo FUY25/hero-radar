@@ -617,6 +617,46 @@ def build_github_client() -> Any:
     return GitHubClient(token=os.environ.get("GITHUB_TOKEN"))
 
 
+def parse_credible_handles(value: str | None) -> set[str]:
+    if not value:
+        return set()
+    return {part.strip().lower() for part in value.split(",") if part.strip()}
+
+
+def build_deepseek_provider_from_args(args: argparse.Namespace) -> Any:
+    from pipeline.decision.llm_provider import DeepSeekProvider
+    from pipeline.decision.smoke_llm import load_env_file, load_json_secrets
+
+    load_env_file()
+    load_json_secrets()
+    return DeepSeekProvider(model=args.llm_model)
+
+
+def run_from_args(
+    args: argparse.Namespace,
+    *,
+    decision_runner: Any = run_decision,
+    llm_provider_builder: Any = build_deepseek_provider_from_args,
+    github_client_builder: Any = build_github_client,
+) -> dict[str, int | str]:
+    hn_limit = int(args.classify_hn_limit or 0)
+    x_limit = int(args.classify_x_limit or 0)
+    llm_provider = llm_provider_builder(args) if hn_limit > 0 or x_limit > 0 else None
+    return decision_runner(
+        db_path=args.db,
+        run_id=args.run_id,
+        export_json_path=args.export_json,
+        now=args.now,
+        github_client=github_client_builder() if args.backfill else None,
+        hn_llm_provider=llm_provider if hn_limit > 0 else None,
+        hn_classifier_limit=hn_limit,
+        x_llm_provider=llm_provider if x_limit > 0 else None,
+        x_classifier_limit=x_limit,
+        x_stage1_batch_size=args.x_stage1_batch_size,
+        x_credible_handles=parse_credible_handles(args.x_credible_handles),
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run deterministic pre-Layer2 decision pipeline")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
@@ -624,20 +664,25 @@ def main() -> None:
     parser.add_argument("--export-json", type=Path, default=DEFAULT_EXPORT_PATH)
     parser.add_argument("--now", default=utc_now())
     parser.add_argument("--backfill", action="store_true")
+    parser.add_argument("--classify-hn-limit", type=int, default=0)
+    parser.add_argument("--classify-x-limit", type=int, default=0)
+    parser.add_argument("--llm-model", default=None)
+    parser.add_argument("--x-stage1-batch-size", type=int, default=100)
+    parser.add_argument("--x-credible-handles", default="")
     args = parser.parse_args()
 
-    summary = run_decision(
-        db_path=args.db,
-        run_id=args.run_id,
-        export_json_path=args.export_json,
-        now=args.now,
-        github_client=build_github_client() if args.backfill else None,
-    )
+    summary = run_from_args(args)
     print("Decision run complete")
     print(f"entities: {summary['entities']}")
     print(f"potential_candidates: {summary['potential_candidates']}")
     print(f"edge_watch_candidates: {summary['edge_watch_candidates']}")
     print(f"backfill_jobs: {summary['backfill_jobs']}")
+    if "hn_classified" in summary:
+        print(f"hn_classified: {summary['hn_classified']}")
+    if "x_stage1_mentions" in summary:
+        print(f"x_stage1_mentions: {summary['x_stage1_mentions']}")
+    if "x_stage2_tiered" in summary:
+        print(f"x_stage2_tiered: {summary['x_stage2_tiered']}")
     print(f"export: {summary['export']}")
 
 

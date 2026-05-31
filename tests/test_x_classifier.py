@@ -153,6 +153,63 @@ class XClassifierTest(unittest.TestCase):
             "github:owner/repo",
         )
 
+    def test_candidate_tweets_support_current_store_schema_without_imported_at(self) -> None:
+        from pipeline.decision.x_classifier import candidate_tweets
+
+        conn = sqlite3.connect(":memory:")
+        self.addCleanup(conn.close)
+        conn.executescript(
+            """
+            create table x_tweets_store (
+                tweet_id text primary key,
+                author_username text not null,
+                author_name text,
+                text text not null,
+                url text,
+                created_at text not null,
+                metrics_json text not null,
+                mentioned_projects_json text not null,
+                hashtags_json text not null,
+                mentions_json text not null,
+                raw_json text not null,
+                first_seen_at text not null,
+                last_seen_at text not null,
+                last_import_run_id text
+            );
+            """
+        )
+        conn.execute(
+            """
+            insert into x_tweets_store(
+                tweet_id, author_username, author_name, text, url, created_at,
+                metrics_json, mentioned_projects_json, hashtags_json, mentions_json,
+                raw_json, first_seen_at, last_seen_at, last_import_run_id
+            )
+            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "t1",
+                "credible1",
+                "Credible One",
+                "Try https://github.com/Owner/Repo",
+                "https://x.com/credible1/status/t1",
+                "2026-05-31T01:00:00Z",
+                "{}",
+                "[]",
+                "[]",
+                "[]",
+                "{}",
+                "2026-05-31T02:00:00Z",
+                "2026-05-31T03:00:00Z",
+                "run",
+            ),
+        )
+
+        tweets = candidate_tweets(conn, now="2026-05-31T04:00:00Z", limit=5)
+
+        self.assertEqual(tweets[0]["imported_at"], "2026-05-31T02:00:00Z")
+        self.assertEqual(tweets[0]["deterministic_hints"][0]["entity_key"], "github:owner/repo")
+
     def test_stage2_writes_x_social_evidence(self) -> None:
         from pipeline.decision.x_classifier import run_x_stage2
 
@@ -377,6 +434,8 @@ class XClassifierTest(unittest.TestCase):
         self.assertIn("tweets", stage1)
         self.assertEqual(stage2["prompt_version"], "x-stage2-v1")
         self.assertEqual(stage2["aggregate"]["credible_authors"], 2)
+        self.assertIn("High tier requires", stage2["instructions"])
+        self.assertIn("two credible", stage2["instructions"])
 
 
 if __name__ == "__main__":

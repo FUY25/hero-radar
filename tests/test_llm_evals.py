@@ -55,6 +55,20 @@ class LlmClassifierEvalTest(unittest.TestCase):
             "none",
         )
 
+    def test_hn_alias_eval_cases_include_verifiable_links(self) -> None:
+        from pipeline.decision.llm_evals import hn_eval_cases
+
+        for case in hn_eval_cases():
+            expected = case["expected"]
+            if not expected.get("requires_alias"):
+                continue
+            haystack = " ".join(str(value) for value in case["input"].values()).lower()
+            self.assertIn(
+                f"{expected['deterministic_link_type']}.com",
+                haystack,
+                f"{case['name']} requires an alias but has no verifiable link",
+            )
+
     def test_validate_eval_coverage_rejects_missing_case(self) -> None:
         from pipeline.decision.llm_evals import validate_eval_coverage
 

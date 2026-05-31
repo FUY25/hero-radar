@@ -1,7 +1,10 @@
 import json
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import unittest
+from argparse import Namespace
 from pathlib import Path
 
 from pipeline.decision.llm_provider import FakeLLMProvider
@@ -287,6 +290,105 @@ def seed_npm_source_tables(conn: sqlite3.Connection) -> None:
 
 
 class DecisionRunnerTest(unittest.TestCase):
+    def test_cli_help_exposes_bounded_llm_classifier_flags(self):
+        result = subprocess.run(
+            [sys.executable, "-m", "pipeline.decision.run_decision", "--help"],
+            capture_output=True,
+            check=False,
+            text=True,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--classify-hn-limit", result.stdout)
+        self.assertIn("--classify-x-limit", result.stdout)
+        self.assertIn("--llm-model", result.stdout)
+        self.assertIn("--x-credible-handles", result.stdout)
+
+    def test_run_from_args_wires_llm_provider_only_when_limits_are_explicit(self):
+        from pipeline.decision.run_decision import run_from_args
+
+        calls = []
+        provider = object()
+
+        def fake_runner(**kwargs):
+            calls.append(kwargs)
+            return {
+                "entities": 0,
+                "potential_candidates": 0,
+                "edge_watch_candidates": 0,
+                "backfill_jobs": 0,
+                "export": str(kwargs["export_json_path"]),
+            }
+
+        args = Namespace(
+            db=Path("db.sqlite"),
+            run_id="run",
+            export_json=Path("out.json"),
+            now="2026-05-31T00:00:00Z",
+            backfill=False,
+            classify_hn_limit=2,
+            classify_x_limit=3,
+            llm_model="deepseek-v4-flash",
+            x_stage1_batch_size=4,
+            x_credible_handles="credible1, credible2",
+        )
+
+        summary = run_from_args(
+            args,
+            decision_runner=fake_runner,
+            llm_provider_builder=lambda parsed: provider,
+            github_client_builder=lambda: None,
+        )
+
+        self.assertEqual(summary["entities"], 0)
+        self.assertIs(calls[0]["hn_llm_provider"], provider)
+        self.assertIs(calls[0]["x_llm_provider"], provider)
+        self.assertEqual(calls[0]["hn_classifier_limit"], 2)
+        self.assertEqual(calls[0]["x_classifier_limit"], 3)
+        self.assertEqual(calls[0]["x_stage1_batch_size"], 4)
+        self.assertEqual(calls[0]["x_credible_handles"], {"credible1", "credible2"})
+
+    def test_run_from_args_does_not_build_llm_provider_when_limits_are_zero(self):
+        from pipeline.decision.run_decision import run_from_args
+
+        def fail_builder(_args):
+            raise AssertionError("llm provider should not be built")
+
+        captured = {}
+
+        def fake_runner(**kwargs):
+            captured.update(kwargs)
+            return {
+                "entities": 0,
+                "potential_candidates": 0,
+                "edge_watch_candidates": 0,
+                "backfill_jobs": 0,
+                "export": str(kwargs["export_json_path"]),
+            }
+
+        args = Namespace(
+            db=Path("db.sqlite"),
+            run_id="run",
+            export_json=Path("out.json"),
+            now="2026-05-31T00:00:00Z",
+            backfill=False,
+            classify_hn_limit=0,
+            classify_x_limit=0,
+            llm_model=None,
+            x_stage1_batch_size=100,
+            x_credible_handles="",
+        )
+
+        run_from_args(
+            args,
+            decision_runner=fake_runner,
+            llm_provider_builder=fail_builder,
+            github_client_builder=lambda: None,
+        )
+
+        self.assertIsNone(captured["hn_llm_provider"])
+        self.assertIsNone(captured["x_llm_provider"])
+
     def test_runner_writes_entities_candidates_and_export(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "hero.sqlite"

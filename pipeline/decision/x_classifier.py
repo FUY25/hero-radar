@@ -69,6 +69,17 @@ def github_key_from_text(text: str) -> str | None:
     return normalize_github_repo(owner, repo)
 
 
+def _x_tweets_select_fields(conn: sqlite3.Connection) -> str:
+    columns = {row[1] for row in conn.execute("pragma table_info(x_tweets_store)")}
+    imported_expr = "imported_at"
+    if "imported_at" not in columns:
+        imported_expr = "first_seen_at" if "first_seen_at" in columns else "created_at"
+    return (
+        "tweet_id, author_username, text, url, created_at, "
+        f"{imported_expr} as imported_at, raw_json"
+    )
+
+
 def candidate_tweets(
     conn: sqlite3.Connection,
     *,
@@ -77,9 +88,10 @@ def candidate_tweets(
 ) -> list[dict[str, Any]]:
     now_dt = _parse_time(now)
     since_dt = now_dt - dt.timedelta(days=7)
+    fields = _x_tweets_select_fields(conn)
     rows = conn.execute(
-        """
-        select tweet_id, author_username, text, url, created_at, imported_at, raw_json
+        f"""
+        select {fields}
         from x_tweets_store
         order by created_at desc
         """
@@ -167,7 +179,11 @@ def build_x_stage2_prompt_payload(
         "instructions": (
             "Return JSON. Judge the X-only source signal for this concrete entity. "
             "Do not let engagement counts drive the tier. Cite tweet ids. Generic "
-            "terms without concrete repo/domain/package/product binding are none."
+            "terms without concrete repo/domain/package/product binding are none. "
+            "Two credible authors citing or trying the same linked project is "
+            "potential, not high. High tier requires exceptional adoption, multiple "
+            "independent strong recommendations, or unusually strong cross-source "
+            "confirmation beyond two credible tweets."
         ),
         "allowed_x_tier": ["none", "watch", "potential", "high"],
         "allowed_entity_confidence": sorted(ENTITY_CONFIDENCE_VALUES),
@@ -540,9 +556,10 @@ def _tweet_rows_for_refs(conn: sqlite3.Connection, source_refs: list[str]) -> li
     if not tweet_ids:
         return []
     placeholders = ",".join("?" for _ in tweet_ids)
+    fields = _x_tweets_select_fields(conn)
     rows = conn.execute(
         f"""
-        select tweet_id, author_username, text, url, created_at, imported_at, raw_json
+        select {fields}
         from x_tweets_store
         where tweet_id in ({placeholders})
         """,
