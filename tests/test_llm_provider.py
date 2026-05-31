@@ -1,6 +1,22 @@
 from __future__ import annotations
 
+import json
 import unittest
+from unittest import mock
+
+
+class FakeHttpResponse:
+    def __init__(self, payload: dict):
+        self.payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def read(self):
+        return json.dumps(self.payload).encode("utf-8")
 
 
 class LlmProviderTest(unittest.TestCase):
@@ -54,6 +70,31 @@ class LlmProviderTest(unittest.TestCase):
         self.assertEqual(default_provider.model, "deepseek-v4-flash")
         self.assertEqual(pro_provider.model, "deepseek-v4-pro")
         self.assertNotEqual(default_provider.model, "deepseek-chat")
+
+    def test_deepseek_retries_transient_read_timeout(self) -> None:
+        from pipeline.decision.llm_provider import DeepSeekProvider
+
+        calls = []
+
+        def fake_urlopen(request, timeout):
+            calls.append({"url": request.full_url, "timeout": timeout})
+            if len(calls) == 1:
+                raise TimeoutError("read timed out")
+            return FakeHttpResponse(
+                {"choices": [{"message": {"content": json.dumps({"ok": True})}}]}
+            )
+
+        provider = DeepSeekProvider(api_key="secret", timeout=1, max_retries=1)
+
+        with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            result = provider.complete_json(
+                task="smoke",
+                prompt_version="v1",
+                input_payload={"hello": "world"},
+            )
+
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(len(calls), 2)
 
 
 if __name__ == "__main__":

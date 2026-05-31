@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import urllib.error
 import urllib.request
 from typing import Any, Protocol
 
@@ -65,6 +66,7 @@ class DeepSeekProvider:
         model: str | None = None,
         base_url: str | None = None,
         timeout: int = 60,
+        max_retries: int = 2,
     ) -> None:
         self.api_key = api_key or os.environ.get("DEEPSEEK_API_KEY", "")
         self.model = model or os.environ.get("DEEPSEEK_MODEL", DEFAULT_DEEPSEEK_MODEL)
@@ -72,6 +74,7 @@ class DeepSeekProvider:
             base_url or os.environ.get("DEEPSEEK_BASE_URL", DEFAULT_DEEPSEEK_BASE_URL)
         ).rstrip("/")
         self.timeout = timeout
+        self.max_retries = max(0, int(max_retries))
 
     def __repr__(self) -> str:
         return (
@@ -131,8 +134,16 @@ class DeepSeekProvider:
             },
             method="POST",
         )
-        with urllib.request.urlopen(request, timeout=self.timeout) as response:
-            body = json.loads(response.read().decode("utf-8"))
+        last_error: BaseException | None = None
+        for _attempt in range(self.max_retries + 1):
+            try:
+                with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                    body = json.loads(response.read().decode("utf-8"))
+                break
+            except (TimeoutError, urllib.error.URLError) as exc:
+                last_error = exc
+        else:
+            raise last_error or RuntimeError("DeepSeek request failed")
         content = body["choices"][0]["message"]["content"]
         if not content:
             raise RuntimeError("DeepSeek returned empty JSON content")
