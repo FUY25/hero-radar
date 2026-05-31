@@ -130,6 +130,21 @@ create table if not exists api_cache (
     error text
 );
 
+create table if not exists llm_cache (
+    cache_key text primary key,
+    provider text not null,
+    model text not null,
+    prompt_version text not null,
+    task text not null,
+    input_hash text not null,
+    request_json text not null,
+    response_json text not null,
+    status text not null,
+    created_at text not null,
+    expires_at text,
+    error text
+);
+
 create index if not exists idx_entities_key on entities(key_type, canonical_key);
 create index if not exists idx_evidence_run_entity on evidence_rows(run_id, entity_id);
 create index if not exists idx_candidates_run_level on potential_candidates(run_id, level);
