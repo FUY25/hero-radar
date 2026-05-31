@@ -230,6 +230,69 @@ function normalizeCandidateSourceLinks(rawLinks) {
     .filter((link) => Number.isFinite(link.item_id) && link.channel);
 }
 
+export function normalizeFeedPayload(payload = {}) {
+  const normalizeItem = (item, section) => {
+    const members = Array.isArray(item?.context?.members) ? item.context.members : [];
+    const evidence = members
+      .flatMap((member) => (Array.isArray(member.evidence_bullets) ? member.evidence_bullets : []))
+      .map((bullet) => ({
+        ...bullet,
+        display_label: bullet.display_label || readableEvidenceLabel(bullet),
+        display_badge: bullet.display_badge || readableProvenanceBadge(bullet),
+      }));
+    const sourceLinks = members.flatMap((member) => normalizeCandidateSourceLinks(member.source_links));
+    return {
+      ...item,
+      section,
+      title: String(item?.canonical_name || item?.canonical_key || item?.group_id || ''),
+      l2_score: Number(item?.l2_score || 0),
+      topic_tags: Array.isArray(item?.topic_tags) ? item.topic_tags : [],
+      evidence_bullets: evidence,
+      source_links: sourceLinks,
+      context_preview: members.find((member) => member.context_preview)?.context_preview || '',
+      deepdive: item?.deepdive || null,
+    };
+  };
+  return {
+    feed_run_id: String(payload?.feed_run_id || ''),
+    decision_run_id: String(payload?.decision_run_id || ''),
+    generated_at: String(payload?.generated_at || ''),
+    model_profile: payload?.model_profile || {},
+    today_focus: (payload?.today_focus || []).map((item) => normalizeItem(item, 'today_focus')),
+    scored_list: (payload?.scored_list || []).map((item) => normalizeItem(item, 'scored')),
+    pending: payload?.pending || { edge_watch_scout: 0, deepdive: 0 },
+  };
+}
+
+export function feedRows(feed) {
+  return [
+    ...(feed?.today_focus || []),
+    ...(feed?.scored_list || []),
+  ];
+}
+
+export function feedRunSummary(feed) {
+  const profile = feed?.model_profile || {};
+  return {
+    run: feed?.feed_run_id || '',
+    decision: feed?.decision_run_id || '',
+    generated: feed?.generated_at || '',
+    models: [
+      profile.scout ? `scout ${profile.scout}` : '',
+      profile.scoring ? `scoring ${profile.scoring}` : '',
+      profile.deepdive ? `deepdive ${profile.deepdive}` : '',
+    ].filter(Boolean).join(' · '),
+  };
+}
+
+export function scoreTone(score) {
+  const value = Number(score || 0);
+  if (value >= 85) return 'hot';
+  if (value >= 70) return 'warm';
+  if (value >= 50) return 'steady';
+  return 'quiet';
+}
+
 export function candidateRowsForFeed(candidates) {
   return [
     ...(candidates?.candidates || []).map((row) => normalizeCandidateRow(row, row.level)),
