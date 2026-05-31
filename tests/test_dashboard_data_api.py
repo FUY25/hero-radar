@@ -256,6 +256,69 @@ class DashboardDataApiTest(unittest.TestCase):
         self.assertEqual(row["evidence_bullets"][0]["label"], "GH +321 stars / 24h")
         self.assertEqual(row["binding_confidence"], "verified")
 
+    def test_server_run_command_uses_daily_pipeline_by_default(self) -> None:
+        import pipeline.server as server
+
+        with mock.patch.object(server, "PYTHON", "py"):
+            with mock.patch.object(server, "ROOT", Path("/repo")):
+                command = server.build_run_command({})
+
+        self.assertEqual(command, ["py", "/repo/pipeline/run_daily.py"])
+
+    def test_server_run_command_maps_only_sources_to_daily_pipeline(self) -> None:
+        import pipeline.server as server
+
+        with mock.patch.object(server, "PYTHON", "py"):
+            with mock.patch.object(server, "ROOT", Path("/repo")):
+                command = server.build_run_command({"only": ["hn_algolia", "hn_firebase"]})
+
+        self.assertEqual(
+            command,
+            [
+                "py",
+                "/repo/pipeline/run_daily.py",
+                "--only-source",
+                "hn_algolia,hn_firebase",
+            ],
+        )
+
+    def test_server_run_command_supports_hn_only_decision(self) -> None:
+        import pipeline.server as server
+
+        with mock.patch.object(server, "PYTHON", "py"):
+            with mock.patch.object(server, "ROOT", Path("/repo")):
+                command = server.build_run_command(
+                    {
+                        "skip_sources": True,
+                        "no_backfill": True,
+                        "classify_hn_limit": 400,
+                        "classify_x_limit": 0,
+                        "resolver_search_limit": 80,
+                        "resolver_research_limit": 0,
+                        "enrich_readme_limit": 0,
+                    }
+                )
+
+        self.assertEqual(
+            command,
+            [
+                "py",
+                "/repo/pipeline/run_daily.py",
+                "--skip-sources",
+                "--no-backfill",
+                "--classify-hn-limit",
+                "400",
+                "--classify-x-limit",
+                "0",
+                "--resolver-search-limit",
+                "80",
+                "--resolver-research-limit",
+                "0",
+                "--enrich-readme-limit",
+                "0",
+            ],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -96,6 +96,31 @@ class LlmProviderTest(unittest.TestCase):
         self.assertEqual(result, {"ok": True})
         self.assertEqual(len(calls), 2)
 
+    def test_deepseek_retries_empty_json_content(self) -> None:
+        from pipeline.decision.llm_provider import DeepSeekProvider
+
+        calls = []
+
+        def fake_urlopen(request, timeout):
+            calls.append({"url": request.full_url, "timeout": timeout})
+            if len(calls) == 1:
+                return FakeHttpResponse({"choices": [{"message": {"content": ""}}]})
+            return FakeHttpResponse(
+                {"choices": [{"message": {"content": json.dumps({"ok": True})}}]}
+            )
+
+        provider = DeepSeekProvider(api_key="secret", timeout=1, max_retries=1)
+
+        with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            result = provider.complete_json(
+                task="smoke",
+                prompt_version="v1",
+                input_payload={"hello": "world"},
+            )
+
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(len(calls), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

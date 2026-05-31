@@ -219,6 +219,53 @@ def query_dashboard_data_payload() -> dict[str, Any]:
     return payload
 
 
+def build_run_command(payload: Any) -> list[str]:
+    options = payload if isinstance(payload, dict) else {}
+    cmd = [PYTHON, str(ROOT / "pipeline" / "run_daily.py")]
+    only = options.get("only")
+    if only:
+        if not isinstance(only, list) or not all(isinstance(item, str) for item in only):
+            raise ValueError("only must be a list of adapter names")
+        cmd.extend(["--only-source", ",".join(only)])
+    if options.get("skip_sources"):
+        cmd.append("--skip-sources")
+    if options.get("skip_decision"):
+        cmd.append("--skip-decision")
+    if options.get("no_backfill") or options.get("backfill") is False:
+        cmd.append("--no-backfill")
+
+    string_options = {
+        "run_id": "--run-id",
+        "now": "--now",
+        "llm_model": "--llm-model",
+        "x_credible_handles": "--x-credible-handles",
+    }
+    for key, flag in string_options.items():
+        value = options.get(key)
+        if value is not None:
+            if not isinstance(value, str):
+                raise ValueError(f"{key} must be a string")
+            cmd.extend([flag, value])
+
+    integer_options = {
+        "classify_hn_limit": "--classify-hn-limit",
+        "classify_x_limit": "--classify-x-limit",
+        "llm_concurrency": "--llm-concurrency",
+        "x_stage1_batch_size": "--x-stage1-batch-size",
+        "resolver_search_limit": "--resolver-search-limit",
+        "resolver_research_limit": "--resolver-research-limit",
+        "resolver_research_rounds": "--resolver-research-rounds",
+        "enrich_readme_limit": "--enrich-readme-limit",
+    }
+    for key, flag in integer_options.items():
+        value = options.get(key)
+        if value is not None:
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise ValueError(f"{key} must be an integer")
+            cmd.extend([flag, str(value)])
+    return cmd
+
+
 def resolve_entity_lookup(conn: sqlite3.Connection, entity_or_key: str) -> str:
     if entity_or_key.startswith("entity:"):
         return entity_or_key
@@ -500,13 +547,8 @@ class HeroRadarHandler(BaseHTTPRequestHandler):
         if path == "/api/run":
             try:
                 payload = read_request_json(self)
-                only = payload.get("only") if isinstance(payload, dict) else None
-                cmd = [PYTHON, str(ROOT / "pipeline" / "run_pipeline.py")]
-                if only:
-                    if not isinstance(only, list) or not all(isinstance(item, str) for item in only):
-                        raise ValueError("only must be a list of adapter names")
-                    cmd.extend(["--only", ",".join(only)])
-                result = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, timeout=1800, check=False)
+                cmd = build_run_command(payload)
+                result = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, timeout=3600, check=False)
                 json_response(
                     self,
                     {

@@ -139,12 +139,12 @@ class DeepSeekProvider:
             try:
                 with urllib.request.urlopen(request, timeout=self.timeout) as response:
                     body = json.loads(response.read().decode("utf-8"))
-                break
-            except (TimeoutError, urllib.error.URLError) as exc:
+                content = body["choices"][0]["message"]["content"]
+                if not content:
+                    raise RuntimeError("DeepSeek returned empty JSON content")
+                return json.loads(content)
+            except (TimeoutError, urllib.error.URLError, RuntimeError, ValueError, KeyError, IndexError) as exc:
                 last_error = exc
         else:
             raise last_error or RuntimeError("DeepSeek request failed")
-        content = body["choices"][0]["message"]["content"]
-        if not content:
-            raise RuntimeError("DeepSeek returned empty JSON content")
-        return json.loads(content)
+        raise RuntimeError("DeepSeek request failed")
