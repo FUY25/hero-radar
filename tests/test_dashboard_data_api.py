@@ -319,6 +319,36 @@ class DashboardDataApiTest(unittest.TestCase):
             ],
         )
 
+    def test_server_run_command_maps_layer2_options_to_daily_pipeline(self) -> None:
+        import pipeline.server as server
+
+        with mock.patch.object(server, "PYTHON", "py"):
+            with mock.patch.object(server, "ROOT", Path("/repo")):
+                command = server.build_run_command(
+                    {
+                        "run_layer2": True,
+                        "layer2_scout_limit": 10,
+                        "layer2_scoring_limit": 20,
+                        "layer2_deepdive_limit": 2,
+                        "layer2_deepdive_min_l2_score": 71,
+                        "layer2_enable_kimi_web_search": True,
+                        "layer2_max_web_search_calls": 3,
+                    }
+                )
+
+        self.assertIn("--run-layer2", command)
+        self.assertIn("--layer2-scout-limit", command)
+        self.assertIn("10", command)
+        self.assertIn("--layer2-scoring-limit", command)
+        self.assertIn("20", command)
+        self.assertIn("--layer2-deepdive-limit", command)
+        self.assertIn("2", command)
+        self.assertIn("--layer2-deepdive-min-l2-score", command)
+        self.assertIn("71", command)
+        self.assertIn("--layer2-enable-kimi-web-search", command)
+        self.assertIn("--layer2-max-web-search-calls", command)
+        self.assertIn("3", command)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -25,6 +25,7 @@ import {
   formatProjectList,
   getConfigValue,
   initialDashboardState,
+  layer2RunOptionsFromConfig,
   nativeRank as modelNativeRank,
   normalizeFeedPayload,
   rowsForChannel as modelRowsForChannel,
@@ -1102,6 +1103,56 @@ function XMonitoringSettings({ payload, config, onConfigChange, replaceConfig })
   );
 }
 
+function Layer2Settings({ config, onConfigChange }) {
+  return (
+    <section className="settings-section">
+      <h2>Layer 2 Feed</h2>
+      <p className="section-copy">控制 Daily Feed 的 Kimi scout、scoring、deepdive 模型和 bounded 工具预算。</p>
+      <div className="settings-grid">
+        <div className="settings-card">
+          <div className="settings-card-title">运行开关</div>
+          <div className="settings-card-note">关闭后“立即运行”只跑 source + decision，不追加 Layer 2。</div>
+          <div className="setting-list">
+            <SettingCheckbox config={config} path="layer2.enabled" label="启用 Layer 2 Feed" help="打开后下一次 run 会在 decision 后生成 Daily Feed。" onConfigChange={onConfigChange} />
+          </div>
+        </div>
+        <div className="settings-card">
+          <div className="settings-card-title">模型</div>
+          <div className="settings-card-note">Kimi scout / scoring / deepdive 分阶段模型。</div>
+          <div className="setting-list">
+            <SettingField config={config} path="layer2.edge_scout_model" label="Edge Watch scout 模型" help="用于判断 Edge Watch 是否值得升级到 scoring。" onConfigChange={onConfigChange} />
+            <SettingField config={config} path="layer2.scoring_model" label="Scoring 模型" help="用于给候选组生成 L2 score、理由和 topic tags。" onConfigChange={onConfigChange} />
+            <SettingField config={config} path="layer2.deepdive_model" label="Deepdive 模型" help="用于多工具 deepdive 计划和综合。" onConfigChange={onConfigChange} />
+          </div>
+        </div>
+        <div className="settings-card">
+          <div className="settings-card-title">候选预算</div>
+          <div className="settings-card-note">限制每日 scout、scoring 和 deepdive 的最大处理量。</div>
+          <div className="setting-list">
+            <SettingField config={config} path="layer2.max_edge_watch_scout" label="Edge Watch scout 上限" help="每次最多 scout 多少个 Edge Watch group。" type="number" min="0" step="1" onConfigChange={onConfigChange} />
+            <SettingField config={config} path="layer2.max_scored_candidates" label="Scoring 上限" help="每次最多进入 L2 scoring 的 group 数量。" type="number" min="1" step="1" onConfigChange={onConfigChange} />
+            <SettingField config={config} path="layer2.max_deepdives_per_run" label="每日 deepdive 上限" help="每次最多执行多少个 deepdive。" type="number" min="0" step="1" onConfigChange={onConfigChange} />
+            <SettingField config={config} path="layer2.deepdive_min_l2_score" label="Deepdive 最低 L2 分" help="低于该 L2 score 的候选不会进入 deepdive。" type="number" min="0" max="100" step="1" onConfigChange={onConfigChange} />
+          </div>
+        </div>
+        <div className="settings-card">
+          <div className="settings-card-title">Deepdive 工具预算</div>
+          <div className="settings-card-note">限制外部读取和 Kimi web search 调用。</div>
+          <div className="setting-list">
+            <SettingCheckbox config={config} path="layer2.enable_kimi_web_search" label="Kimi web search" help="允许 deepdive 使用 Kimi web_search tool；无 key 时不会真实调用。" onConfigChange={onConfigChange} />
+            <SettingField config={config} path="layer2.max_tool_calls_per_candidate" label="Deepdive 总工具调用上限" help="单个候选 deepdive 的总工具调用预算。" type="number" min="0" step="1" onConfigChange={onConfigChange} />
+            <SettingField config={config} path="layer2.max_web_search_calls_per_candidate" label="Web search 调用上限" help="单个候选最多多少次 Kimi web search。" type="number" min="0" step="1" onConfigChange={onConfigChange} />
+            <SettingField config={config} path="layer2.max_repo_files_per_candidate" label="Repo 文件读取上限" help="单个候选最多读取多少个 repo 文件。" type="number" min="0" step="1" onConfigChange={onConfigChange} />
+            <SettingField config={config} path="layer2.max_pages_per_candidate" label="网页读取上限" help="单个候选最多读取多少个 homepage/docs 页面。" type="number" min="0" step="1" onConfigChange={onConfigChange} />
+            <SettingField config={config} path="layer2.max_hn_thread_fetches_per_candidate" label="HN thread 读取上限" help="单个候选最多读取多少个 HN thread。" type="number" min="0" step="1" onConfigChange={onConfigChange} />
+            <SettingField config={config} path="layer2.max_x_context_fetches_per_candidate" label="X context 读取上限" help="单个候选最多读取多少个 X context。" type="number" min="0" step="1" onConfigChange={onConfigChange} />
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function DisplaySettings({ payload, pageSize, onPageSizeChange, theme, onThemeChange, hiddenSources, onHiddenSourcesChange }) {
   return (
     <>
@@ -1199,9 +1250,11 @@ function SettingsView({ payload, state, settings }) {
             onHiddenSourcesChange={settings.onHiddenSourcesChange}
           />
         )
-        : activeSettings === 'settings_api_status'
-          ? <ApiStatusSettings payload={payload} />
-          : <RunSourcesSettings payload={payload} config={settings.config} onConfigChange={settings.updateConfig} />;
+        : activeSettings === 'settings_layer2'
+          ? <Layer2Settings config={settings.config} onConfigChange={settings.updateConfig} />
+          : activeSettings === 'settings_api_status'
+            ? <ApiStatusSettings payload={payload} />
+            : <RunSourcesSettings payload={payload} config={settings.config} onConfigChange={settings.updateConfig} />;
   return (
     <section className="settings-panel">
       <section className="status-list">
@@ -1783,7 +1836,7 @@ function App() {
       const response = await fetch(dashboardApiUrl('/api/run', API_BASE), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({}),
+        body: JSON.stringify(layer2RunOptionsFromConfig(runtimeConfig)),
       });
       const data = await response.json();
       if (!response.ok || !data.ok) throw new Error(data.stderr || data.error || `HTTP ${response.status}`);

@@ -15,6 +15,7 @@ import {
   formatProjectList,
   getConfigValue,
   initialDashboardState,
+  layer2RunOptionsFromConfig,
   rowsForChannel,
   setConfigValue,
   settingsPanelDefs,
@@ -355,6 +356,64 @@ test('settingsPanelDefs restores old writable settings panels with dynamic count
       ['settings_display', '显示设置', 2],
       ['settings_api_status', 'API 状态', 3],
     ],
+  );
+});
+
+test('settingsPanelDefs includes Layer 2 settings when config has layer2', () => {
+  const panels = settingsPanelDefs({
+    channels: [],
+    source_errors: {},
+    config_meta: { api_status: { kimi: {} } },
+    config: {
+      layer2: {
+        enabled: true,
+        edge_scout_model: 'kimi-k2.5',
+        scoring_model: 'kimi-k2.5',
+        deepdive_model: 'kimi-k2.6',
+      },
+    },
+  });
+
+  assert.ok(panels.some((panel) => panel.id === 'settings_layer2'));
+});
+
+test('layer2RunOptionsFromConfig maps settings to run payload defaults', () => {
+  const options = layer2RunOptionsFromConfig({
+    layer2: {
+      enabled: true,
+      edge_scout_model: 'kimi-k2.5',
+      scoring_model: 'kimi-k2.5',
+      deepdive_model: 'kimi-k2.6',
+      max_edge_watch_scout: 11,
+      max_scored_candidates: 22,
+      max_deepdives_per_run: 3,
+      deepdive_min_l2_score: 71,
+      enable_kimi_web_search: true,
+      max_web_search_calls_per_candidate: 4,
+    },
+  });
+
+  assert.deepEqual(
+    {
+      run_layer2: options.run_layer2,
+      layer2_scout_limit: options.layer2_scout_limit,
+      layer2_scoring_limit: options.layer2_scoring_limit,
+      layer2_deepdive_limit: options.layer2_deepdive_limit,
+      layer2_deepdive_min_l2_score: options.layer2_deepdive_min_l2_score,
+      layer2_deepdive_model: options.layer2_deepdive_model,
+      layer2_enable_kimi_web_search: options.layer2_enable_kimi_web_search,
+      layer2_max_web_search_calls: options.layer2_max_web_search_calls,
+    },
+    {
+      run_layer2: true,
+      layer2_scout_limit: 11,
+      layer2_scoring_limit: 22,
+      layer2_deepdive_limit: 3,
+      layer2_deepdive_min_l2_score: 71,
+      layer2_deepdive_model: 'kimi-k2.6',
+      layer2_enable_kimi_web_search: true,
+      layer2_max_web_search_calls: 4,
+    },
   );
 });
 

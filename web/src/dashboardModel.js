@@ -698,13 +698,50 @@ export function settingsPanelDefs(payload) {
   const sourceCount = Object.keys(payload?.source_errors || {}).length;
   const displayCount = (payload?.channels || []).length;
   const apiCount = Object.keys(payload?.config_meta?.api_status || {}).length;
-  return [
+  const panels = [
     { id: 'settings_run_sources', label: '运行与来源', count: sourceCount },
     { id: 'settings_search_terms', label: '搜索词', count: searchCount },
     { id: 'settings_x_monitoring', label: 'X 监控', count: xAccountCount },
+  ];
+  if (config.layer2) {
+    panels.push({
+      id: 'settings_layer2',
+      label: 'Layer 2 Feed',
+      count: 0,
+      description: 'Kimi scout/scoring/deepdive model and budget settings.',
+    });
+  }
+  panels.push(
     { id: 'settings_display', label: '显示设置', count: displayCount },
     { id: 'settings_api_status', label: 'API 状态', count: apiCount },
-  ];
+  );
+  return panels;
+}
+
+function numericConfigValue(config, path, fallback) {
+  const value = Number(getConfigValue(config, path, fallback));
+  return Number.isFinite(value) ? value : fallback;
+}
+
+export function layer2RunOptionsFromConfig(config = {}) {
+  const layer2 = config.layer2 || {};
+  return {
+    run_layer2: Boolean(layer2.enabled),
+    layer2_scout_limit: numericConfigValue(config, 'layer2.max_edge_watch_scout', 50),
+    layer2_scoring_limit: numericConfigValue(config, 'layer2.max_scored_candidates', 150),
+    layer2_deepdive_limit: numericConfigValue(config, 'layer2.max_deepdives_per_run', 10),
+    layer2_deepdive_min_l2_score: numericConfigValue(config, 'layer2.deepdive_min_l2_score', 70),
+    layer2_scout_model: String(layer2.edge_scout_model || 'kimi-k2.5'),
+    layer2_scoring_model: String(layer2.scoring_model || 'kimi-k2.5'),
+    layer2_deepdive_model: String(layer2.deepdive_model || 'kimi-k2.6'),
+    layer2_enable_kimi_web_search: Boolean(layer2.enable_kimi_web_search),
+    layer2_max_tool_calls: numericConfigValue(config, 'layer2.max_tool_calls_per_candidate', 20),
+    layer2_max_web_search_calls: numericConfigValue(config, 'layer2.max_web_search_calls_per_candidate', 3),
+    layer2_max_repo_files: numericConfigValue(config, 'layer2.max_repo_files_per_candidate', 8),
+    layer2_max_pages: numericConfigValue(config, 'layer2.max_pages_per_candidate', 6),
+    layer2_max_hn_thread_fetches: numericConfigValue(config, 'layer2.max_hn_thread_fetches_per_candidate', 3),
+    layer2_max_x_context_fetches: numericConfigValue(config, 'layer2.max_x_context_fetches_per_candidate', 5),
+  };
 }
 
 export function detailRowsForItem(item) {

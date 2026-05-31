@@ -385,12 +385,19 @@ def build_run_command(payload: Any) -> list[str]:
         cmd.append("--skip-decision")
     if options.get("no_backfill") or options.get("backfill") is False:
         cmd.append("--no-backfill")
+    if options.get("run_layer2"):
+        cmd.append("--run-layer2")
+    if options.get("layer2_enable_kimi_web_search"):
+        cmd.append("--layer2-enable-kimi-web-search")
 
     string_options = {
         "run_id": "--run-id",
         "now": "--now",
         "llm_model": "--llm-model",
         "x_credible_handles": "--x-credible-handles",
+        "layer2_scout_model": "--layer2-scout-model",
+        "layer2_scoring_model": "--layer2-scoring-model",
+        "layer2_deepdive_model": "--layer2-deepdive-model",
     }
     for key, flag in string_options.items():
         value = options.get(key)
@@ -408,12 +415,30 @@ def build_run_command(payload: Any) -> list[str]:
         "resolver_research_limit": "--resolver-research-limit",
         "resolver_research_rounds": "--resolver-research-rounds",
         "enrich_readme_limit": "--enrich-readme-limit",
+        "layer2_scout_limit": "--layer2-scout-limit",
+        "layer2_scoring_limit": "--layer2-scoring-limit",
+        "layer2_deepdive_limit": "--layer2-deepdive-limit",
+        "layer2_max_tool_calls": "--layer2-max-tool-calls",
+        "layer2_max_web_search_calls": "--layer2-max-web-search-calls",
+        "layer2_max_repo_files": "--layer2-max-repo-files",
+        "layer2_max_pages": "--layer2-max-pages",
+        "layer2_max_hn_thread_fetches": "--layer2-max-hn-thread-fetches",
+        "layer2_max_x_context_fetches": "--layer2-max-x-context-fetches",
     }
     for key, flag in integer_options.items():
         value = options.get(key)
         if value is not None:
             if not isinstance(value, int) or isinstance(value, bool):
                 raise ValueError(f"{key} must be an integer")
+            cmd.extend([flag, str(value)])
+    float_options = {
+        "layer2_deepdive_min_l2_score": "--layer2-deepdive-min-l2-score",
+    }
+    for key, flag in float_options.items():
+        value = options.get(key)
+        if value is not None:
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                raise ValueError(f"{key} must be numeric")
             cmd.extend([flag, str(value)])
     return cmd
 
