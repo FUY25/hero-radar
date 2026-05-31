@@ -699,7 +699,7 @@ class DecisionRunnerTest(unittest.TestCase):
 
         self.assertEqual(reconciled, {repo_entity_id: repo_entity_id})
 
-    def test_classifier_only_entities_require_link_before_final_resolution(self):
+    def test_classifier_only_entities_can_enter_final_resolution_without_link(self):
         from pipeline.decision.entity_resolution import ResolutionResult
         from pipeline.decision.run_decision import add_classifier_entities_to_resolution
 
@@ -711,20 +711,20 @@ class DecisionRunnerTest(unittest.TestCase):
             values (?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                "entity:codex",
-                "Codex",
-                "name:Codex",
+                "entity:repoprompt",
+                "RepoPrompt",
+                "name:repoprompt",
                 "name",
                 "2026-05-31T00:00:00Z",
-                '["name:Codex"]',
+                '["name:repoprompt"]',
                 "[]",
             ),
         )
         evidence = [
             {
-                "entity_id": "entity:codex",
-                "canonical_entity": "name:Codex",
-                "alias": "name:Codex",
+                "entity_id": "entity:repoprompt",
+                "canonical_entity": "name:repoprompt",
+                "alias": "name:repoprompt",
                 "source": "x_tweets",
                 "family": "x_social",
             }
@@ -733,7 +733,9 @@ class DecisionRunnerTest(unittest.TestCase):
 
         augmented = add_classifier_entities_to_resolution(conn, resolution, evidence)
 
-        self.assertEqual(augmented.entities, [])
+        self.assertEqual(len(augmented.entities), 1)
+        self.assertEqual(augmented.entities[0].entity_id, "entity:repoprompt")
+        self.assertEqual(augmented.entities[0].canonical_key, "name:repoprompt")
 
     def test_runner_does_not_reset_completed_backfill_jobs_to_pending(self):
         with tempfile.TemporaryDirectory() as tmpdir:

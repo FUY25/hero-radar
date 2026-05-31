@@ -386,29 +386,6 @@ def _key_label(key: str) -> str:
     return key.split(":", 1)[1].replace("-", " ").strip()
 
 
-def _is_link_key(key: str | None) -> bool:
-    return str(key or "").startswith(("github:", "domain:", "npm:"))
-
-
-def _has_link_alias(conn: sqlite3.Connection, entity_id: str) -> bool:
-    row = conn.execute(
-        """
-        select 1
-        from alias_links
-        where entity_id = ?
-          and approved = 1
-          and (
-            alias like 'github:%'
-            or alias like 'domain:%'
-            or alias like 'npm:%'
-          )
-        limit 1
-        """,
-        (entity_id,),
-    ).fetchone()
-    return row is not None
-
-
 def _classifier_entity_from_evidence(
     conn: sqlite3.Connection,
     entity_id: str,
@@ -464,9 +441,7 @@ def add_classifier_entities_to_resolution(
     entities = list(resolution.entities)
     for entity_id in sorted(by_entity):
         entity = _classifier_entity_from_evidence(conn, entity_id, by_entity[entity_id])
-        if entity is not None and (
-            _is_link_key(entity.canonical_key) or _has_link_alias(conn, entity.entity_id)
-        ):
+        if entity is not None:
             entities.append(entity)
     entities.sort(key=lambda entity: entity.entity_id)
     return ResolutionResult(entities=entities, item_to_entity=dict(resolution.item_to_entity))
