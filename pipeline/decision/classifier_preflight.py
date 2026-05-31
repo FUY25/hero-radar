@@ -17,7 +17,7 @@ def classifier_preflight_summary(
     max_scan: int = MAX_PREFLIGHT_SCAN,
 ) -> dict[str, Any]:
     x_stats = _x_preflight(conn, now=now, limit=x_limit, max_scan=max_scan)
-    hn_stats = _hn_preflight(conn, limit=hn_limit, max_scan=max_scan)
+    hn_stats = _hn_preflight(conn, now=now, limit=hn_limit, max_scan=max_scan)
     return {**x_stats, **hn_stats}
 
 
@@ -60,6 +60,7 @@ def _x_preflight(
 def _hn_preflight(
     conn: sqlite3.Connection,
     *,
+    now: str,
     limit: int,
     max_scan: int,
 ) -> dict[str, Any]:
@@ -67,9 +68,23 @@ def _hn_preflight(
         "hn_classifier_limit": max(0, int(limit or 0)),
     }
     try:
-        from pipeline.decision.hn_classifier import candidate_hn_units
+        from pipeline.decision.hn_classifier import (
+            candidate_hn_units,
+            hn_classifier_shortlist_thresholds,
+        )
 
-        unit_count = len(candidate_hn_units(conn, limit=max_scan))
+        min_score, window_days = hn_classifier_shortlist_thresholds()
+        stats["hn_points_floor"] = min_score
+        stats["hn_window_days"] = window_days
+        unit_count = len(
+            candidate_hn_units(
+                conn,
+                limit=max_scan,
+                now=now,
+                min_score=min_score,
+                window_days=window_days,
+            )
+        )
     except sqlite3.OperationalError:
         unit_count = 0
     stats["hn_classifier_units"] = unit_count

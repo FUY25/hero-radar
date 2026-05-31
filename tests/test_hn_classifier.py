@@ -97,6 +97,8 @@ class HnClassifierTest(unittest.TestCase):
         url: str,
         score: int,
         comments: int = 0,
+        fetched_at: str = "2026-05-31T00:00:00Z",
+        created_at: str | None = None,
     ) -> int:
         snapshot = conn.execute(
             "select id from snapshots where source = ? order by id desc limit 1",
@@ -129,7 +131,7 @@ class HnClassifierTest(unittest.TestCase):
                 external_id,
                 title,
                 url,
-                "2026-05-31T00:00:00Z",
+                fetched_at,
                 None,
                 None,
                 None,
@@ -141,6 +143,7 @@ class HnClassifierTest(unittest.TestCase):
                         "points": score,
                         "comments": comments,
                         "story_id": external_id,
+                        **({"created_at": created_at} if created_at else {}),
                     },
                     ensure_ascii=False,
                 ),
@@ -181,6 +184,84 @@ class HnClassifierTest(unittest.TestCase):
         self.assertEqual(units[0]["item_ids"], [first, second])
         self.assertEqual(units[0]["best_score"], 120)
 
+    def test_candidate_hn_units_filters_by_points_floor_and_window_before_classification(self) -> None:
+        from pipeline.decision.hn_classifier import candidate_hn_units
+
+        conn = self.make_conn(title="Seed")
+        conn.execute("delete from items")
+        current_hot = self.insert_hn_item(
+            conn,
+            source="hn_firebase",
+            external_id="current-hot",
+            title="Useful current project",
+            url="https://current.example",
+            score=60,
+            fetched_at="2026-05-31T00:00:00Z",
+        )
+        self.insert_hn_item(
+            conn,
+            source="hn_firebase",
+            external_id="current-low",
+            title="Show HN: Low score project-like item",
+            url="https://low.example",
+            score=29,
+            fetched_at="2026-05-31T00:00:00Z",
+        )
+        self.insert_hn_item(
+            conn,
+            source="hn_firebase",
+            external_id="old-hot",
+            title="Old hot project",
+            url="https://old.example",
+            score=500,
+            fetched_at="2026-05-20T00:00:00Z",
+        )
+
+        units = candidate_hn_units(
+            conn,
+            limit=10,
+            now="2026-05-31T12:00:00Z",
+            min_score=30,
+            window_days=7,
+        )
+
+        self.assertEqual([unit["item_ids"] for unit in units], [[current_hot]])
+
+    def test_candidate_hn_units_ranks_hn_points_before_product_likeness(self) -> None:
+        from pipeline.decision.hn_classifier import candidate_hn_units
+
+        conn = self.make_conn(title="Seed")
+        conn.execute("delete from items")
+        product_like = self.insert_hn_item(
+            conn,
+            source="hn_firebase",
+            external_id="show-hn",
+            title="Show HN: Lower score project",
+            url="https://project.example",
+            score=40,
+            fetched_at="2026-05-31T00:00:00Z",
+        )
+        hot = self.insert_hn_item(
+            conn,
+            source="hn_firebase",
+            external_id="hot",
+            title="Hot HN item",
+            url="https://hot.example",
+            score=300,
+            fetched_at="2026-05-31T00:00:00Z",
+        )
+
+        units = candidate_hn_units(
+            conn,
+            limit=1,
+            now="2026-05-31T12:00:00Z",
+            min_score=30,
+            window_days=7,
+        )
+
+        self.assertEqual([unit["item_ids"] for unit in units], [[hot]])
+        self.assertNotEqual(product_like, hot)
+
     def test_candidate_hn_units_use_title_for_hn_self_posts(self) -> None:
         from pipeline.decision.hn_classifier import candidate_hn_units
 
@@ -209,7 +290,7 @@ class HnClassifierTest(unittest.TestCase):
         self.assertTrue(units[0]["unit_key"].startswith("title:ask-hn-what-do-you-use"))
         self.assertEqual(units[0]["item_ids"], [first, second])
 
-    def test_candidate_hn_units_rank_candidate_impact_before_heat(self) -> None:
+    def test_candidate_hn_units_use_candidate_impact_as_points_tiebreaker(self) -> None:
         from pipeline.decision.entity_resolution import entity_id_for_key
         from pipeline.decision.hn_classifier import candidate_hn_units
 
@@ -229,7 +310,7 @@ class HnClassifierTest(unittest.TestCase):
             external_id="hot",
             title="Hot news",
             url="https://example.com/news",
-            score=300,
+            score=40,
         )
         entity_id = entity_id_for_key("domain:candidate.dev")
         conn.execute(
@@ -265,7 +346,7 @@ class HnClassifierTest(unittest.TestCase):
 
         self.assertEqual(units[0]["url"], "https://candidate.dev")
 
-    def test_candidate_hn_units_uses_explicit_current_run_impact_before_discovery(self) -> None:
+    def test_candidate_hn_units_ranks_points_before_explicit_current_run_impact(self) -> None:
         from pipeline.decision.hn_classifier import candidate_hn_units
 
         conn = self.make_conn(title="Seed")
@@ -294,7 +375,8 @@ class HnClassifierTest(unittest.TestCase):
             edge_item_ids=set(),
         )
 
-        self.assertEqual([unit["item_ids"] for unit in units], [[candidate]])
+        self.assertNotEqual(candidate, units[0]["item_ids"][0])
+        self.assertEqual(units[0]["url"], "https://hot.example")
 
     def test_run_hn_classifier_classifies_deduped_unit_once_and_maps_all_items(self) -> None:
         from pipeline.decision.hn_classifier import run_hn_classifier
@@ -348,7 +430,7 @@ class HnClassifierTest(unittest.TestCase):
         ).fetchall()
         self.assertEqual(len(refs), 2)
 
-    def test_run_hn_classifier_spends_limit_on_explicit_candidate_impact_first(self) -> None:
+    def test_run_hn_classifier_spends_limit_on_higher_points_before_candidate_impact(self) -> None:
         from pipeline.decision.hn_classifier import run_hn_classifier
 
         conn = self.make_conn(title="Seed")
@@ -372,13 +454,13 @@ class HnClassifierTest(unittest.TestCase):
         provider = FakeLLMProvider(
             [
                 {
-                    "item_id": candidate,
+                    "item_id": hot,
                     "projectness": "news_article",
                     "confidence": 0.9,
                     "canonical_name": "",
                     "deterministic_links": [],
                     "proposed_links": [],
-                    "summary": "Candidate-impact unit is classified first.",
+                    "summary": "Higher-points unit is classified first.",
                 }
             ]
         )
@@ -397,9 +479,36 @@ class HnClassifierTest(unittest.TestCase):
         self.assertEqual(len(provider.calls), 1)
         self.assertEqual(
             conn.execute("select raw_url_or_ref from evidence_rows").fetchone()[0],
-            f"item:{candidate}",
+            f"item:{hot}",
         )
         self.assertNotEqual(candidate, hot)
+
+    def test_run_hn_classifier_does_not_call_llm_for_below_floor_hn_items(self) -> None:
+        from pipeline.decision.hn_classifier import run_hn_classifier
+
+        conn = self.make_conn(title="Seed")
+        conn.execute("delete from items")
+        self.insert_hn_item(
+            conn,
+            source="hn_firebase",
+            external_id="low",
+            title="Show HN: Low score project-like item",
+            url="https://low.example",
+            score=29,
+        )
+        provider = FakeLLMProvider([])
+
+        summary = run_hn_classifier(
+            conn,
+            run_id="decision_run",
+            provider=provider,
+            limit=10,
+            now="2026-05-31T00:00:00Z",
+        )
+
+        self.assertEqual(summary["classified"], 0)
+        self.assertEqual(len(provider.calls), 0)
+        self.assertEqual(conn.execute("select count(*) from evidence_rows").fetchone()[0], 0)
 
     def test_hn_unit_cache_reuses_result_when_duplicate_rows_arrive_later(self) -> None:
         from pipeline.decision.hn_classifier import run_hn_classifier

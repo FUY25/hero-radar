@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime as dt
 import json
 import re
 import sqlite3
@@ -35,6 +36,8 @@ PROJECTNESS_VALUES = set(PROJECTNESS_ORDER)
 PROJECT_SIGNAL_VALUES = {"project", "package", "company_product"}
 PROJECT_ADMISSION_VALUES = {"project", "package"}
 LINK_TYPES = {"github", "domain", "npm"}
+DEFAULT_HN_POINTS_FLOOR = 30
+DEFAULT_HN_WINDOW_DAYS = 7
 
 
 def entity_id_for_link(key: str) -> str:
@@ -73,6 +76,86 @@ def _comments(row: dict[str, Any]) -> float:
         except (TypeError, ValueError):
             continue
     return 0.0
+
+
+def _parse_datetime(value: Any) -> dt.datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            return dt.datetime.fromtimestamp(float(value), dt.timezone.utc)
+        except (TypeError, ValueError, OSError):
+            return None
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    if text.isdigit():
+        try:
+            return dt.datetime.fromtimestamp(float(text), dt.timezone.utc)
+        except (TypeError, ValueError, OSError):
+            return None
+    try:
+        parsed = dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=dt.timezone.utc)
+    return parsed.astimezone(dt.timezone.utc)
+
+
+def _story_time(row: dict[str, Any]) -> dt.datetime | None:
+    metadata = row.get("metadata") or {}
+    if row.get("source") == "hn_firebase":
+        parsed = _parse_datetime(metadata.get("created_at_unix"))
+        if parsed:
+            return parsed
+    return (
+        _parse_datetime(metadata.get("created_at"))
+        or _parse_datetime(row.get("fetched_at"))
+    )
+
+
+def _shortlist_rows(
+    rows: list[dict[str, Any]],
+    *,
+    now: str | None,
+    min_score: float | None,
+    window_days: float | None,
+) -> list[dict[str, Any]]:
+    now_dt = _parse_datetime(now) if now else None
+    window_start = (
+        now_dt - dt.timedelta(days=float(window_days))
+        if now_dt is not None and window_days is not None
+        else None
+    )
+    output: list[dict[str, Any]] = []
+    for row in rows:
+        if min_score is not None and _score(row) < float(min_score):
+            continue
+        if now_dt is not None and window_start is not None:
+            story_time = _story_time(row)
+            if story_time is None or story_time < window_start or story_time > now_dt:
+                continue
+        output.append(row)
+    return output
+
+
+def hn_classifier_shortlist_thresholds() -> tuple[float, float]:
+    try:
+        from pipeline.decision.rules import load_rules
+
+        hn_rules = load_rules().get("hn", {})
+    except Exception:  # noqa: BLE001
+        hn_rules = {}
+    try:
+        points_floor = float(hn_rules.get("points_floor_watch", DEFAULT_HN_POINTS_FLOOR))
+    except (TypeError, ValueError):
+        points_floor = float(DEFAULT_HN_POINTS_FLOOR)
+    try:
+        window_days = float(hn_rules.get("window_days", DEFAULT_HN_WINDOW_DAYS))
+    except (TypeError, ValueError):
+        window_days = float(DEFAULT_HN_WINDOW_DAYS)
+    return points_floor, window_days
 
 
 def candidate_hn_rows(conn: sqlite3.Connection, limit: int) -> list[dict[str, Any]]:
@@ -190,6 +273,9 @@ def candidate_hn_units(
     *,
     potential_item_ids: set[int] | None = None,
     edge_item_ids: set[int] | None = None,
+    now: str | None = None,
+    min_score: float | None = None,
+    window_days: float | None = None,
 ) -> list[dict[str, Any]]:
     rows = candidate_hn_rows(conn, limit=1_000_000)
     grouped: dict[str, list[dict[str, Any]]] = {}
@@ -208,8 +294,16 @@ def candidate_hn_units(
     )
     units: list[dict[str, Any]] = []
     for unit_key, unit_rows in grouped.items():
-        representative = min(unit_rows, key=lambda row: int(row["item_id"]))
-        item_ids = sorted(int(row["item_id"]) for row in unit_rows)
+        shortlisted_rows = _shortlist_rows(
+            unit_rows,
+            now=now,
+            min_score=min_score,
+            window_days=window_days,
+        )
+        if not shortlisted_rows:
+            continue
+        representative = min(shortlisted_rows, key=lambda row: int(row["item_id"]))
+        item_ids = sorted(int(row["item_id"]) for row in shortlisted_rows)
         candidate_impact = 0
         if any(item_id in potential_ids for item_id in item_ids):
             candidate_impact = 2
@@ -219,27 +313,28 @@ def candidate_hn_units(
             "unit_key": unit_key,
             "item_id": representative["item_id"],
             "item_ids": item_ids,
-            "rows": sorted(unit_rows, key=lambda row: int(row["item_id"])),
+            "rows": sorted(shortlisted_rows, key=lambda row: int(row["item_id"])),
             "source": representative["source"],
-            "sources": sorted({str(row["source"]) for row in unit_rows}),
+            "sources": sorted({str(row["source"]) for row in shortlisted_rows}),
             "external_id": representative["external_id"],
             "title": representative["title"],
             "url": representative["url"],
             "fetched_at": representative["fetched_at"],
             "description": representative.get("description", ""),
             "metadata": representative.get("metadata", {}),
-            "best_score": max(_score(row) for row in unit_rows),
-            "best_comments": max(_comments(row) for row in unit_rows),
-            "row_count": len(unit_rows),
+            "best_score": max(_score(row) for row in shortlisted_rows),
+            "best_comments": max(_comments(row) for row in shortlisted_rows),
+            "row_count": len(shortlisted_rows),
             "candidate_impact": candidate_impact,
         }
         unit["product_likeness"] = _product_likeness(unit)
         units.append(unit)
     units.sort(
         key=lambda unit: (
+            unit["best_score"],
             unit["candidate_impact"],
             unit["product_likeness"],
-            unit["best_score"],
+            unit["best_comments"],
             unit["row_count"],
             unit["unit_key"],
         ),
@@ -641,11 +736,15 @@ def run_hn_classifier(
         "You are a bounded Hacker News source classifier. Return only JSON. "
         "Do not promote news articles, topic discussions, or generic terms as projects."
     )
+    min_score, window_days = hn_classifier_shortlist_thresholds()
     units = candidate_hn_units(
         conn,
         limit,
         potential_item_ids=potential_item_ids,
         edge_item_ids=edge_item_ids,
+        now=now,
+        min_score=min_score,
+        window_days=window_days,
     )
     outputs_by_unit_key: dict[str, dict[str, Any]] = {}
     uncached_jobs: list[dict[str, Any]] = []
