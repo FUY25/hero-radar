@@ -40,6 +40,13 @@
     "exact_resources_48h_potential": 2,
     "single_resource_watch": 1
   },
+  "npm_registry": {
+    "daily_downloads": {
+      "watch": 3000,
+      "potential": 10000,
+      "high_potential": 100000
+    }
+  },
   "verified_cross_source": {
     "weak_signals_48h_potential": 2
   },

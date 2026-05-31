@@ -212,6 +212,25 @@ def rows_by_entity(rows: list[dict[str, Any]], resolution: ResolutionResult) -> 
     return grouped
 
 
+def evidence_field(row: Any, field: str, default: Any = None) -> Any:
+    if isinstance(row, dict):
+        return row.get(field, default)
+    return getattr(row, field, default)
+
+
+def npm_evidence_by_entity(classifier_evidence: list[Any] | None) -> dict[str, list[Any]]:
+    grouped: dict[str, list[Any]] = {}
+    for row in classifier_evidence or []:
+        if evidence_field(row, "source") != "npm_registry":
+            continue
+        if evidence_field(row, "family") != "package_family":
+            continue
+        entity_id = evidence_field(row, "entity_id")
+        if entity_id:
+            grouped.setdefault(str(entity_id), []).append(row)
+    return grouped
+
+
 def entity_map(resolution: ResolutionResult) -> dict[str, Entity]:
     return {entity.entity_id: entity for entity in resolution.entities}
 
@@ -224,15 +243,19 @@ def evaluate_entities(
     now: str,
     rules: dict[str, Any] | None = None,
     extra_github_signals: dict[str, dict[str, float]] | None = None,
+    classifier_evidence: list[Any] | None = None,
 ) -> RuleEvaluationResult:
     active_rules = rules or load_rules()
     now_dt = parse_time(now) or dt.datetime.now(dt.timezone.utc)
     grouped = rows_by_entity(rows, resolution)
     entities = entity_map(resolution)
+    npm_classifier_evidence = npm_evidence_by_entity(classifier_evidence)
     states = {
         entity_id: EntityState(entity=entity)
         for entity_id, entity in entities.items()
-        if entity_id in grouped or (extra_github_signals and entity_id in extra_github_signals)
+        if entity_id in grouped
+        or (extra_github_signals and entity_id in extra_github_signals)
+        or entity_id in npm_classifier_evidence
     }
     evidence_rows: list[EvidenceRow] = []
 
@@ -259,6 +282,16 @@ def evaluate_entities(
         )
         evidence_rows.extend(
             evaluate_huggingface(state, entity_rows, active_rules, rule_version, run_id, now_dt)
+        )
+        evidence_rows.extend(
+            evaluate_npm_registry(
+                state,
+                npm_classifier_evidence.get(entity_id, []),
+                active_rules,
+                rule_version,
+                run_id,
+                now,
+            )
         )
         evidence_rows.extend(
             evaluate_extra_github_signals(
@@ -629,6 +662,99 @@ def evaluate_huggingface(
             run_id=run_id,
         )
     ]
+
+
+def evaluate_npm_registry(
+    state: EntityState,
+    npm_evidence: list[Any],
+    rules: dict[str, Any],
+    rule_version: str,
+    run_id: str,
+    now: str,
+) -> list[EvidenceRow]:
+    if not npm_evidence:
+        return []
+    thresholds = rules.get("npm_registry", {}).get("daily_downloads", {})
+    output: list[EvidenceRow] = []
+    packages: dict[str, dict[str, Any]] = {}
+
+    for row in npm_evidence:
+        metric_name = evidence_field(row, "metric_name")
+        if metric_name not in {"daily_downloads", "downloads_7d"}:
+            continue
+        package_key = str(
+            evidence_field(row, "alias")
+            or evidence_field(row, "raw_url_or_ref")
+            or state.entity.canonical_key
+        )
+        package = packages.setdefault(package_key, {})
+        existing = package.get(metric_name)
+        if existing is None or number(evidence_field(row, "metric_value")) > number(
+            evidence_field(existing, "metric_value")
+        ):
+            package[metric_name] = row
+
+    for package_key in sorted(packages):
+        package = packages[package_key]
+        daily_row = package.get("daily_downloads")
+        if daily_row is None:
+            continue
+        daily_downloads = number(evidence_field(daily_row, "metric_value"))
+        weekly_row = package.get("downloads_7d")
+        weekly_downloads = (
+            number(evidence_field(weekly_row, "metric_value"))
+            if weekly_row is not None
+            else None
+        )
+        rising = (
+            weekly_downloads is not None
+            and weekly_downloads > 0
+            and daily_downloads > weekly_downloads / 7
+        )
+
+        level = "none"
+        if daily_downloads >= number(thresholds.get("watch")):
+            level = "watch"
+        if daily_downloads >= number(thresholds.get("potential")) and rising:
+            level = "potential"
+        if daily_downloads >= number(thresholds.get("high_potential")):
+            level = "high_potential"
+        if level == "none":
+            continue
+
+        event_at = str(evidence_field(daily_row, "event_at") or now)
+        promote(state, level, "package_family", event_at, "npm_registry_daily_downloads")
+        if level == "watch":
+            add_weak_signal(state, "package_family", event_at)
+        if level == "high_potential":
+            note = "npm daily downloads high threshold passed"
+        elif level == "potential":
+            note = "npm daily downloads potential threshold passed and rising versus 7d average"
+        else:
+            note = "npm daily downloads watch threshold passed; rising not proven"
+        output.append(
+            EvidenceRow(
+                entity_id=state.entity.entity_id,
+                canonical_entity=state.entity.canonical_entity,
+                alias=evidence_field(daily_row, "alias"),
+                source="npm_registry",
+                event_at=event_at,
+                relative_to_reference=None,
+                metric_name="daily_downloads",
+                metric_value=value_text(daily_downloads),
+                family="package_family",
+                rule_id=f"npm_registry_daily_downloads_{level}",
+                rule_version=rule_version,
+                signal_label="early_trigger" if is_at_least(level, "potential") else "watch",
+                historical_safety=str(
+                    evidence_field(daily_row, "historical_safety") or "as_of_safe"
+                ),
+                note=note,
+                raw_url_or_ref=evidence_field(daily_row, "raw_url_or_ref"),
+                run_id=run_id,
+            )
+        )
+    return output
 
 
 def evaluate_extra_github_signals(
