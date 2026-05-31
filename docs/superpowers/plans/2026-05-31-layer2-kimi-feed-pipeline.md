@@ -97,6 +97,19 @@
 
 All workers must work in `/Users/fuyuming/Documents/Hero radar` on `main`. Do not use `.claude/worktrees/pre-layer2-decision-pipeline`.
 
+Execution dependency DAG:
+
+```text
+Task 1 schema
+  -> Tasks 2-7 can run after Task 1, split by file ownership
+  -> Task 8 runner waits for Tasks 2-7 because it imports provider/grouping/context/scheduler/scout/scoring/deepdive
+  -> Task 9 API waits for Task 8 output tables and payload shape
+  -> Tasks 10-12 React/settings wait for Task 9 API contract
+  -> Task 13 evals and Task 14 verification run last
+```
+
+Worker A owns `pipeline/server.py` and `pipeline/run_daily.py`; Worker D must not edit server code. Task 12 is split at execution time: Worker A does the server run flags, Worker D does React settings UI after Worker A lands.
+
 ## Task 1: Layer 2 Schema
 
 **Files:**
@@ -403,6 +416,31 @@ class KimiProviderTest(unittest.TestCase):
 
         self.assertEqual(result, {"ok": True})
         self.assertEqual(len(calls), 2)
+
+    def test_kimi_web_search_client_uses_builtin_tool_without_json_mode(self):
+        from pipeline.decision.kimi_provider import KimiProvider, KimiWebSearchClient
+
+        captured_payloads = []
+
+        def fake_urlopen(request, timeout):
+            payload = json.loads(request.data.decode("utf-8"))
+            captured_payloads.append(payload)
+            return FakeHttpResponse(
+                {"choices": [{"message": {"content": "Search summary for owner/repo"}}]}
+            )
+
+        provider = KimiProvider(api_key="secret", timeout=1, max_retries=0)
+        client = KimiWebSearchClient(provider=provider)
+
+        with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            result = client.search(query="owner/repo agent workflow", max_results=3)
+
+        self.assertEqual(result["content"], "Search summary for owner/repo")
+        self.assertEqual(
+            captured_payloads[0]["tools"],
+            [{"type": "builtin_function", "function": {"name": "$web_search"}}],
+        )
+        self.assertNotIn("response_format", captured_payloads[0])
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -474,9 +512,10 @@ class KimiProvider:
         temperature: float = 0,
         max_tokens: int | None = None,
         tools: list[dict[str, Any]] | None = None,
+        json_mode: bool = True,
     ) -> dict[str, Any]:
         system_content = system_prompt.strip() or "Return strict JSON only."
-        if "json" not in system_content.lower():
+        if json_mode and "json" not in system_content.lower():
             system_content = f"{system_content}\nReturn strict JSON only."
         payload: dict[str, Any] = {
             "model": self.model,
@@ -488,8 +527,9 @@ class KimiProvider:
                 },
             ],
             "temperature": temperature,
-            "response_format": {"type": "json_object"},
         }
+        if json_mode:
+            payload["response_format"] = {"type": "json_object"}
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
         if tools:
@@ -533,6 +573,49 @@ class KimiProvider:
             except (TimeoutError, urllib.error.URLError, RuntimeError, ValueError, KeyError, IndexError) as exc:
                 last_error = exc
         raise last_error or RuntimeError("Kimi request failed")
+
+
+class KimiWebSearchClient:
+    """Small wrapper around Kimi's built-in `$web_search` tool.
+
+    It intentionally does not use JSON mode because built-in tool calls and
+    strict JSON mode can be model/provider-sensitive. The deepdive tool stores
+    the returned content as search context, not as authoritative structured data.
+    """
+
+    WEB_SEARCH_TOOL = {"type": "builtin_function", "function": {"name": "$web_search"}}
+
+    def __init__(self, *, provider: KimiProvider) -> None:
+        self.provider = provider
+
+    def search(self, *, query: str, max_results: int = 5) -> dict[str, Any]:
+        if not self.provider.api_key:
+            raise RuntimeError("KIMI_API_KEY or MOONSHOT_API_KEY is not configured")
+        payload = self.provider.build_payload(
+            system_prompt=(
+                "Use web search to gather concise external context. "
+                "Return a compact plain-text summary with URLs when available."
+            ),
+            user_payload={"query": query, "max_results": max(1, min(8, int(max_results)))},
+            temperature=0,
+            max_tokens=1200,
+            tools=[self.WEB_SEARCH_TOOL],
+            json_mode=False,
+        )
+        request = urllib.request.Request(
+            f"{self.provider.base_url}/chat/completions",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {self.provider.api_key}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=self.provider.timeout) as response:
+            body = json.loads(response.read().decode("utf-8"))
+        content = str(body["choices"][0]["message"].get("content") or "")
+        return {"query": query, "content": content[:6000], "model": self.provider.model}
 ```
 
 No change is required in `llm_provider.py` unless a shared `OpenAICompatibleProvider` is extracted during implementation. If extracting, keep the existing DeepSeek tests passing unchanged.
@@ -1379,68 +1462,6 @@ def _cache_key(provider: str, model: str, prompt_version: str, payload: dict[str
     digest = hashlib.sha256(to_json(payload).encode("utf-8")).hexdigest()
     return f"{provider}:{model}:{prompt_version}:{digest}"
 
-
-def default_deepdive_tools(
-    conn: sqlite3.Connection,
-    *,
-    decision_run_id: str,
-    enable_kimi_web_search: bool = False,
-    web_search_client: Any | None = None,
-) -> dict[str, ToolFn]:
-    def fetch_cached_readme(arguments: dict[str, Any]) -> dict[str, Any]:
-        repo = str(arguments.get("repo") or "").lower().strip().removeprefix("github:")
-        row = conn.execute(
-            """
-            select response_json
-            from api_cache
-            where source = 'github_readme' and external_id = ? and status = 'ok'
-            order by fetched_at desc
-            limit 1
-            """,
-            (repo,),
-        ).fetchone()
-        return json.loads(row[0]) if row else {"missing": True, "repo": repo}
-
-    def read_evidence_rows(arguments: dict[str, Any]) -> dict[str, Any]:
-        entity_id = str(arguments.get("entity_id") or "")
-        rows = conn.execute(
-            """
-            select source, event_at, metric_name, metric_value, family, signal_label, note, raw_url_or_ref
-            from evidence_rows
-            where run_id = ? and entity_id = ?
-            order by event_at desc, id desc
-            limit 80
-            """,
-            (decision_run_id, entity_id),
-        ).fetchall()
-        return {
-            "rows": [
-                {
-                    "source": row[0],
-                    "event_at": row[1],
-                    "metric_name": row[2],
-                    "metric_value": row[3],
-                    "family": row[4],
-                    "signal_label": row[5],
-                    "note": row[6],
-                    "raw_url_or_ref": row[7],
-                }
-                for row in rows
-            ]
-        }
-
-    def kimi_web_search(arguments: dict[str, Any]) -> dict[str, Any]:
-        query = str(arguments.get("query") or "").strip()
-        max_results = int(arguments.get("max_results") or 5)
-        if not enable_kimi_web_search or web_search_client is None:
-            return {"disabled": True, "query": query}
-        return web_search_client.search(query=query, max_results=max(1, min(8, max_results)))
-
-    return {
-        "fetch_cached_readme": fetch_cached_readme,
-        "read_evidence_rows": read_evidence_rows,
-        "kimi_web_search": kimi_web_search,
-    }
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
@@ -1496,7 +1517,7 @@ class Layer2ScoringTest(unittest.TestCase):
             }
         )
 
-        self.assertEqual(score, 67.75)
+        self.assertEqual(score, 66.75)
 
     def test_scores_groups_and_persists_result(self):
         from pipeline.decision.layer2_scoring import score_candidate_groups
@@ -1534,9 +1555,9 @@ class Layer2ScoringTest(unittest.TestCase):
 
         scores = score_candidate_groups(conn, feed_run_id="l2-run", groups=[group], provider=provider)
 
-        self.assertEqual(scores[0]["l2_score"], 67.75)
+        self.assertEqual(scores[0]["l2_score"], 66.75)
         row = conn.execute("select l2_score, primary_reason, provider, model from l2_scores").fetchone()
-        self.assertEqual(row, (67.75, "Workflow Shift", "fake", "fake-json"))
+        self.assertEqual(row, (66.75, "Workflow Shift", "fake", "fake-json"))
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1678,6 +1699,7 @@ def _clamp_float(value: Any, minimum: float, maximum: float) -> float:
 def _cache_key(provider: str, model: str, prompt_version: str, payload: dict[str, Any]) -> str:
     digest = hashlib.sha256(to_json(payload).encode("utf-8")).hexdigest()
     return f"{provider}:{model}:{prompt_version}:{digest}"
+
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
@@ -1832,6 +1854,79 @@ class Layer2DeepdiveTest(unittest.TestCase):
 
         self.assertEqual(result["results"][0]["title"], "Result")
         self.assertEqual(client.calls, [{"query": "owner/repo", "max_results": 3}])
+
+    def test_deepdive_enforces_per_tool_family_budgets(self):
+        from pipeline.decision.layer2_deepdive import DeepdiveLimits, run_deepdives
+
+        conn = sqlite3.connect(":memory:")
+        init_decision_db(conn)
+        provider = FakeLLMProvider([
+            {
+                "tool_requests": [
+                    {"name": "kimi_web_search", "arguments": {"query": "one"}},
+                    {"name": "kimi_web_search", "arguments": {"query": "two"}},
+                    {"name": "fetch_github_file", "arguments": {"repo": "owner/repo", "path": "README.md"}},
+                    {"name": "fetch_github_file", "arguments": {"repo": "owner/repo", "path": "package.json"}},
+                ]
+            },
+            {
+                "summary": "Project summary",
+                "why_now": "Moving today",
+                "what_changed": "New workflow",
+                "evidence": ["GitHub evidence"],
+                "adoption_path": "CLI users",
+                "risks": ["early"],
+                "open_questions": ["pricing"],
+                "recommended_action": "read",
+            },
+        ])
+        calls = []
+
+        def record_tool(arguments):
+            calls.append(arguments)
+            return {"ok": True}
+
+        run_deepdives(
+            conn,
+            feed_run_id="l2-run",
+            scored=[{"group": self.group("budget", "potential"), "l2_score": 90}],
+            provider=provider,
+            max_deepdives=1,
+            min_l2_score=0,
+            tools={"kimi_web_search": record_tool, "fetch_github_file": record_tool},
+            limits=DeepdiveLimits(
+                max_tool_calls=10,
+                max_web_search_calls=1,
+                max_repo_file_calls=1,
+            ),
+        )
+
+        self.assertEqual(len(calls), 2)
+        trace = json.loads(conn.execute("select tool_trace_json from deepdive_reports").fetchone()[0])
+        self.assertEqual([row["status"] for row in trace], ["ok", "budget_exceeded", "ok", "budget_exceeded"])
+
+    def test_default_tools_expose_minimum_real_deepdive_tools(self):
+        from pipeline.decision.layer2_deepdive import default_deepdive_tools
+
+        conn = sqlite3.connect(":memory:")
+        init_decision_db(conn)
+        tools = default_deepdive_tools(conn, decision_run_id="decision-run")
+
+        self.assertEqual(
+            sorted(tools),
+            [
+                "fetch_cached_readme",
+                "fetch_github_file",
+                "fetch_github_tree",
+                "fetch_hn_thread",
+                "fetch_homepage_or_docs",
+                "fetch_package_manifest",
+                "fetch_x_tweet_context",
+                "kimi_web_search",
+                "read_evidence_rows",
+                "read_source_items",
+            ],
+        )
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1852,7 +1947,10 @@ Create `pipeline/decision/layer2_deepdive.py`:
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 import sqlite3
+import urllib.request
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -1866,7 +1964,8 @@ DEFAULT_DEEPDIVE_PROMPT_VERSION = "layer2-deepdive-v1"
 PLAN_SYSTEM_PROMPT = """
 You are planning a bounded Hero Radar project deepdive.
 Return strict JSON with tool_requests: an array of {name, arguments}.
-Use only tools that are listed in available_tools. Respect max_tool_calls.
+Use only tools that are listed in available_tools. Respect max_tool_calls and
+all per-tool-family budgets.
 """
 
 
@@ -1883,7 +1982,13 @@ ToolFn = Callable[[dict[str, Any]], dict[str, Any]]
 
 @dataclass(frozen=True)
 class DeepdiveLimits:
-    max_tool_calls: int = 8
+    max_tool_calls: int = 20
+    max_web_search_calls: int = 3
+    max_repo_tree_calls: int = 2
+    max_repo_file_calls: int = 8
+    max_page_fetch_calls: int = 6
+    max_hn_thread_calls: int = 3
+    max_x_context_calls: int = 5
     max_tool_result_chars: int = 6000
 
 
@@ -1927,7 +2032,15 @@ def run_deepdives(
             "candidate": group.context,
             "score": _score_payload(row),
             "available_tools": sorted(active_tools),
-            "limits": {"max_tool_calls": active_limits.max_tool_calls},
+            "limits": {
+                "max_tool_calls": active_limits.max_tool_calls,
+                "max_web_search_calls": active_limits.max_web_search_calls,
+                "max_repo_tree_calls": active_limits.max_repo_tree_calls,
+                "max_repo_file_calls": active_limits.max_repo_file_calls,
+                "max_page_fetch_calls": active_limits.max_page_fetch_calls,
+                "max_hn_thread_calls": active_limits.max_hn_thread_calls,
+                "max_x_context_calls": active_limits.max_x_context_calls,
+            },
         }
         plan = provider.complete_json(
             task="layer2_deepdive_plan",
@@ -1992,15 +2105,23 @@ def _run_tool_plan(
     if not isinstance(requests, list):
         raise ValueError("deepdive plan must include tool_requests array")
     trace: list[dict[str, Any]] = []
-    for request in requests[: max(0, limits.max_tool_calls)]:
+    family_counts: dict[str, int] = {}
+    total_count = 0
+    for request in requests:
         if not isinstance(request, dict):
             continue
         name = str(request.get("name") or "")
         arguments = request.get("arguments") if isinstance(request.get("arguments"), dict) else {}
+        family = _tool_family(name)
+        if total_count >= max(0, limits.max_tool_calls) or not _within_family_budget(family_counts, family, limits):
+            trace.append({"tool": name, "arguments": arguments, "status": "budget_exceeded", "result": {}})
+            continue
         if name not in tools:
             trace.append({"tool": name, "arguments": arguments, "status": "unavailable", "result": {}})
             continue
         result = tools[name](arguments)
+        total_count += 1
+        family_counts[family] = family_counts.get(family, 0) + 1
         trace.append(
             {
                 "tool": name,
@@ -2010,6 +2131,35 @@ def _run_tool_plan(
             }
         )
     return trace
+
+
+def _tool_family(name: str) -> str:
+    if name == "kimi_web_search":
+        return "web_search"
+    if name == "fetch_github_tree":
+        return "repo_tree"
+    if name == "fetch_github_file":
+        return "repo_file"
+    if name == "fetch_homepage_or_docs":
+        return "page_fetch"
+    if name == "fetch_hn_thread":
+        return "hn_thread"
+    if name == "fetch_x_tweet_context":
+        return "x_context"
+    return "generic"
+
+
+def _within_family_budget(counts: dict[str, int], family: str, limits: DeepdiveLimits) -> bool:
+    caps = {
+        "web_search": limits.max_web_search_calls,
+        "repo_tree": limits.max_repo_tree_calls,
+        "repo_file": limits.max_repo_file_calls,
+        "page_fetch": limits.max_page_fetch_calls,
+        "hn_thread": limits.max_hn_thread_calls,
+        "x_context": limits.max_x_context_calls,
+    }
+    cap = caps.get(family)
+    return cap is None or counts.get(family, 0) < max(0, cap)
 
 
 def _score_payload(row: dict[str, Any]) -> dict[str, Any]:
@@ -2049,6 +2199,226 @@ def _validate_report(response: dict[str, Any]) -> dict[str, Any]:
 def _cache_key(provider: str, model: str, prompt_version: str, payload: dict[str, Any]) -> str:
     digest = hashlib.sha256(to_json(payload).encode("utf-8")).hexdigest()
     return f"{provider}:{model}:{prompt_version}:{digest}"
+
+
+def default_deepdive_tools(
+    conn: sqlite3.Connection,
+    *,
+    decision_run_id: str,
+    enable_kimi_web_search: bool = False,
+    web_search_client: Any | None = None,
+) -> dict[str, ToolFn]:
+    def read_evidence_rows(arguments: dict[str, Any]) -> dict[str, Any]:
+        entity_id = str(arguments.get("entity_id") or "")
+        rows = conn.execute(
+            """
+            select source, event_at, metric_name, metric_value, family, signal_label, note, raw_url_or_ref
+            from evidence_rows
+            where run_id = ? and entity_id = ?
+            order by event_at desc, id desc
+            limit 80
+            """,
+            (decision_run_id, entity_id),
+        ).fetchall()
+        return {
+            "rows": [
+                {
+                    "source": row[0],
+                    "event_at": row[1],
+                    "metric_name": row[2],
+                    "metric_value": row[3],
+                    "family": row[4],
+                    "signal_label": row[5],
+                    "note": row[6],
+                    "raw_url_or_ref": row[7],
+                }
+                for row in rows
+            ]
+        }
+
+    def read_source_items(arguments: dict[str, Any]) -> dict[str, Any]:
+        item_ids = [
+            int(str(ref).split(":", 1)[1])
+            for ref in arguments.get("source_refs") or []
+            if str(ref).startswith("item:") and str(ref).split(":", 1)[1].isdigit()
+        ][:20]
+        if not item_ids:
+            return {"items": []}
+        placeholders = ",".join("?" for _ in item_ids)
+        rows = conn.execute(
+            f"""
+            select id, source, name, url, description, metadata_json, raw_json
+            from items
+            where id in ({placeholders})
+            order by id
+            """,
+            item_ids,
+        ).fetchall()
+        return {
+            "items": [
+                {
+                    "id": row[0],
+                    "source": row[1],
+                    "name": row[2],
+                    "url": row[3],
+                    "description": row[4],
+                    "metadata": _json_loads(row[5], {}),
+                    "raw": _json_loads(row[6], {}),
+                }
+                for row in rows
+            ]
+        }
+
+    def fetch_cached_readme(arguments: dict[str, Any]) -> dict[str, Any]:
+        repo = _normalize_repo(str(arguments.get("repo") or ""))
+        row = conn.execute(
+            """
+            select response_json
+            from api_cache
+            where source = 'github_readme' and external_id = ? and status = 'ok'
+            order by fetched_at desc
+            limit 1
+            """,
+            (repo,),
+        ).fetchone()
+        return _json_loads(row[0], {}) if row else {"missing": True, "repo": repo}
+
+    def fetch_github_tree(arguments: dict[str, Any]) -> dict[str, Any]:
+        repo = _normalize_repo(str(arguments.get("repo") or ""))
+        if not repo:
+            return {"missing": True, "reason": "repo required"}
+        payload = _fetch_json(f"https://api.github.com/repos/{repo}/git/trees/HEAD?recursive=1")
+        tree = payload.get("tree") if isinstance(payload, dict) else []
+        return {
+            "repo": repo,
+            "paths": [
+                {"path": item.get("path"), "type": item.get("type"), "size": item.get("size")}
+                for item in tree[:250]
+                if isinstance(item, dict)
+            ],
+        }
+
+    def fetch_github_file(arguments: dict[str, Any]) -> dict[str, Any]:
+        repo = _normalize_repo(str(arguments.get("repo") or ""))
+        path = str(arguments.get("path") or "").lstrip("/")
+        if not repo or not path:
+            return {"missing": True, "reason": "repo and path required"}
+        url = f"https://raw.githubusercontent.com/{repo}/HEAD/{path}"
+        return {"repo": repo, "path": path, "content": _fetch_text(url, max_bytes=40000)}
+
+    def fetch_package_manifest(arguments: dict[str, Any]) -> dict[str, Any]:
+        package = str(arguments.get("package") or arguments.get("npm") or "").strip()
+        repo = _normalize_repo(str(arguments.get("repo") or ""))
+        if package:
+            payload = _fetch_json(f"https://registry.npmjs.org/{package}")
+            return {
+                "package": package,
+                "description": payload.get("description"),
+                "dist_tags": payload.get("dist-tags"),
+                "repository": payload.get("repository"),
+            }
+        if repo:
+            return fetch_github_file({"repo": repo, "path": "package.json"})
+        return {"missing": True, "reason": "package or repo required"}
+
+    def fetch_homepage_or_docs(arguments: dict[str, Any]) -> dict[str, Any]:
+        url = str(arguments.get("url") or "").strip()
+        if not (url.startswith("https://") or url.startswith("http://")):
+            return {"missing": True, "reason": "http(s) url required"}
+        return {"url": url, "content": _fetch_text(url, max_bytes=60000)}
+
+    def fetch_hn_thread(arguments: dict[str, Any]) -> dict[str, Any]:
+        item_id = str(arguments.get("item_id") or "").strip().removeprefix("item:")
+        if not item_id.isdigit():
+            return {"missing": True, "reason": "numeric HN item_id required"}
+        item = _fetch_json(f"https://hacker-news.firebaseio.com/v0/item/{item_id}.json")
+        kids = item.get("kids") or []
+        comments = [
+            _fetch_json(f"https://hacker-news.firebaseio.com/v0/item/{kid}.json")
+            for kid in kids[:10]
+        ]
+        return {"item": item, "comments": comments}
+
+    def fetch_x_tweet_context(arguments: dict[str, Any]) -> dict[str, Any]:
+        tweet_id = str(arguments.get("tweet_id") or "").strip().removeprefix("tweet:")
+        row = conn.execute(
+            """
+            select id, name, url, description, metadata_json, raw_json
+            from items
+            where source = 'x_tweets'
+              and (external_id like ? or url like ?)
+            order by id desc
+            limit 1
+            """,
+            (f"%{tweet_id}", f"%/{tweet_id}"),
+        ).fetchone()
+        if not row:
+            return {"missing": True, "tweet_id": tweet_id}
+        return {
+            "item_id": row[0],
+            "name": row[1],
+            "url": row[2],
+            "description": row[3],
+            "metadata": _json_loads(row[4], {}),
+            "raw": _json_loads(row[5], {}),
+        }
+
+    def kimi_web_search(arguments: dict[str, Any]) -> dict[str, Any]:
+        query = str(arguments.get("query") or "").strip()
+        max_results = int(arguments.get("max_results") or 5)
+        if not enable_kimi_web_search:
+            return {"disabled": True, "query": query}
+        if web_search_client is None:
+            raise RuntimeError("Kimi web search is enabled but web_search_client is not configured")
+        return web_search_client.search(query=query, max_results=max(1, min(8, max_results)))
+
+    return {
+        "read_evidence_rows": read_evidence_rows,
+        "read_source_items": read_source_items,
+        "fetch_cached_readme": fetch_cached_readme,
+        "fetch_homepage_or_docs": fetch_homepage_or_docs,
+        "fetch_github_tree": fetch_github_tree,
+        "fetch_github_file": fetch_github_file,
+        "fetch_package_manifest": fetch_package_manifest,
+        "fetch_hn_thread": fetch_hn_thread,
+        "fetch_x_tweet_context": fetch_x_tweet_context,
+        "kimi_web_search": kimi_web_search,
+    }
+
+
+def _normalize_repo(value: str) -> str:
+    repo = value.strip().removeprefix("github:").removeprefix("https://github.com/").strip("/")
+    parts = repo.split("/")
+    if len(parts) < 2:
+        return ""
+    return f"{parts[0].lower()}/{parts[1].lower()}"
+
+
+def _github_headers() -> dict[str, str]:
+    headers = {"Accept": "application/vnd.github+json", "User-Agent": "HeroRadarLayer2"}
+    token = os.environ.get("GITHUB_TOKEN", "")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+def _fetch_json(url: str) -> dict[str, Any]:
+    request = urllib.request.Request(url, headers=_github_headers())
+    with urllib.request.urlopen(request, timeout=15) as response:
+        return json.loads(response.read(2_000_000).decode("utf-8"))
+
+
+def _fetch_text(url: str, *, max_bytes: int) -> str:
+    request = urllib.request.Request(url, headers={"User-Agent": "HeroRadarLayer2"})
+    with urllib.request.urlopen(request, timeout=15) as response:
+        return response.read(max_bytes).decode("utf-8", errors="replace")
+
+
+def _json_loads(value: Any, default: Any) -> Any:
+    try:
+        return json.loads(value) if value else default
+    except (TypeError, ValueError):
+        return default
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
@@ -2228,6 +2598,38 @@ Append to `tests/test_daily_pipeline.py`:
                 "2",
             ],
         )
+
+    def test_daily_pipeline_passes_layer2_web_search_and_tool_budgets(self):
+        from pipeline.run_daily import run_daily
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            runner = FakeRunner()
+
+            run_daily(
+                root=root,
+                python="py",
+                run_id="decision_daily_test",
+                now="2026-05-31T12:00:00Z",
+                run_layer2=True,
+                layer2_enable_kimi_web_search=True,
+                layer2_max_tool_calls=20,
+                layer2_max_web_search_calls=3,
+                layer2_max_repo_files=8,
+                layer2_max_pages=6,
+                runner=runner,
+            )
+
+        cmd = runner.calls[2]["cmd"]
+        self.assertIn("--enable-kimi-web-search", cmd)
+        self.assertIn("--max-tool-calls-per-candidate", cmd)
+        self.assertIn("20", cmd)
+        self.assertIn("--max-web-search-calls-per-candidate", cmd)
+        self.assertIn("3", cmd)
+        self.assertIn("--max-repo-files-per-candidate", cmd)
+        self.assertIn("8", cmd)
+        self.assertIn("--max-pages-per-candidate", cmd)
+        self.assertIn("6", cmd)
 ```
 
 - [ ] **Step 3: Run tests to verify they fail**
@@ -2257,6 +2659,7 @@ from typing import Any
 from pipeline.decision.kimi_provider import (
     DEFAULT_KIMI_DEEPDIVE_MODEL,
     DEFAULT_KIMI_SCORING_MODEL,
+    KimiWebSearchClient,
     KimiProvider,
 )
 from pipeline.decision.layer2_context import assemble_group_context
@@ -2364,6 +2767,11 @@ def run_layer2_feed(
                 "insert or replace into l2_feed_items(feed_run_id, group_id, section, rank, deepdive_status) values (?, ?, ?, ?, ?)",
                 (active_feed_run_id, row["group"].group_id, "scored", rank, "not_deepdived"),
             )
+        web_search_client = (
+            KimiWebSearchClient(provider=active_deepdive_provider)
+            if bool(cfg.get("enable_kimi_web_search", False))
+            else None
+        )
         reports = run_deepdives(
             conn,
             feed_run_id=active_feed_run_id,
@@ -2375,13 +2783,24 @@ def run_layer2_feed(
                 conn,
                 decision_run_id=active_decision_run_id,
                 enable_kimi_web_search=bool(cfg.get("enable_kimi_web_search", False)),
+                web_search_client=web_search_client,
             ),
             limits=DeepdiveLimits(
-                max_tool_calls=(
-                    int(cfg.get("max_web_search_calls_per_candidate", 3))
-                    + int(cfg.get("max_repo_files_per_candidate", 8))
-                    + int(cfg.get("max_pages_per_candidate", 6))
-                )
+                max_tool_calls=int(
+                    cfg.get(
+                        "max_tool_calls_per_candidate",
+                        (
+                            int(cfg.get("max_web_search_calls_per_candidate", 3))
+                            + int(cfg.get("max_repo_files_per_candidate", 8))
+                            + int(cfg.get("max_pages_per_candidate", 6))
+                        ),
+                    )
+                ),
+                max_web_search_calls=int(cfg.get("max_web_search_calls_per_candidate", 3)),
+                max_repo_file_calls=int(cfg.get("max_repo_files_per_candidate", 8)),
+                max_page_fetch_calls=int(cfg.get("max_pages_per_candidate", 6)),
+                max_hn_thread_calls=int(cfg.get("max_hn_thread_fetches_per_candidate", 3)),
+                max_x_context_calls=int(cfg.get("max_x_context_fetches_per_candidate", 5)),
             ),
         )
         conn.execute(
@@ -2420,6 +2839,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--scout-model", default=DEFAULT_KIMI_SCORING_MODEL)
     parser.add_argument("--scoring-model", default=DEFAULT_KIMI_SCORING_MODEL)
     parser.add_argument("--deepdive-model", default=DEFAULT_KIMI_DEEPDIVE_MODEL)
+    parser.add_argument("--enable-kimi-web-search", action="store_true")
+    parser.add_argument("--max-tool-calls-per-candidate", type=int, default=20)
+    parser.add_argument("--max-web-search-calls-per-candidate", type=int, default=3)
+    parser.add_argument("--max-repo-files-per-candidate", type=int, default=8)
+    parser.add_argument("--max-pages-per-candidate", type=int, default=6)
+    parser.add_argument("--max-hn-thread-fetches-per-candidate", type=int, default=3)
+    parser.add_argument("--max-x-context-fetches-per-candidate", type=int, default=5)
     args = parser.parse_args(argv)
     summary = run_layer2_feed(
         decision_run_id=args.decision_run_id,
@@ -2433,6 +2859,13 @@ def main(argv: list[str] | None = None) -> int:
             "edge_scout_model": args.scout_model,
             "scoring_model": args.scoring_model,
             "deepdive_model": args.deepdive_model,
+            "enable_kimi_web_search": args.enable_kimi_web_search,
+            "max_tool_calls_per_candidate": args.max_tool_calls_per_candidate,
+            "max_web_search_calls_per_candidate": args.max_web_search_calls_per_candidate,
+            "max_repo_files_per_candidate": args.max_repo_files_per_candidate,
+            "max_pages_per_candidate": args.max_pages_per_candidate,
+            "max_hn_thread_fetches_per_candidate": args.max_hn_thread_fetches_per_candidate,
+            "max_x_context_fetches_per_candidate": args.max_x_context_fetches_per_candidate,
         },
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
@@ -2467,6 +2900,19 @@ Command shape:
 ]
 ```
 
+Append these flags when the corresponding `run_daily()` arguments are set:
+
+```python
+if layer2_enable_kimi_web_search:
+    cmd.append("--enable-kimi-web-search")
+cmd.extend(["--max-tool-calls-per-candidate", str(layer2_max_tool_calls)])
+cmd.extend(["--max-web-search-calls-per-candidate", str(layer2_max_web_search_calls)])
+cmd.extend(["--max-repo-files-per-candidate", str(layer2_max_repo_files)])
+cmd.extend(["--max-pages-per-candidate", str(layer2_max_pages)])
+cmd.extend(["--max-hn-thread-fetches-per-candidate", str(layer2_max_hn_thread_fetches)])
+cmd.extend(["--max-x-context-fetches-per-candidate", str(layer2_max_x_context_fetches)])
+```
+
 Add CLI flags:
 
 ```text
@@ -2478,6 +2924,13 @@ Add CLI flags:
 --layer2-scout-model
 --layer2-scoring-model
 --layer2-deepdive-model
+--layer2-enable-kimi-web-search
+--layer2-max-tool-calls
+--layer2-max-web-search-calls
+--layer2-max-repo-files
+--layer2-max-pages
+--layer2-max-hn-thread-fetches
+--layer2-max-x-context-fetches
 ```
 
 - [ ] **Step 6: Add default config**
@@ -2495,9 +2948,12 @@ Modify `pipeline/config.json`:
     "max_deepdives_per_run": 10,
     "deepdive_min_l2_score": 70,
     "enable_kimi_web_search": true,
+    "max_tool_calls_per_candidate": 20,
     "max_web_search_calls_per_candidate": 3,
     "max_repo_files_per_candidate": 8,
     "max_pages_per_candidate": 6,
+    "max_hn_thread_fetches_per_candidate": 3,
+    "max_x_context_fetches_per_candidate": 5,
     "llm_concurrency": 4
   }
 ```
@@ -3403,6 +3859,8 @@ Append to `tests/test_dashboard_data_api.py`:
                     "layer2_scout_limit": 10,
                     "layer2_scoring_limit": 20,
                     "layer2_deepdive_limit": 2,
+                    "layer2_enable_kimi_web_search": True,
+                    "layer2_max_web_search_calls": 3,
                 })
 
         self.assertIn("--run-layer2", command)
@@ -3412,6 +3870,9 @@ Append to `tests/test_dashboard_data_api.py`:
         self.assertIn("20", command)
         self.assertIn("--layer2-deepdive-limit", command)
         self.assertIn("2", command)
+        self.assertIn("--layer2-enable-kimi-web-search", command)
+        self.assertIn("--layer2-max-web-search-calls", command)
+        self.assertIn("3", command)
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -3432,6 +3893,8 @@ In `pipeline/server.py`, map:
 ```python
 if options.get("run_layer2"):
     cmd.append("--run-layer2")
+if options.get("layer2_enable_kimi_web_search"):
+    cmd.append("--layer2-enable-kimi-web-search")
 ```
 
 Extend integer options:
@@ -3440,6 +3903,12 @@ Extend integer options:
         "layer2_scout_limit": "--layer2-scout-limit",
         "layer2_scoring_limit": "--layer2-scoring-limit",
         "layer2_deepdive_limit": "--layer2-deepdive-limit",
+        "layer2_max_tool_calls": "--layer2-max-tool-calls",
+        "layer2_max_web_search_calls": "--layer2-max-web-search-calls",
+        "layer2_max_repo_files": "--layer2-max-repo-files",
+        "layer2_max_pages": "--layer2-max-pages",
+        "layer2_max_hn_thread_fetches": "--layer2-max-hn-thread-fetches",
+        "layer2_max_x_context_fetches": "--layer2-max-x-context-fetches",
 ```
 
 Extend string options:
@@ -3475,6 +3944,12 @@ Scoring 上限
 每日 deepdive 上限
 Deepdive 最低 L2 分
 Kimi web search
+Deepdive 总工具调用上限
+Web search 调用上限
+Repo 文件读取上限
+网页读取上限
+HN thread 读取上限
+X context 读取上限
 ```
 
 The Run button payload should include:
@@ -3488,6 +3963,13 @@ The Run button payload should include:
   layer2_scout_model: String(config.layer2?.edge_scout_model || 'kimi-k2.5'),
   layer2_scoring_model: String(config.layer2?.scoring_model || 'kimi-k2.5'),
   layer2_deepdive_model: String(config.layer2?.deepdive_model || 'kimi-k2.6'),
+  layer2_enable_kimi_web_search: Boolean(config.layer2?.enable_kimi_web_search),
+  layer2_max_tool_calls: Number(config.layer2?.max_tool_calls_per_candidate || 20),
+  layer2_max_web_search_calls: Number(config.layer2?.max_web_search_calls_per_candidate || 3),
+  layer2_max_repo_files: Number(config.layer2?.max_repo_files_per_candidate || 8),
+  layer2_max_pages: Number(config.layer2?.max_pages_per_candidate || 6),
+  layer2_max_hn_thread_fetches: Number(config.layer2?.max_hn_thread_fetches_per_candidate || 3),
+  layer2_max_x_context_fetches: Number(config.layer2?.max_x_context_fetches_per_candidate || 5),
 }
 ```
 
@@ -3722,5 +4204,6 @@ If no changes were needed, do not create an empty commit.
 - Spec coverage: The plan covers schema, Kimi provider, presentation grouping, Layer2 eligibility/scheduler, Edge Watch Scout, scoring/aggregation, deepdive selection/harness, Feed API, settings, designed Feed UI, evals, and verification.
 - Scope guard: The plan does not implement Layer 3 chatbot, rule/prompt editor, hosted auth, OS cron installation, or permanent LLM-only entity merge.
 - Provider routing: Layer 2 tasks use Kimi. Existing DeepSeek classifier code is not routed into Feed scoring/deepdive.
+- Review fixes: scoring expected values match the deterministic formula; deepdive enforces per-tool-family budgets; Kimi web search is backed by a real `$web_search` client when enabled; subagent dependency order is explicit.
 - TDD check: Every implementation task begins with a failing test, then minimal implementation, passing test, and commit.
 - UI check: The Feed UI plan preserves the existing workspace shell, uses tasteskill constraints, avoids generic AI gradients, avoids nested cards, and keeps Candidate Pool as a table.

@@ -398,14 +398,15 @@ analysis, caveats, and whether a deepdive report exists.
 
 Deepdive should understand the project, not produce generic commentary.
 
-Use a small self-written loop instead of a framework dependency.
+Use a small self-written loop instead of a framework dependency. V1 is a
+single-pass tool loop, not an open-ended ReAct agent.
 
 Loop:
 
 ```text
-Round 1: plan investigation from candidate context.
-Round 2: gather bounded context with tool calls.
-Round 3: synthesize final structured report.
+Stage 1: Kimi plans bounded tool requests from candidate context.
+Stage 2: local code executes allowed tools in one bounded batch.
+Stage 3: Kimi synthesizes the final structured report from context + tool trace.
 ```
 
 Allowed tools:
@@ -427,11 +428,17 @@ kimi_web_search
 Hard limits:
 
 ```text
-max_rounds_per_candidate = 3
+max_model_calls_per_candidate = 2
+max_tool_execution_passes_per_candidate = 1
+max_tool_calls_per_candidate = configurable
 max_web_search_calls_per_candidate = 3
 max_pages_per_candidate = 6
 max_repo_files_per_candidate = 8
+max_hn_thread_fetches_per_candidate = configurable
+max_x_context_fetches_per_candidate = configurable
 max_runtime_seconds_per_candidate = configurable
+per-tool-family limits must be enforced independently; a total tool-call cap is
+not a substitute for the web/page/repo-file caps
 cache all fetched context and model outputs
 ```
 
@@ -663,9 +670,12 @@ Minimum config:
     "max_deepdives_per_run": 10,
     "deepdive_min_l2_score": 70,
     "enable_kimi_web_search": true,
+    "max_tool_calls_per_candidate": 20,
     "max_web_search_calls_per_candidate": 3,
     "max_repo_files_per_candidate": 8,
     "max_pages_per_candidate": 6,
+    "max_hn_thread_fetches_per_candidate": 3,
+    "max_x_context_fetches_per_candidate": 5,
     "llm_concurrency": 4
   }
 }
