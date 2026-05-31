@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  feedEmptyState,
   feedRows,
   feedRunSummary,
   normalizeFeedPayload,
@@ -75,4 +76,9 @@ test('scoreTone maps numeric score to stable UI tone', () => {
   assert.equal(scoreTone(75), 'warm');
   assert.equal(scoreTone(55), 'steady');
   assert.equal(scoreTone(30), 'quiet');
+});
+
+test('feedEmptyState distinguishes missing feed from empty scored run', () => {
+  assert.equal(feedEmptyState({ feed_run_id: '', today_focus: [], scored_list: [] }), 'missing');
+  assert.equal(feedEmptyState({ feed_run_id: 'l2-run', today_focus: [], scored_list: [] }), 'empty');
 });

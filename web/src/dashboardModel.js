@@ -271,6 +271,12 @@ export function feedRows(feed) {
   ];
 }
 
+export function feedEmptyState(feed) {
+  if (!feed?.feed_run_id) return 'missing';
+  if (!(feed.today_focus || []).length && !(feed.scored_list || []).length) return 'empty';
+  return '';
+}
+
 export function feedRunSummary(feed) {
   const profile = feed?.model_profile || {};
   return {

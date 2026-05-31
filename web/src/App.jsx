@@ -1,5 +1,13 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
+  ArrowSquareOut,
+  ChartLineUp,
+  Lightning,
+  Sparkle,
+  ThumbsDown,
+  ThumbsUp,
+} from '@phosphor-icons/react';
+import {
   activeChannelList,
   availableRanges as modelAvailableRanges,
   candidateSourceOptions,
@@ -11,12 +19,16 @@ import {
   dashboardApiUrl,
   defaultRangeId as modelDefaultRangeId,
   detailRowsForItem,
+  feedEmptyState,
+  feedRunSummary,
   filterCandidateRows,
   formatProjectList,
   getConfigValue,
   initialDashboardState,
   nativeRank as modelNativeRank,
+  normalizeFeedPayload,
   rowsForChannel as modelRowsForChannel,
+  scoreTone,
   setConfigValue,
   settingsPanelDefs,
   sourceItemNavigationState,
@@ -1213,6 +1225,125 @@ function SettingsView({ payload, state, settings }) {
   );
 }
 
+function DailyFeedView({ payload, onOpenSource }) {
+  const feed = normalizeFeedPayload(payload.feed || {});
+  const emptyState = feedEmptyState(feed);
+  if (emptyState) {
+    return (
+      <section className="daily-feed-shell">
+        <div className="feed-run-strip empty-run">
+          <div>
+            <strong>每日 Feed</strong>
+            <span>{emptyState === 'missing' ? '还没有 Layer 2 run' : '当前 run 没有 scored items'}</span>
+          </div>
+          <Lightning size={18} weight="duotone" aria-hidden="true" />
+        </div>
+      </section>
+    );
+  }
+  const summary = feedRunSummary(feed);
+  return (
+    <section className="daily-feed-shell">
+      <div className="feed-run-strip">
+        <div>
+          <strong>{summary.run}</strong>
+          <span>{summary.decision}</span>
+        </div>
+        <div className="feed-run-meta">
+          <span>{summary.generated}</span>
+          <span>{summary.models}</span>
+          <span>pending scout {feed.pending?.edge_watch_scout || 0} · deepdive {feed.pending?.deepdive || 0}</span>
+        </div>
+      </div>
+      <section className="today-focus-grid" aria-label="Today Focus">
+        {feed.today_focus.map((item) => (
+          <FeedSignalCard key={item.group_id} item={item} onOpenSource={onOpenSource} />
+        ))}
+      </section>
+      <section className="scored-feed-list" aria-label="Scored Feed">
+        {feed.scored_list.map((item, index) => (
+          <ScoredFeedRow key={item.group_id} item={{ ...item, rank: item.rank || index + 1 }} onOpenSource={onOpenSource} />
+        ))}
+      </section>
+    </section>
+  );
+}
+
+function FeedSignalCard({ item, onOpenSource }) {
+  const tone = scoreTone(item.l2_score);
+  return (
+    <article className={`feed-signal-card ${tone}`}>
+      <div className="signal-card-topline">
+        <span className="score-rail">{Math.round(item.l2_score)}</span>
+        <span className="signal-reason">{item.primary_reason}</span>
+        <Sparkle size={16} weight="duotone" aria-hidden="true" />
+      </div>
+      <h2>{item.title}</h2>
+      <p>{item.rationale_short || item.context_preview}</p>
+      <div className="feed-tags">
+        {(item.topic_tags || []).slice(0, 4).map((tag) => <span key={tag}>{tag}</span>)}
+      </div>
+      {item.deepdive ? <p className="deepdive-summary">{item.deepdive.summary}</p> : null}
+      <FeedEvidence item={item} />
+      <FeedLinks item={item} onOpenSource={onOpenSource} />
+      <div className="feed-feedback" aria-label="Feed feedback">
+        <button type="button" title="有用" aria-label="有用"><ThumbsUp size={16} /></button>
+        <button type="button" title="没用" aria-label="没用"><ThumbsDown size={16} /></button>
+      </div>
+    </article>
+  );
+}
+
+function ScoredFeedRow({ item, onOpenSource }) {
+  return (
+    <article className={`scored-feed-row ${scoreTone(item.l2_score)}`}>
+      <span className="score-rail small">{Math.round(item.l2_score)}</span>
+      <div className="scored-feed-main">
+        <strong>{item.title}</strong>
+        <p>{item.rationale_short || item.context_preview}</p>
+      </div>
+      <span className="signal-reason">{item.primary_reason}</span>
+      <FeedLinks item={item} onOpenSource={onOpenSource} />
+    </article>
+  );
+}
+
+function FeedEvidence({ item }) {
+  const bullets = item.evidence_bullets || [];
+  return (
+    <div className="feed-evidence">
+      {bullets.slice(0, 3).map((bullet) => (
+        <span key={`${item.group_id}:${bullet.display_label || bullet.label}`}>
+          {bullet.display_label || bullet.label}
+        </span>
+      ))}
+      {bullets.length > 3 ? <span>+{bullets.length - 3}</span> : null}
+    </div>
+  );
+}
+
+function FeedLinks({ item, onOpenSource }) {
+  const links = item.source_links || [];
+  return (
+    <div className="feed-links">
+      {item.canonical_link ? (
+        <a href={item.canonical_link} target="_blank" rel="noreferrer">
+          <ArrowSquareOut size={15} aria-hidden="true" /> 打开
+        </a>
+      ) : null}
+      {links.slice(0, 3).map((link) => (
+        <button
+          type="button"
+          key={`${item.group_id}:${link.item_id}:${link.channel}`}
+          onClick={() => onOpenSource?.(link)}
+        >
+          <ChartLineUp size={15} aria-hidden="true" /> {link.channel_label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 function FeedView({ payload, tab = 'daily', onTabChange, onOpenSource }) {
   const [levelFilter, setLevelFilter] = useState('all');
   const [sourceFilters, setSourceFilters] = useState([]);
@@ -1272,10 +1403,7 @@ function FeedView({ payload, tab = 'daily', onTabChange, onOpenSource }) {
         <button type="button" className={tab === 'pool' ? 'active' : ''} onClick={() => onTabChange?.('pool')}>候选池</button>
       </section>
       {tab === 'daily' ? (
-        <section className="empty feed-locked">
-          <h2>Daily Feed locked</h2>
-          <p>Layer 2 selection is out of this slice. Candidate Pool below remains available for all Potential / High Potential / Edge Watch rows.</p>
-        </section>
+        <DailyFeedView payload={payload} onOpenSource={onOpenSource} />
       ) : (
         <section className="settings-panel candidate-panel">
           <section className="settings-toolbar">
