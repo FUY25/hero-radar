@@ -47,6 +47,9 @@
       "high_potential": 100000
     }
   },
+  "x_social": {
+    "enabled": true
+  },
   "verified_cross_source": {
     "weak_signals_48h_potential": 2
   },

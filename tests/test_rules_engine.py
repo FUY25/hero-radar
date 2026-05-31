@@ -1,6 +1,6 @@
 import unittest
 
-from pipeline.decision.entity_resolution import resolve_entities
+from pipeline.decision.entity_resolution import Entity, ResolutionResult, resolve_entities
 from pipeline.decision.rules import evaluate_entities
 
 
@@ -148,6 +148,147 @@ class RulesEngineTest(unittest.TestCase):
             "strict_story_count_7d",
             {row.metric_name for row in result.evidence_rows},
         )
+
+    def test_hn_classifier_noise_suppresses_hn_only_potential(self):
+        rows = [
+            {
+                "id": 24,
+                "source": "hn_firebase",
+                "external_id": "hn-24",
+                "name": "AI lab policy news",
+                "url": "https://github.com/owner/repo",
+                "description": "",
+                "metadata": {"score": 180, "comments": 55, "list": "topstories"},
+                "fetched_at": "2026-05-31T00:00:00Z",
+            }
+        ]
+        resolution = resolve_entities(rows, first_seen="2026-05-31T00:00:00Z")
+
+        result = evaluate_entities(
+            rows,
+            resolution,
+            run_id="run-1",
+            rule_version="rules-v1",
+            now="2026-05-31T00:00:00Z",
+            classifier_evidence=[
+                {
+                    "entity_id": "entity:hn-noise",
+                    "source": "hn_llm_classifier",
+                    "family": "hn",
+                    "metric_name": "hn_projectness",
+                    "metric_value": "news_article",
+                    "signal_label": "noise",
+                    "raw_url_or_ref": "item:24",
+                }
+            ],
+        )
+
+        self.assertEqual(result.potential_candidates, [])
+        self.assertNotIn("hn_score", {row.metric_name for row in result.evidence_rows})
+
+    def test_hn_classifier_project_allows_hn_potential(self):
+        rows = [
+            {
+                "id": 25,
+                "source": "hn_firebase",
+                "external_id": "hn-25",
+                "name": "Show HN: Repo",
+                "url": "https://github.com/owner/repo",
+                "description": "",
+                "metadata": {"score": 180, "comments": 55, "list": "topstories"},
+                "fetched_at": "2026-05-31T00:00:00Z",
+            }
+        ]
+        resolution = resolve_entities(rows, first_seen="2026-05-31T00:00:00Z")
+
+        result = evaluate_entities(
+            rows,
+            resolution,
+            run_id="run-1",
+            rule_version="rules-v1",
+            now="2026-05-31T00:00:00Z",
+            classifier_evidence=[
+                {
+                    "entity_id": resolution.entities[0].entity_id,
+                    "source": "hn_llm_classifier",
+                    "family": "hn",
+                    "metric_name": "hn_projectness",
+                    "metric_value": "project",
+                    "signal_label": "watch",
+                    "raw_url_or_ref": "item:25",
+                }
+            ],
+        )
+
+        self.assertEqual(result.potential_candidates[0].level, "potential")
+        self.assertIn("hn_score", {row.metric_name for row in result.evidence_rows})
+
+    def test_x_social_evidence_can_promote_to_potential(self):
+        entity = Entity(
+            entity_id="entity:x",
+            canonical_entity="owner/repo",
+            canonical_key="github:owner/repo",
+            key_type="github",
+            aliases=("owner/repo",),
+            source_refs=(),
+        )
+
+        result = evaluate_entities(
+            [],
+            ResolutionResult(entities=[entity], item_to_entity={}),
+            run_id="run-x",
+            rule_version="rules-v1",
+            now="2026-05-31T00:00:00Z",
+            classifier_evidence=[
+                {
+                    "entity_id": "entity:x",
+                    "source": "x_tweets",
+                    "family": "x_social",
+                    "metric_name": "x_tier",
+                    "metric_value": "potential",
+                    "signal_label": "potential",
+                    "raw_url_or_ref": "tweet:t1,tweet:t2",
+                    "note": "Two credible authors cited the same repo.",
+                }
+            ],
+        )
+
+        self.assertEqual(result.potential_candidates[0].level, "potential")
+        self.assertEqual(result.evidence_rows[0].family, "x_social")
+        self.assertEqual(result.evidence_rows[0].metric_name, "x_tier")
+
+    def test_x_social_uncited_potential_is_ignored(self):
+        entity = Entity(
+            entity_id="entity:x",
+            canonical_entity="owner/repo",
+            canonical_key="github:owner/repo",
+            key_type="github",
+            aliases=("owner/repo",),
+            source_refs=(),
+        )
+
+        result = evaluate_entities(
+            [],
+            ResolutionResult(entities=[entity], item_to_entity={}),
+            run_id="run-x",
+            rule_version="rules-v1",
+            now="2026-05-31T00:00:00Z",
+            classifier_evidence=[
+                {
+                    "entity_id": "entity:x",
+                    "source": "x_tweets",
+                    "family": "x_social",
+                    "metric_name": "x_tier",
+                    "metric_value": "potential",
+                    "signal_label": "potential",
+                    "raw_url_or_ref": "",
+                    "note": "No cited tweet ids.",
+                }
+            ],
+        )
+
+        self.assertEqual(result.potential_candidates, [])
+        self.assertEqual(result.edge_watch_candidates, [])
 
     def test_two_huggingface_resources_48h_create_potential(self):
         rows = [

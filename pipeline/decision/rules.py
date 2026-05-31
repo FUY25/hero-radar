@@ -16,6 +16,8 @@ GITHUB_BOARD_SOURCES = {
     "github_movers_repofomo",
 }
 HF_SOURCES = {"huggingface_models", "huggingface_datasets", "huggingface_spaces"}
+HN_NOISE_PROJECTNESS = {"news_article", "topic_discussion", "research_paper", "unknown"}
+X_TIER_LEVELS = {"watch": "watch", "potential": "potential", "high": "high_potential", "high_potential": "high_potential"}
 
 
 @dataclasses.dataclass(frozen=True)
@@ -231,6 +233,47 @@ def npm_evidence_by_entity(classifier_evidence: list[Any] | None) -> dict[str, l
     return grouped
 
 
+def x_evidence_by_entity(classifier_evidence: list[Any] | None) -> dict[str, list[Any]]:
+    grouped: dict[str, list[Any]] = {}
+    for row in classifier_evidence or []:
+        if evidence_field(row, "source") != "x_tweets":
+            continue
+        if evidence_field(row, "family") != "x_social":
+            continue
+        entity_id = evidence_field(row, "entity_id")
+        if entity_id:
+            grouped.setdefault(str(entity_id), []).append(row)
+    return grouped
+
+
+def hn_noise_item_ids(classifier_evidence: list[Any] | None) -> set[int]:
+    item_ids: set[int] = set()
+    for row in classifier_evidence or []:
+        if evidence_field(row, "source") != "hn_llm_classifier":
+            continue
+        if evidence_field(row, "metric_name") != "hn_projectness":
+            continue
+        projectness = str(evidence_field(row, "metric_value") or "")
+        if projectness not in HN_NOISE_PROJECTNESS and evidence_field(row, "signal_label") != "noise":
+            continue
+        raw_ref = str(evidence_field(row, "raw_url_or_ref") or "")
+        if not raw_ref.startswith("item:"):
+            continue
+        try:
+            item_ids.add(int(raw_ref.split(":", 1)[1]))
+        except ValueError:
+            continue
+    return item_ids
+
+
+def hn_row_is_noise(row: dict[str, Any], noise_item_ids: set[int]) -> bool:
+    row_id = row.get("id")
+    try:
+        return int(row_id) in noise_item_ids
+    except (TypeError, ValueError):
+        return False
+
+
 def entity_map(resolution: ResolutionResult) -> dict[str, Entity]:
     return {entity.entity_id: entity for entity in resolution.entities}
 
@@ -250,12 +293,15 @@ def evaluate_entities(
     grouped = rows_by_entity(rows, resolution)
     entities = entity_map(resolution)
     npm_classifier_evidence = npm_evidence_by_entity(classifier_evidence)
+    x_classifier_evidence = x_evidence_by_entity(classifier_evidence)
+    hn_noise_items = hn_noise_item_ids(classifier_evidence)
     states = {
         entity_id: EntityState(entity=entity)
         for entity_id, entity in entities.items()
         if entity_id in grouped
         or (extra_github_signals and entity_id in extra_github_signals)
         or entity_id in npm_classifier_evidence
+        or entity_id in x_classifier_evidence
     }
     evidence_rows: list[EvidenceRow] = []
 
@@ -272,10 +318,10 @@ def evaluate_entities(
             evaluate_repofomo(state, entity_rows, active_rules, rule_version, run_id)
         )
         evidence_rows.extend(
-            evaluate_hn_firebase(state, entity_rows, active_rules, rule_version, run_id)
+            evaluate_hn_firebase(state, entity_rows, active_rules, rule_version, run_id, hn_noise_items)
         )
         evidence_rows.extend(
-            evaluate_hn_algolia(state, entity_rows, active_rules, rule_version, run_id, now_dt)
+            evaluate_hn_algolia(state, entity_rows, active_rules, rule_version, run_id, now_dt, hn_noise_items)
         )
         evidence_rows.extend(
             evaluate_product_hunt(state, entity_rows, active_rules, rule_version, run_id)
@@ -287,6 +333,16 @@ def evaluate_entities(
             evaluate_npm_registry(
                 state,
                 npm_classifier_evidence.get(entity_id, []),
+                active_rules,
+                rule_version,
+                run_id,
+                now,
+            )
+        )
+        evidence_rows.extend(
+            evaluate_x_social_evidence(
+                state,
+                x_classifier_evidence.get(entity_id, []),
                 active_rules,
                 rule_version,
                 run_id,
@@ -471,6 +527,7 @@ def evaluate_hn_firebase(
     rules: dict[str, Any],
     rule_version: str,
     run_id: str,
+    hn_noise_items: set[int] | None = None,
 ) -> list[EvidenceRow]:
     output: list[EvidenceRow] = []
     thresholds = rules["hn"]
@@ -478,6 +535,8 @@ def evaluate_hn_firebase(
     for row in rows:
         metadata = row.get("metadata") or {}
         if row.get("source") != "hn_firebase":
+            continue
+        if hn_row_is_noise(row, hn_noise_items or set()):
             continue
         score = number(metadata.get("score"))
         level = "none"
@@ -518,6 +577,7 @@ def evaluate_hn_algolia(
     rule_version: str,
     run_id: str,
     now_dt: dt.datetime,
+    hn_noise_items: set[int] | None = None,
 ) -> list[EvidenceRow]:
     if state.entity.key_type not in {"github", "domain"}:
         return []
@@ -525,6 +585,8 @@ def evaluate_hn_algolia(
     for row in rows:
         metadata = row.get("metadata") or {}
         if row.get("source") != "hn_algolia":
+            continue
+        if hn_row_is_noise(row, hn_noise_items or set()):
             continue
         created = parse_time(metadata.get("created_at") or row.get("fetched_at"))
         if not created or created < now_dt - dt.timedelta(days=7) or created > now_dt:
@@ -755,6 +817,69 @@ def evaluate_npm_registry(
             )
         )
     return output
+
+
+def x_has_citation(row: Any) -> bool:
+    raw_ref = str(evidence_field(row, "raw_url_or_ref") or "")
+    return "tweet:" in raw_ref
+
+
+def evaluate_x_social_evidence(
+    state: EntityState,
+    x_evidence: list[Any],
+    rules: dict[str, Any],
+    rule_version: str,
+    run_id: str,
+    now: str,
+) -> list[EvidenceRow]:
+    if not x_evidence:
+        return []
+    if (rules.get("x_social") or {}).get("enabled", True) is False:
+        return []
+
+    tier_rows = [
+        row
+        for row in x_evidence
+        if evidence_field(row, "metric_name") == "x_tier"
+        and str(evidence_field(row, "metric_value") or "") in X_TIER_LEVELS
+        and x_has_citation(row)
+    ]
+    if not tier_rows:
+        return []
+
+    best = max(
+        tier_rows,
+        key=lambda row: LEVEL_ORDER[X_TIER_LEVELS[str(evidence_field(row, "metric_value"))]],
+    )
+    x_tier = str(evidence_field(best, "metric_value"))
+    level = X_TIER_LEVELS[x_tier]
+    event_at = str(evidence_field(best, "event_at") or now)
+    promote(state, level, "x_social", event_at, "x_social_tier")
+    if level == "watch":
+        add_weak_signal(state, "x_social", event_at)
+
+    return [
+        EvidenceRow(
+            entity_id=state.entity.entity_id,
+            canonical_entity=state.entity.canonical_entity,
+            alias=evidence_field(best, "alias"),
+            source="x_tweets",
+            event_at=event_at,
+            relative_to_reference=None,
+            metric_name="x_tier",
+            metric_value=x_tier,
+            family="x_social",
+            rule_id=f"x_social_tier_{level}",
+            rule_version=rule_version,
+            signal_label="early_trigger" if is_at_least(level, "potential") else "watch",
+            historical_safety=str(
+                evidence_field(best, "historical_safety") or "llm_source_classifier"
+            ),
+            note=str(evidence_field(best, "note") or "accepted x_social source tier"),
+            raw_url_or_ref=evidence_field(best, "raw_url_or_ref"),
+            run_id=run_id,
+        )
+    ]
 
 
 def evaluate_extra_github_signals(
