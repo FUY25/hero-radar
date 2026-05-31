@@ -362,6 +362,91 @@ class XClassifierTest(unittest.TestCase):
         ).fetchone()[0]
         self.assertEqual(entity_id, entity_id_for_key("name:clawdbot"))
 
+    def test_stage1_reuses_per_tweet_cache_when_batch_shape_changes(self) -> None:
+        from pipeline.decision.x_classifier import run_x_stage1
+
+        conn = self.make_conn()
+        provider = FakeLLMProvider(
+            [
+                {
+                    "triage": [
+                        {
+                            "tweet_id": "noise",
+                            "about_concrete_project": False,
+                            "closer_look": False,
+                            "product_names": [],
+                            "product_links": [],
+                            "project_refs": [],
+                            "expression_strength": "neutral",
+                            "evidence_quote": "OpenAI Claude MCP",
+                            "reason": "Generic terms.",
+                        },
+                        {
+                            "tweet_id": "t2",
+                            "about_concrete_project": True,
+                            "closer_look": True,
+                            "product_names": ["owner/repo"],
+                            "product_links": [],
+                            "project_refs": [
+                                {
+                                    "entity_key": "github:owner/repo",
+                                    "entity_name": "owner/repo",
+                                    "entity_confidence": "exact_handle",
+                                    "confidence": 0.8,
+                                }
+                            ],
+                            "expression_strength": "adoption_or_usage",
+                            "evidence_quote": "Trying owner/repo",
+                            "reason": "Concrete repo mention.",
+                        },
+                        {
+                            "tweet_id": "t1",
+                            "about_concrete_project": True,
+                            "closer_look": True,
+                            "product_names": ["owner/repo"],
+                            "product_links": ["https://github.com/owner/repo"],
+                            "project_refs": [
+                                {
+                                    "entity_key": "github:owner/repo",
+                                    "entity_name": "owner/repo",
+                                    "entity_confidence": "linked",
+                                    "confidence": 0.9,
+                                }
+                            ],
+                            "expression_strength": "recommendation",
+                            "evidence_quote": "New repo",
+                            "reason": "Links concrete repo.",
+                        },
+                    ]
+                }
+            ]
+        )
+
+        first = run_x_stage1(
+            conn,
+            run_id="decision_run_1",
+            provider=provider,
+            credible_handles={"credible1", "credible2"},
+            now="2026-05-31T04:00:00Z",
+            limit=10,
+            batch_size=10,
+        )
+        second = run_x_stage1(
+            conn,
+            run_id="decision_run_2",
+            provider=provider,
+            credible_handles={"credible1", "credible2"},
+            now="2026-05-31T04:00:00Z",
+            limit=10,
+            batch_size=1,
+        )
+
+        self.assertEqual(first["stage1_cache_hits"], 0)
+        self.assertEqual(first["stage1_cache_misses"], 3)
+        self.assertEqual(second["stage1_cache_hits"], 3)
+        self.assertEqual(second["stage1_cache_misses"], 0)
+        self.assertEqual(len(provider.calls), 1)
+
     def test_stage2_gate_includes_single_credible_stage1_watch_candidate(self) -> None:
         from pipeline.decision.x_classifier import candidate_entity_mentions
 

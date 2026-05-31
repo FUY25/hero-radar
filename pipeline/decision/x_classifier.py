@@ -19,6 +19,7 @@ from pipeline.decision.llm_cache import (
 X_STAGE1_PROMPT_VERSION = "x-stage1-v2"
 X_STAGE2_PROMPT_VERSION = "x-stage2-v2"
 X_STAGE1_TASK = "x_stage1"
+X_STAGE1_TWEET_TASK = "x_stage1_tweet"
 X_STAGE2_TASK = "x_stage2"
 ENTITY_CONFIDENCE_VALUES = {"linked", "exact_handle", "fuzzy_name"}
 EXPRESSION_STRENGTH_VALUES = {
@@ -478,6 +479,68 @@ def _complete_with_cache(
     return response
 
 
+def _tweet_stage1_cache_payload(tweet: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "tweet_id": tweet["tweet_id"],
+        "text": tweet["text"],
+        "url": tweet.get("url"),
+        "created_at": tweet["created_at"],
+        "deterministic_hints": tweet.get("deterministic_hints", []),
+        "stage0_hints": tweet.get("stage0_hints", {}),
+    }
+
+
+def _tweet_stage1_cache_key(
+    *,
+    provider: Any,
+    tweet: dict[str, Any],
+) -> str:
+    return cache_key_for(
+        provider=_provider_name(provider),
+        model=_provider_model(provider),
+        prompt_version=X_STAGE1_PROMPT_VERSION,
+        task=X_STAGE1_TWEET_TASK,
+        input_payload=_tweet_stage1_cache_payload(tweet),
+    )
+
+
+def _get_cached_stage1_item(
+    conn: sqlite3.Connection,
+    *,
+    provider: Any,
+    tweet: dict[str, Any],
+) -> dict[str, Any] | None:
+    cached = get_cached_response(conn, _tweet_stage1_cache_key(provider=provider, tweet=tweet))
+    if not cached or cached["status"] != "ok":
+        return None
+    item = dict(cached["response_json"])
+    validate_x_stage1_output({"triage": [item]})
+    return item
+
+
+def _store_stage1_item_cache(
+    conn: sqlite3.Connection,
+    *,
+    provider: Any,
+    tweet: dict[str, Any],
+    item: dict[str, Any],
+) -> None:
+    store_cached_response(
+        conn,
+        provider=_provider_name(provider),
+        model=_provider_model(provider),
+        prompt_version=X_STAGE1_PROMPT_VERSION,
+        task=X_STAGE1_TWEET_TASK,
+        input_payload=_tweet_stage1_cache_payload(tweet),
+        request_payload={
+            "source_task": X_STAGE1_TASK,
+            "source_prompt_version": X_STAGE1_PROMPT_VERSION,
+        },
+        response_payload=item,
+        status="ok",
+    )
+
+
 def _chunks(values: list[dict[str, Any]], size: int) -> list[list[dict[str, Any]]]:
     if size <= 0:
         raise ValueError("batch_size must be positive")
@@ -542,7 +605,20 @@ def run_x_stage1(
     )
     mentions: dict[str, list[dict[str, Any]]] = {}
     triaged = 0
-    for batch in _chunks(tweets, batch_size):
+    stage1_items: list[dict[str, Any]] = []
+    cache_hits = 0
+    cache_misses = 0
+    uncached_tweets: list[dict[str, Any]] = []
+    for tweet in tweets:
+        cached_item = _get_cached_stage1_item(conn, provider=provider, tweet=tweet)
+        if cached_item is None:
+            cache_misses += 1
+            uncached_tweets.append(tweet)
+            continue
+        cache_hits += 1
+        stage1_items.append(cached_item)
+
+    for batch in _chunks(uncached_tweets, batch_size):
         input_payload = build_x_stage1_prompt_payload(batch)
         output = _complete_with_cache(
             conn,
@@ -553,38 +629,49 @@ def run_x_stage1(
             system_prompt=system_prompt,
         )
         for item in output["triage"]:
-            triaged += 1
-            if not item["closer_look"]:
-                continue
             tweet = tweet_by_id.get(item["tweet_id"])
-            if tweet is None:
-                continue
-            for ref in item["project_refs"]:
-                entity_id = entity_id_for_key(ref["entity_key"])
+            if tweet is not None:
+                _store_stage1_item_cache(
+                    conn,
+                    provider=provider,
+                    tweet=tweet,
+                    item=item,
+                )
+            stage1_items.append(item)
+
+    for item in stage1_items:
+        triaged += 1
+        if not item["closer_look"]:
+            continue
+        tweet = tweet_by_id.get(item["tweet_id"])
+        if tweet is None:
+            continue
+        for ref in item["project_refs"]:
+            entity_id = entity_id_for_key(ref["entity_key"])
+            mentions.setdefault(entity_id, []).append(
+                {
+                    "tweet": tweet,
+                    "entity_key": ref["entity_key"],
+                    "entity_name": ref["entity_name"],
+                    "entity_confidence": ref["entity_confidence"],
+                    "expression_strength": item["expression_strength"],
+                }
+            )
+        if not item["project_refs"]:
+            for product_name in item["product_names"]:
+                entity_key = normalize_name_key(product_name)
+                if not entity_key:
+                    continue
+                entity_id = entity_id_for_key(entity_key)
                 mentions.setdefault(entity_id, []).append(
                     {
                         "tweet": tweet,
-                        "entity_key": ref["entity_key"],
-                        "entity_name": ref["entity_name"],
-                        "entity_confidence": ref["entity_confidence"],
+                        "entity_key": entity_key,
+                        "entity_name": product_name,
+                        "entity_confidence": "fuzzy_name",
                         "expression_strength": item["expression_strength"],
                     }
                 )
-            if not item["project_refs"]:
-                for product_name in item["product_names"]:
-                    entity_key = normalize_name_key(product_name)
-                    if not entity_key:
-                        continue
-                    entity_id = entity_id_for_key(entity_key)
-                    mentions.setdefault(entity_id, []).append(
-                        {
-                            "tweet": tweet,
-                            "entity_key": entity_key,
-                            "entity_name": product_name,
-                            "entity_confidence": "fuzzy_name",
-                            "expression_strength": item["expression_strength"],
-                        }
-                    )
     now_dt = _parse_time(now)
     total_mentions = 0
     for entity_id, refs in mentions.items():
@@ -620,7 +707,13 @@ def run_x_stage1(
             if window == "24h":
                 total_mentions += mention_count
     conn.commit()
-    return {"triaged": triaged, "mentions": total_mentions, "entities": len(mentions)}
+    return {
+        "triaged": triaged,
+        "mentions": total_mentions,
+        "entities": len(mentions),
+        "stage1_cache_hits": cache_hits,
+        "stage1_cache_misses": cache_misses,
+    }
 
 
 def _source_refs(value: str) -> list[str]:
