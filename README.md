@@ -78,6 +78,16 @@ evaluates deterministic source rules, writes `potential_candidates`,
 
 This command does not call any LLM and does not run Layer 2 Daily Feed selection.
 
+Run pending precise backfill jobs for a decision run:
+
+```bash
+python3 -m pipeline.decision.backfill \
+  --db data/hero_radar.sqlite \
+  --run-id decision_20260531
+```
+
+Backfill only runs on `backfill_jobs`; it does not scan every repo.
+
 Optional environment variables:
 
 - `GITHUB_TOKEN`: increases GitHub Search/Core API rate limits.
