@@ -1,9 +1,27 @@
 from __future__ import annotations
 
+import subprocess
+import sys
 import unittest
 
 
 class SmokeScriptsTest(unittest.TestCase):
+    def test_smoke_scripts_can_run_from_file_path(self) -> None:
+        for script in (
+            "pipeline/decision/smoke_llm.py",
+            "pipeline/decision/smoke_npm.py",
+        ):
+            with self.subTest(script=script):
+                result = subprocess.run(
+                    [sys.executable, script, "--help"],
+                    capture_output=True,
+                    check=False,
+                    text=True,
+                )
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("usage:", result.stdout)
+
     def test_llm_smoke_summary_reports_shape_without_secret_values(self) -> None:
         from pipeline.decision.smoke_llm import summarize_llm_result
 
