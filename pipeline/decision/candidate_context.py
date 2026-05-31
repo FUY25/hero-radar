@@ -1,0 +1,323 @@
+from __future__ import annotations
+
+import json
+import sqlite3
+from typing import Any
+
+
+SOURCE_CLASSIFIER_SOURCES = {"hn_llm_classifier", "x_tweets", "npm_registry"}
+BACKFILL_SOURCES = {"github_api", "github_stargazers", "npm_downloads"}
+KEY_LINK_TYPES = {"github", "domain", "npm"}
+
+
+def key_to_url(key: str | None) -> str | None:
+    value = str(key or "").strip()
+    if value.startswith("github:"):
+        return f"https://github.com/{value.split(':', 1)[1]}"
+    if value.startswith("domain:"):
+        return f"https://{value.split(':', 1)[1]}"
+    if value.startswith("npm:"):
+        return f"https://www.npmjs.com/package/{value.split(':', 1)[1]}"
+    return None
+
+
+def context_bundle_for_entity(
+    conn: sqlite3.Connection,
+    *,
+    entity_id: str,
+    run_id: str,
+) -> dict[str, Any]:
+    entity = _entity_row(conn, entity_id)
+    evidence = _evidence_rows(conn, entity_id, run_id)
+    canonical_key = str(entity.get("canonical_key") or "")
+    alias_key = _best_alias_key(conn, entity_id)
+
+    canonical_link = key_to_url(canonical_key)
+    binding = "verified" if canonical_link else "none"
+    if not canonical_link:
+        canonical_link = key_to_url(alias_key)
+        binding = "resolved" if canonical_link else "none"
+    if not canonical_link:
+        canonical_link = _best_source_link(conn, entity)
+        binding = "weak" if canonical_link else "none"
+
+    readme_preview = _readme_preview(conn, canonical_key, alias_key)
+    context_preview = readme_preview or _best_source_description(conn, entity)
+    bullets = [_evidence_bullet(row) for row in evidence]
+
+    return {
+        "entity_id": entity_id,
+        "canonical_link": canonical_link,
+        "binding_confidence": binding,
+        "context_preview": context_preview,
+        "readme_excerpt_available": bool(readme_preview),
+        "evidence_count": len(bullets),
+        "evidence_bullets": bullets,
+        "source_families": sorted({bullet["family"] for bullet in bullets if bullet.get("family")}),
+    }
+
+
+def _json_loads(value: Any, default: Any) -> Any:
+    if value in (None, ""):
+        return default
+    try:
+        return json.loads(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _entity_row(conn: sqlite3.Connection, entity_id: str) -> dict[str, Any]:
+    row = conn.execute(
+        """
+        select entity_id, canonical_entity, canonical_key, key_type, first_seen,
+               aliases_json, source_item_ids_json
+        from entities
+        where entity_id = ?
+        """,
+        (entity_id,),
+    ).fetchone()
+    if not row:
+        return {"entity_id": entity_id, "source_item_ids": []}
+    return {
+        "entity_id": row[0],
+        "canonical_entity": row[1],
+        "canonical_key": row[2],
+        "key_type": row[3],
+        "first_seen": row[4],
+        "aliases": _json_loads(row[5], []),
+        "source_item_ids": _json_loads(row[6], []),
+    }
+
+
+def _evidence_rows(
+    conn: sqlite3.Connection,
+    entity_id: str,
+    run_id: str,
+) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """
+        select id, source, event_at, metric_name, metric_value, family, rule_id,
+               rule_version, signal_label, note, raw_url_or_ref
+        from evidence_rows
+        where entity_id = ? and run_id = ?
+        order by
+            case
+                when family = 'github' then 0
+                when family = 'hn' then 1
+                when family = 'x_social' then 2
+                when family = 'package_family' then 3
+                when source = 'resolver' then 4
+                when family = 'cross_source' then 5
+                else 6
+            end,
+            id
+        """,
+        (entity_id, run_id),
+    ).fetchall()
+    return [
+        {
+            "id": row[0],
+            "source": row[1],
+            "event_at": row[2],
+            "metric_name": row[3],
+            "metric_value": row[4],
+            "family": row[5],
+            "rule_id": row[6],
+            "rule_version": row[7],
+            "signal_label": row[8],
+            "note": row[9],
+            "raw_url_or_ref": row[10],
+        }
+        for row in rows
+    ]
+
+
+def _best_alias_key(conn: sqlite3.Connection, entity_id: str) -> str | None:
+    rows = conn.execute(
+        """
+        select alias
+        from alias_links
+        where entity_id = ? and approved = 1
+        order by
+            case
+                when alias like 'github:%' then 0
+                when alias like 'domain:%' then 1
+                when alias like 'npm:%' then 2
+                else 3
+            end,
+            id
+        """,
+        (entity_id,),
+    ).fetchall()
+    for row in rows:
+        alias = str(row[0] or "")
+        if alias.split(":", 1)[0] in KEY_LINK_TYPES:
+            return alias
+    return None
+
+
+def _source_item_ids(entity: dict[str, Any]) -> list[int]:
+    ids: list[int] = []
+    for value in entity.get("source_item_ids") or []:
+        try:
+            ids.append(int(value))
+        except (TypeError, ValueError):
+            continue
+    return ids
+
+
+def _best_source_description(conn: sqlite3.Connection, entity: dict[str, Any]) -> str:
+    ids = _source_item_ids(entity)
+    if not ids:
+        return ""
+    placeholders = ",".join("?" for _ in ids)
+    try:
+        row = conn.execute(
+            f"""
+            select description
+            from items
+            where id in ({placeholders})
+              and coalesce(description, '') != ''
+            order by id
+            limit 1
+            """,
+            ids,
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return ""
+    return str(row[0]) if row else ""
+
+
+def _best_source_link(conn: sqlite3.Connection, entity: dict[str, Any]) -> str | None:
+    ids = _source_item_ids(entity)
+    if not ids:
+        return None
+    placeholders = ",".join("?" for _ in ids)
+    try:
+        rows = conn.execute(
+            f"""
+            select url
+            from items
+            where id in ({placeholders})
+              and coalesce(url, '') != ''
+            order by
+              case
+                when url like 'https://github.com/%' then 0
+                when url like 'https://www.npmjs.com/package/%' then 1
+                else 2
+              end,
+              id
+            """,
+            ids,
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return None
+    for row in rows:
+        url = str(row[0] or "").strip()
+        if url.startswith("http://") or url.startswith("https://"):
+            return url
+    return None
+
+
+def _readme_preview(
+    conn: sqlite3.Connection,
+    canonical_key: str | None,
+    alias_key: str | None,
+) -> str:
+    repo_key = _repo_key(canonical_key) or _repo_key(alias_key)
+    if not repo_key:
+        return ""
+    row = conn.execute(
+        """
+        select response_json
+        from api_cache
+        where source = 'github_readme'
+          and external_id = ?
+          and status = 'ok'
+        order by fetched_at desc
+        limit 1
+        """,
+        (repo_key,),
+    ).fetchone()
+    if not row:
+        return ""
+    response = _json_loads(row[0], {})
+    return str(response.get("preview") or response.get("excerpt") or "")[:1000]
+
+
+def _repo_key(key: str | None) -> str | None:
+    value = str(key or "").strip()
+    if not value.startswith("github:"):
+        return None
+    repo = value.split(":", 1)[1].strip("/")
+    if "/" not in repo:
+        return None
+    owner, name = repo.split("/", 1)
+    return f"{owner.lower()}/{name.lower()}"
+
+
+def _evidence_bullet(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "label": _evidence_label(row),
+        "family": row["family"],
+        "origin_type": _origin_type(row),
+        "provenance_badge": _provenance_badge(row),
+        "strength": row["signal_label"],
+        "source_refs": [row["raw_url_or_ref"]] if row.get("raw_url_or_ref") else [],
+    }
+
+
+def _evidence_label(row: dict[str, Any]) -> str:
+    source = str(row.get("source") or "")
+    family = str(row.get("family") or "")
+    metric = str(row.get("metric_name") or "")
+    value = str(row.get("metric_value") or "")
+    if family == "github" and metric in {"stars_today", "period_stars", "stargazers_delta"}:
+        return f"GH +{_compact_number(value)} stars / 24h"
+    if family == "hn" and metric in {"hn_score", "score"}:
+        return f"HN front page, {value} pts"
+    if source == "x_tweets" and metric == "x_tier":
+        return f"X {value}"
+    if source == "hn_llm_classifier" and metric == "hn_projectness":
+        return f"HN classifier: {value}"
+    if source == "resolver":
+        return f"Resolved {value}"
+    return f"{family}: {metric} {value}".strip()
+
+
+def _compact_number(raw: str) -> str:
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return str(raw)
+    if abs(value) >= 1000:
+        compact = value / 1000
+        return f"{compact:.1f}k".replace(".0k", "k")
+    if value.is_integer():
+        return str(int(value))
+    return f"{value:g}"
+
+
+def _origin_type(row: dict[str, Any]) -> str:
+    source = str(row.get("source") or "")
+    family = str(row.get("family") or "")
+    if source in SOURCE_CLASSIFIER_SOURCES:
+        return "source_classifier"
+    if source == "resolver" or family == "resolver":
+        return "resolver"
+    if source in BACKFILL_SOURCES:
+        return "backfill"
+    if family == "cross_source":
+        return "cross_source_rule"
+    return "deterministic_rule"
+
+
+def _provenance_badge(row: dict[str, Any]) -> str:
+    origin = _origin_type(row)
+    return {
+        "source_classifier": "LLM classifier",
+        "resolver": "resolver",
+        "backfill": "backfill",
+        "cross_source_rule": "cross-source",
+        "deterministic_rule": "rule",
+    }[origin]
