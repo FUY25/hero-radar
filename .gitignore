@@ -14,6 +14,7 @@ secrets*.md
 .DS_Store
 .agents/
 .claude/
+.superpowers/
 .pytest_cache/
 .mypy_cache/
 .venv/
