@@ -5,6 +5,7 @@ import sqlite3
 import unittest
 
 from pipeline.decision.schema import init_decision_db
+from pipeline.decision.llm_provider import FakeLLMProvider
 
 
 class FakeSearchClient:
@@ -152,6 +153,40 @@ class ResolverTest(unittest.TestCase):
         self.assertEqual(len(search_client.calls), 1)
         self.assertEqual(search_client.calls[0]["limit"], 1)
 
+    def test_resolver_uses_agentic_research_after_direct_lookup_fails(self) -> None:
+        from pipeline.decision.resolver import resolve_candidate_links
+
+        conn = self.make_conn()
+        search_client = FakeSearchClient([])
+        provider = FakeLLMProvider(
+            [
+                {
+                    "action": "final",
+                    "selected": {
+                        "type": "github",
+                        "key": "github:owner/clawdbot",
+                        "url": "https://github.com/owner/clawdbot",
+                        "confidence": 0.91,
+                    },
+                    "reason": "official repo result",
+                }
+            ]
+        )
+
+        result = resolve_candidate_links(
+            conn,
+            "name:clawdbot",
+            search_client=search_client,
+            max_searches=1,
+            research_provider=provider,
+            research_context={"canonical_entity": "Clawdbot"},
+            max_research_rounds=3,
+        )
+
+        self.assertEqual(result["source"], "agentic_link_research")
+        self.assertEqual(result["resolved_links"][0]["key"], "github:owner/clawdbot")
+        self.assertEqual(len(provider.calls), 1)
+
     def test_resolver_ignores_shortener_domains_from_internal_rows(self) -> None:
         from pipeline.decision.resolver import resolve_candidate_links
 
@@ -225,6 +260,75 @@ class ResolverTest(unittest.TestCase):
         )
 
         self.assertEqual(summary["enriched"], 1)
+        alias = conn.execute(
+            "select entity_id, alias, confidence, origin, approved from alias_links"
+        ).fetchone()
+        self.assertEqual(
+            alias,
+            ("entity:clawdbot", "github:owner/clawdbot", "deterministic", "resolver", 1),
+        )
+
+    def test_enrich_classifier_candidates_counts_agentic_research_aliases(self) -> None:
+        from pipeline.decision.resolver import enrich_classifier_candidates
+
+        conn = self.make_conn()
+        conn.execute(
+            """
+            insert into evidence_rows(
+                entity_id, canonical_entity, alias, source, event_at,
+                relative_to_reference, metric_name, metric_value, family, rule_id,
+                rule_version, signal_label, historical_safety, note, raw_url_or_ref,
+                run_id
+            )
+            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "entity:clawdbot",
+                "Clawdbot",
+                "Clawdbot",
+                "x_tweets",
+                "2026-05-31T00:00:00Z",
+                None,
+                "x_tier",
+                "potential",
+                "x_social",
+                "x_social_x_tier",
+                "x-stage2-v2",
+                "potential",
+                "llm_source_classifier",
+                "accepted potential candidate",
+                "tweet:t1",
+                "run-1",
+            ),
+        )
+        conn.commit()
+        provider = FakeLLMProvider(
+            [
+                {
+                    "action": "final",
+                    "selected": {
+                        "type": "github",
+                        "key": "github:owner/clawdbot",
+                        "url": "https://github.com/owner/clawdbot",
+                        "confidence": 0.9,
+                    },
+                    "reason": "official repo result",
+                }
+            ]
+        )
+
+        summary = enrich_classifier_candidates(
+            conn,
+            run_id="run-1",
+            search_client=FakeSearchClient([]),
+            max_searches_per_candidate=1,
+            research_provider=provider,
+            max_research_rounds=3,
+            now="2026-05-31T00:00:00Z",
+        )
+
+        self.assertEqual(summary["enriched"], 1)
+        self.assertEqual(summary["researched"], 1)
         alias = conn.execute(
             "select entity_id, alias, confidence, origin, approved from alias_links"
         ).fetchone()

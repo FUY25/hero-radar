@@ -490,6 +490,11 @@ def run_decision(
     npm_backfill_limit: int = 0,
     resolver_search_client: Any | None = None,
     resolver_search_limit: int = 0,
+    resolver_research_provider: Any | None = None,
+    resolver_research_limit: int = 0,
+    resolver_research_rounds: int = 0,
+    readme_client: Any | None = None,
+    enrich_readme_limit: int = 0,
 ) -> dict[str, int | str]:
     rules = load_rules()
     conn = sqlite3.connect(db_path)
@@ -583,7 +588,12 @@ def run_decision(
                 limit=npm_backfill_limit,
             )
 
-        resolver_summary: dict[str, Any] = {"enriched": 0, "aliases": 0, "proposals": 0}
+        resolver_summary: dict[str, Any] = {
+            "enriched": 0,
+            "aliases": 0,
+            "proposals": 0,
+            "researched": 0,
+        }
         if hn_summary.get("classified") or x_stage2_summary.get("tiered"):
             from pipeline.decision.resolver import enrich_classifier_candidates
 
@@ -592,6 +602,10 @@ def run_decision(
                 run_id=run_id,
                 search_client=resolver_search_client,
                 max_searches_per_candidate=resolver_search_limit,
+                research_provider=(
+                    resolver_research_provider if resolver_research_limit > 0 else None
+                ),
+                max_research_rounds=resolver_research_rounds,
                 now=now,
             )
 
@@ -620,6 +634,16 @@ def run_decision(
             edge_watch_candidates=final_result.edge_watch_candidates,
             backfill_jobs=final_result.backfill_jobs,
         )
+        readme_summary: dict[str, Any] = {"fetched": 0, "cached": 0, "skipped": 0}
+        if readme_client is not None and enrich_readme_limit > 0:
+            from pipeline.decision.readme_enrichment import enrich_candidate_readmes
+
+            readme_summary = enrich_candidate_readmes(
+                conn,
+                run_id=run_id,
+                client=readme_client,
+                limit=enrich_readme_limit,
+            )
         export_candidates(conn, run_id, export_json_path)
         finish_decision_run(conn, run_id=run_id, status="ok", note="done")
 
@@ -635,6 +659,9 @@ def run_decision(
             "resolver_enriched": int(resolver_summary.get("enriched") or 0),
             "resolver_aliases": int(resolver_summary.get("aliases") or 0),
             "resolver_proposals": int(resolver_summary.get("proposals") or 0),
+            "resolver_researched": int(resolver_summary.get("researched") or 0),
+            "readme_fetched": int(readme_summary.get("fetched") or 0),
+            "readme_cached": int(readme_summary.get("cached") or 0),
             "export": str(export_json_path),
         }
         return summary
@@ -671,16 +698,31 @@ def build_deepseek_provider_from_args(args: argparse.Namespace) -> Any:
     return DeepSeekProvider(model=args.llm_model)
 
 
+def build_github_readme_client_from_args(args: argparse.Namespace) -> Any:
+    from pipeline.decision.readme_enrichment import GitHubReadmeClient
+
+    return GitHubReadmeClient()
+
+
 def run_from_args(
     args: argparse.Namespace,
     *,
     decision_runner: Any = run_decision,
     llm_provider_builder: Any = build_deepseek_provider_from_args,
     github_client_builder: Any = build_github_client,
+    github_readme_client_builder: Any = build_github_readme_client_from_args,
 ) -> dict[str, int | str]:
     hn_limit = int(args.classify_hn_limit or 0)
     x_limit = int(args.classify_x_limit or 0)
-    llm_provider = llm_provider_builder(args) if hn_limit > 0 or x_limit > 0 else None
+    resolver_search_limit = int(getattr(args, "resolver_search_limit", 0) or 0)
+    resolver_research_limit = int(getattr(args, "resolver_research_limit", 0) or 0)
+    resolver_research_rounds = int(getattr(args, "resolver_research_rounds", 3) or 0)
+    enrich_readme_limit = int(getattr(args, "enrich_readme_limit", 0) or 0)
+    llm_provider = (
+        llm_provider_builder(args)
+        if hn_limit > 0 or x_limit > 0 or resolver_research_limit > 0
+        else None
+    )
     return decision_runner(
         db_path=args.db,
         run_id=args.run_id,
@@ -694,6 +736,14 @@ def run_from_args(
         llm_concurrency=int(getattr(args, "llm_concurrency", 1) or 1),
         x_stage1_batch_size=args.x_stage1_batch_size,
         x_credible_handles=parse_credible_handles(args.x_credible_handles),
+        resolver_search_limit=resolver_search_limit,
+        resolver_research_provider=llm_provider if resolver_research_limit > 0 else None,
+        resolver_research_limit=resolver_research_limit,
+        resolver_research_rounds=resolver_research_rounds,
+        readme_client=(
+            github_readme_client_builder(args) if enrich_readme_limit > 0 else None
+        ),
+        enrich_readme_limit=enrich_readme_limit,
     )
 
 
@@ -710,6 +760,10 @@ def main() -> None:
     parser.add_argument("--llm-concurrency", type=int, default=1)
     parser.add_argument("--x-stage1-batch-size", type=int, default=100)
     parser.add_argument("--x-credible-handles", default="")
+    parser.add_argument("--resolver-search-limit", type=int, default=0)
+    parser.add_argument("--resolver-research-limit", type=int, default=0)
+    parser.add_argument("--resolver-research-rounds", type=int, default=3)
+    parser.add_argument("--enrich-readme-limit", type=int, default=0)
     args = parser.parse_args()
 
     summary = run_from_args(args)
@@ -724,6 +778,10 @@ def main() -> None:
         print(f"x_stage1_mentions: {summary['x_stage1_mentions']}")
     if "x_stage2_tiered" in summary:
         print(f"x_stage2_tiered: {summary['x_stage2_tiered']}")
+    if "resolver_researched" in summary:
+        print(f"resolver_researched: {summary['resolver_researched']}")
+    if "readme_fetched" in summary:
+        print(f"readme_fetched: {summary['readme_fetched']}")
     print(f"export: {summary['export']}")
 
 

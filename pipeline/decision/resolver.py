@@ -174,6 +174,10 @@ def _normalize_search_result(result: dict[str, Any]) -> dict[str, Any] | None:
     return _link_from_key(key, url, confidence)
 
 
+def normalize_resolved_link(result: dict[str, Any]) -> dict[str, Any] | None:
+    return _normalize_search_result(result)
+
+
 def _cache_key(entity_key: str, max_searches: int) -> tuple[str, str]:
     input_hash = stable_hash({"entity_key": entity_key, "max_searches": max_searches})
     return (
@@ -193,6 +197,9 @@ def resolve_candidate_links(
     *,
     search_client: Any | None = None,
     max_searches: int = 0,
+    research_provider: Any | None = None,
+    research_context: dict[str, Any] | None = None,
+    max_research_rounds: int = 0,
 ) -> dict[str, Any]:
     internal_links = _links_from_internal_rows(conn, entity_key)
     if internal_links:
@@ -205,34 +212,48 @@ def resolve_candidate_links(
     key, input_hash = _cache_key(entity_key, max_searches)
     cached = get_api_cache(conn, key)
     if cached:
-        return cached
+        response = cached
+    else:
+        links: list[dict[str, Any]] = []
+        if search_client is not None and max_searches > 0:
+            query = _entity_label(entity_key)
+            results = search_client.search(query, limit=max_searches)
+            for result in results[:max_searches]:
+                if not isinstance(result, dict):
+                    continue
+                link = _normalize_search_result(result)
+                if link:
+                    links.append(link)
 
-    links: list[dict[str, Any]] = []
-    if search_client is not None and max_searches > 0:
-        query = _entity_label(entity_key)
-        results = search_client.search(query, limit=max_searches)
-        for result in results[:max_searches]:
-            if not isinstance(result, dict):
-                continue
-            link = _normalize_search_result(result)
-            if link:
-                links.append(link)
+        response = {
+            "entity_key": entity_key,
+            "resolved_links": links,
+            "source": "search" if links else "none",
+        }
+        put_api_cache(
+            conn,
+            cache_key=key,
+            source=RESOLVER_SOURCE,
+            external_id=entity_key,
+            window=RESOLVER_WINDOW,
+            input_hash=input_hash,
+            response=response,
+            status="ok",
+        )
+    if response.get("resolved_links"):
+        return response
+    if research_provider is not None and search_client is not None and max_research_rounds > 0:
+        from pipeline.decision.web_research import research_candidate_link
 
-    response = {
-        "entity_key": entity_key,
-        "resolved_links": links,
-        "source": "search" if links else "none",
-    }
-    put_api_cache(
-        conn,
-        cache_key=key,
-        source=RESOLVER_SOURCE,
-        external_id=entity_key,
-        window=RESOLVER_WINDOW,
-        input_hash=input_hash,
-        response=response,
-        status="ok",
-    )
+        return research_candidate_link(
+            conn,
+            entity_key=entity_key,
+            evidence_context=research_context or {"entity_key": entity_key},
+            provider=research_provider,
+            search_client=search_client,
+            max_rounds=max_research_rounds,
+            max_results=max(1, int(max_searches or 5)),
+        )
     return response
 
 
@@ -377,11 +398,14 @@ def enrich_classifier_candidates(
     run_id: str,
     search_client: Any | None = None,
     max_searches_per_candidate: int = 0,
+    research_provider: Any | None = None,
+    max_research_rounds: int = 0,
     now: str,
 ) -> dict[str, int]:
     enriched = 0
     aliases = 0
     proposals = 0
+    researched = 0
     for candidate in _accepted_classifier_candidates(conn, run_id):
         entity_id = candidate["entity_id"]
         entity_key = candidate["entity_key"]
@@ -391,10 +415,15 @@ def enrich_classifier_candidates(
             entity_key,
             search_client=search_client,
             max_searches=max_searches_per_candidate,
+            research_provider=research_provider,
+            research_context={"entity_key": entity_key, "run_id": run_id},
+            max_research_rounds=max_research_rounds,
         )
         links = list(result.get("resolved_links") or [])
         if not links:
             continue
+        if result.get("source") == "agentic_link_research":
+            researched += 1
         written_aliases, written_proposals = _write_resolved_links(
             conn,
             run_id=run_id,
@@ -407,4 +436,9 @@ def enrich_classifier_candidates(
         proposals += written_proposals
         enriched += 1
     conn.commit()
-    return {"enriched": enriched, "aliases": aliases, "proposals": proposals}
+    return {
+        "enriched": enriched,
+        "aliases": aliases,
+        "proposals": proposals,
+        "researched": researched,
+    }

@@ -24,6 +24,16 @@ class FakeGitHubClient:
         ]
 
 
+class FakeGitHubReadmeClient:
+    def __init__(self, text):
+        self.text = text
+        self.calls = []
+
+    def get_readme_text(self, repo_key):
+        self.calls.append(repo_key)
+        return self.text
+
+
 class FakeNpmClient:
     def package_metadata(self, package):
         return {"name": package, "repository": {"url": "git+https://github.com/owner/repo.git"}}
@@ -305,6 +315,9 @@ class DecisionRunnerTest(unittest.TestCase):
         self.assertIn("--llm-model", result.stdout)
         self.assertIn("--llm-concurrency", result.stdout)
         self.assertIn("--x-credible-handles", result.stdout)
+        self.assertIn("--resolver-research-limit", result.stdout)
+        self.assertIn("--resolver-research-rounds", result.stdout)
+        self.assertIn("--enrich-readme-limit", result.stdout)
 
     def test_run_from_args_wires_llm_provider_only_when_limits_are_explicit(self):
         from pipeline.decision.run_decision import run_from_args
@@ -352,6 +365,51 @@ class DecisionRunnerTest(unittest.TestCase):
         self.assertEqual(calls[0]["x_stage1_batch_size"], 4)
         self.assertEqual(calls[0]["x_credible_handles"], {"credible1", "credible2"})
 
+    def test_run_from_args_builds_llm_provider_for_agentic_research_limit(self):
+        from pipeline.decision.run_decision import run_from_args
+
+        calls = []
+        provider = object()
+
+        def fake_runner(**kwargs):
+            calls.append(kwargs)
+            return {
+                "entities": 0,
+                "potential_candidates": 0,
+                "edge_watch_candidates": 0,
+                "backfill_jobs": 0,
+                "export": str(kwargs["export_json_path"]),
+            }
+
+        args = Namespace(
+            db=Path("db.sqlite"),
+            run_id="run",
+            export_json=Path("out.json"),
+            now="2026-05-31T00:00:00Z",
+            backfill=False,
+            classify_hn_limit=0,
+            classify_x_limit=0,
+            llm_model="deepseek-v4-flash",
+            llm_concurrency=1,
+            x_stage1_batch_size=100,
+            x_credible_handles="",
+            resolver_search_limit=0,
+            resolver_research_limit=5,
+            resolver_research_rounds=3,
+            enrich_readme_limit=0,
+        )
+
+        run_from_args(
+            args,
+            decision_runner=fake_runner,
+            llm_provider_builder=lambda parsed: provider,
+            github_client_builder=lambda: None,
+        )
+
+        self.assertIs(calls[0]["resolver_research_provider"], provider)
+        self.assertEqual(calls[0]["resolver_research_limit"], 5)
+        self.assertEqual(calls[0]["resolver_research_rounds"], 3)
+
     def test_run_from_args_does_not_build_llm_provider_when_limits_are_zero(self):
         from pipeline.decision.run_decision import run_from_args
 
@@ -393,6 +451,88 @@ class DecisionRunnerTest(unittest.TestCase):
 
         self.assertIsNone(captured["hn_llm_provider"])
         self.assertIsNone(captured["x_llm_provider"])
+
+    def test_run_from_args_builds_readme_client_only_when_limit_is_set(self):
+        from pipeline.decision.run_decision import run_from_args
+
+        captured = {}
+        readme_client = object()
+
+        def fake_runner(**kwargs):
+            captured.update(kwargs)
+            return {
+                "entities": 0,
+                "potential_candidates": 0,
+                "edge_watch_candidates": 0,
+                "backfill_jobs": 0,
+                "export": str(kwargs["export_json_path"]),
+            }
+
+        args = Namespace(
+            db=Path("db.sqlite"),
+            run_id="run",
+            export_json=Path("out.json"),
+            now="2026-05-31T00:00:00Z",
+            backfill=False,
+            classify_hn_limit=0,
+            classify_x_limit=0,
+            llm_model=None,
+            llm_concurrency=1,
+            x_stage1_batch_size=100,
+            x_credible_handles="",
+            resolver_search_limit=0,
+            resolver_research_limit=0,
+            resolver_research_rounds=3,
+            enrich_readme_limit=2,
+        )
+
+        run_from_args(
+            args,
+            decision_runner=fake_runner,
+            llm_provider_builder=lambda parsed: None,
+            github_client_builder=lambda: None,
+            github_readme_client_builder=lambda parsed: readme_client,
+        )
+
+        self.assertIs(captured["readme_client"], readme_client)
+        self.assertEqual(captured["enrich_readme_limit"], 2)
+
+    def test_enrich_readmes_for_candidates_uses_verified_github_links(self):
+        from pipeline.decision.readme_enrichment import enrich_candidate_readmes
+
+        conn = sqlite3.connect(":memory:")
+        self.addCleanup(conn.close)
+        init_decision_db(conn)
+        conn.execute(
+            """
+            insert into entities(entity_id, canonical_entity, canonical_key, key_type, first_seen, aliases_json, source_item_ids_json)
+            values (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "entity:repo",
+                "owner/repo",
+                "github:Owner/Repo",
+                "github",
+                "2026-05-31T00:00:00Z",
+                "[]",
+                "[]",
+            ),
+        )
+        conn.execute(
+            """
+            insert into potential_candidates(entity_id, run_id, level, fired_families_json, first_trigger_at)
+            values (?, ?, ?, ?, ?)
+            """,
+            ("entity:repo", "run-1", "potential", "[]", "2026-05-31T00:00:00Z"),
+        )
+        conn.commit()
+        client = FakeGitHubReadmeClient("hello readme")
+
+        summary = enrich_candidate_readmes(conn, run_id="run-1", client=client, limit=10)
+
+        self.assertEqual(summary["fetched"], 1)
+        self.assertEqual(summary["cached"], 0)
+        self.assertEqual(client.calls, ["owner/repo"])
 
     def test_runner_writes_entities_candidates_and_export(self):
         with tempfile.TemporaryDirectory() as tmpdir:
