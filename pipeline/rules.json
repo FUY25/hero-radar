@@ -1,0 +1,52 @@
+{
+  "version": "rules-v1",
+  "levels": ["none", "watch", "potential", "high_potential"],
+  "github_trending": {
+    "daily_stars": {
+      "watch": 300,
+      "potential": 1000,
+      "high_potential": 3000
+    }
+  },
+  "trending_repos": {
+    "stars_velocity": {
+      "watch": 300,
+      "potential": 800,
+      "high_potential": 2500
+    },
+    "forks_velocity": {
+      "watch": 50,
+      "potential": 75,
+      "high_potential": 300
+    }
+  },
+  "repofomo": {
+    "stars_7d_watch": 200,
+    "stars_7d_potential_if_accelerating": 1000,
+    "stars_7d_high": 5000,
+    "new_forks_high": 300
+  },
+  "hn": {
+    "front_page_score_watch": 50,
+    "front_page_score_potential": 100,
+    "strict_story_count_7d_watch": 1,
+    "strict_story_count_7d_potential": 3
+  },
+  "product_hunt": {
+    "rank_potential": 5,
+    "rank_watch": 10
+  },
+  "huggingface": {
+    "exact_resources_48h_potential": 2,
+    "single_resource_watch": 1
+  },
+  "verified_cross_source": {
+    "weak_signals_48h_potential": 2
+  },
+  "github_search_backfill": {
+    "min_stars_per_day": 50,
+    "pushed_within_days": 14,
+    "created_within_days": 180
+  },
+  "backfill_max_jobs": 40
+}
