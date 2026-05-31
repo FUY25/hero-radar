@@ -204,6 +204,157 @@ def query_candidates(conn: sqlite3.Connection, run_id: str) -> dict[str, Any]:
     return {"run_id": run_id, "candidates": candidates, "edge_watch": edge_watch}
 
 
+def query_latest_feed_run(conn: sqlite3.Connection) -> str | None:
+    row = conn.execute(
+        """
+        select feed_run_id
+        from l2_feed_runs
+        where status = 'ok'
+        order by coalesce(completed_at, started_at) desc, started_at desc
+        limit 1
+        """
+    ).fetchone()
+    return row[0] if row else None
+
+
+def query_feed_payload(feed_run_id: str | None = None) -> dict[str, Any]:
+    conn = connect_decision_db()
+    try:
+        active_feed_run_id = feed_run_id or query_latest_feed_run(conn) or ""
+        if not active_feed_run_id:
+            return _empty_feed_payload()
+        run = conn.execute(
+            """
+            select decision_run_id, completed_at, started_at, model_profile_json
+            from l2_feed_runs
+            where feed_run_id = ?
+            """,
+            (active_feed_run_id,),
+        ).fetchone()
+        if not run:
+            return _empty_feed_payload()
+        items = [
+            _feed_item(row)
+            for row in conn.execute(
+                """
+                select fi.section, fi.rank, fi.deepdive_status, g.group_id,
+                       g.canonical_entity_id, g.canonical_name, g.canonical_key,
+                       g.canonical_link, g.member_entity_ids_json, g.level,
+                       g.source_families_json, g.context_json,
+                       s.l2_score, s.axes_json, s.primary_reason,
+                       s.topic_tags_json, s.rationale_short, s.caveats_json,
+                       d.summary_json, ff.vote
+                from l2_feed_items fi
+                join l2_candidate_groups g
+                  on g.feed_run_id = fi.feed_run_id and g.group_id = fi.group_id
+                left join l2_scores s
+                  on s.feed_run_id = fi.feed_run_id and s.group_id = fi.group_id
+                left join deepdive_reports d
+                  on d.feed_run_id = fi.feed_run_id and d.group_id = fi.group_id
+                left join feed_feedback ff
+                  on ff.feed_run_id = fi.feed_run_id and ff.group_id = fi.group_id
+                where fi.feed_run_id = ?
+                order by fi.section, fi.rank
+                """,
+                (active_feed_run_id,),
+            ).fetchall()
+        ]
+        return {
+            "feed_run_id": active_feed_run_id,
+            "decision_run_id": run[0],
+            "generated_at": run[1] or run[2],
+            "model_profile": json_loads(run[3], {}),
+            "today_focus": [
+                item for item in items if item["section"] == "today_focus"
+            ],
+            "scored_list": [item for item in items if item["section"] == "scored"],
+            "pending": {"edge_watch_scout": 0, "deepdive": 0},
+        }
+    finally:
+        conn.close()
+
+
+def _empty_feed_payload() -> dict[str, Any]:
+    return {
+        "feed_run_id": "",
+        "decision_run_id": "",
+        "generated_at": "",
+        "model_profile": {},
+        "today_focus": [],
+        "scored_list": [],
+        "pending": {"edge_watch_scout": 0, "deepdive": 0},
+    }
+
+
+def _feed_item(row: tuple[Any, ...]) -> dict[str, Any]:
+    context = json_loads(row[11], {})
+    return {
+        "section": row[0],
+        "rank": row[1],
+        "deepdive_status": row[2],
+        "group_id": row[3],
+        "canonical_entity_id": row[4],
+        "canonical_name": row[5],
+        "canonical_key": row[6],
+        "canonical_link": row[7],
+        "entity_ids": json_loads(row[8], []),
+        "level": row[9],
+        "source_families": json_loads(row[10], []),
+        "context": context,
+        "l2_score": row[12],
+        "axes": json_loads(row[13], {}),
+        "primary_reason": row[14],
+        "topic_tags": json_loads(row[15], []),
+        "rationale_short": row[16],
+        "caveats": json_loads(row[17], []),
+        "deepdive": json_loads(row[18], {}) if row[18] else None,
+        "feedback": row[19],
+    }
+
+
+def record_feed_feedback(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ValueError("payload must be an object")
+    feed_run_id = str(payload.get("feed_run_id") or "")
+    group_id = str(payload.get("group_id") or "")
+    vote = str(payload.get("vote") or "")
+    if not feed_run_id or not group_id:
+        raise ValueError("feed_run_id and group_id are required")
+    if vote not in {"up", "down", "clear"}:
+        raise ValueError("vote must be up, down, or clear")
+    conn = connect_decision_db()
+    try:
+        if vote == "clear":
+            conn.execute(
+                "delete from feed_feedback where feed_run_id = ? and group_id = ?",
+                (feed_run_id, group_id),
+            )
+        else:
+            conn.execute(
+                """
+                insert into feed_feedback(feed_run_id, group_id, vote, created_at)
+                values (?, ?, ?, ?)
+                on conflict(feed_run_id, group_id) do update set
+                    vote = excluded.vote,
+                    created_at = excluded.created_at
+                """,
+                (feed_run_id, group_id, vote, utc_now()),
+            )
+        conn.commit()
+        return {"ok": True, "vote": "" if vote == "clear" else vote}
+    finally:
+        conn.close()
+
+
+def utc_now() -> str:
+    return (
+        dt.datetime.now(dt.timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+
+
 def query_dashboard_data_payload() -> dict[str, Any]:
     payload = build_dashboard_data(db_path=DB_PATH, config=read_json(CONFIG_PATH))
     conn = connect_decision_db()
@@ -216,6 +367,7 @@ def query_dashboard_data_payload() -> dict[str, Any]:
         )
     finally:
         conn.close()
+    payload["feed"] = query_feed_payload()
     return payload
 
 
@@ -451,6 +603,11 @@ class HeroRadarHandler(BaseHTTPRequestHandler):
         if path == "/api/dashboard-data":
             json_response(self, query_dashboard_data_payload(), cors=True)
             return
+        if path == "/api/feed":
+            query = parse_qs(parsed.query)
+            requested_feed_run_id = (query.get("feed_run_id") or [""])[0] or None
+            json_response(self, query_feed_payload(requested_feed_run_id), cors=True)
+            return
         if path == "/api/candidates":
             with connect_decision_db() as conn:
                 run_id = query_latest_decision_run(conn) or ""
@@ -561,6 +718,13 @@ class HeroRadarHandler(BaseHTTPRequestHandler):
                     status=200 if result.returncode == 0 else 500,
                     cors=True,
                 )
+            except Exception as exc:  # noqa: BLE001
+                json_response(self, {"ok": False, "error": f"{type(exc).__name__}: {exc}"}, status=400, cors=True)
+            return
+
+        if path == "/api/feed/feedback":
+            try:
+                json_response(self, record_feed_feedback(read_request_json(self)), cors=True)
             except Exception as exc:  # noqa: BLE001
                 json_response(self, {"ok": False, "error": f"{type(exc).__name__}: {exc}"}, status=400, cors=True)
             return
