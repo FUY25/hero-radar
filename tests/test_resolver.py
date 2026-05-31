@@ -403,6 +403,74 @@ class ResolverTest(unittest.TestCase):
         ).fetchall()
         self.assertEqual(aliases, [("github:firecrawl/firecrawl",)])
 
+    def test_enrich_classifier_candidates_clears_stale_resolver_alias_when_unresolved(self) -> None:
+        from pipeline.decision.resolver import enrich_classifier_candidates
+
+        conn = self.make_conn()
+        conn.execute(
+            """
+            insert into evidence_rows(
+                entity_id, canonical_entity, alias, source, event_at,
+                relative_to_reference, metric_name, metric_value, family, rule_id,
+                rule_version, signal_label, historical_safety, note, raw_url_or_ref,
+                run_id
+            )
+            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "entity:figure",
+                "name:figure-ai",
+                "name:figure-ai",
+                "x_tweets",
+                "2026-05-31T00:00:00Z",
+                None,
+                "x_tier",
+                "watch",
+                "x_social",
+                "x_social_x_tier",
+                "x-stage2-v2",
+                "watch",
+                "llm_source_classifier",
+                "accepted watch candidate",
+                "tweet:t1",
+                "run-1",
+            ),
+        )
+        conn.execute(
+            """
+            insert into alias_links(entity_id, source, external_id, alias, confidence, origin, approved, created_at)
+            values (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "entity:figure",
+                "resolver",
+                "name:figure-ai",
+                "domain:rpcs1.dev",
+                "deterministic",
+                "resolver",
+                1,
+                "2026-05-30T00:00:00Z",
+            ),
+        )
+        conn.commit()
+
+        enrich_classifier_candidates(
+            conn,
+            run_id="run-1",
+            search_client=FakeSearchClient([]),
+            max_searches_per_candidate=1,
+            now="2026-05-31T00:00:00Z",
+        )
+
+        aliases = conn.execute(
+            """
+            select alias from alias_links
+            where entity_id = ? and external_id = ? and origin = ?
+            """,
+            ("entity:figure", "name:figure-ai", "resolver"),
+        ).fetchall()
+        self.assertEqual(aliases, [])
+
     def test_enrich_classifier_candidates_counts_agentic_research_aliases(self) -> None:
         from pipeline.decision.resolver import enrich_classifier_candidates
 

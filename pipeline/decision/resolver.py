@@ -408,6 +408,25 @@ def _write_resolved_links(
     return aliases, proposals
 
 
+def _clear_resolver_aliases(
+    conn: sqlite3.Connection,
+    *,
+    entity_id: str,
+    entity_key: str,
+) -> None:
+    if not entity_key.startswith("name:"):
+        return
+    conn.execute(
+        """
+        delete from alias_links
+        where entity_id = ?
+          and external_id = ?
+          and origin = ?
+        """,
+        (entity_id, entity_key, RESOLVER_SOURCE),
+    )
+
+
 def _accepted_classifier_candidates(
     conn: sqlite3.Connection,
     run_id: str,
@@ -475,6 +494,8 @@ def enrich_classifier_candidates(
         )
         links = list(result.get("resolved_links") or [])
         if not links:
+            if max_searches_per_candidate > 0 or research_provider is not None:
+                _clear_resolver_aliases(conn, entity_id=entity_id, entity_key=entity_key)
             continue
         if result.get("source") == "agentic_link_research":
             researched += 1
