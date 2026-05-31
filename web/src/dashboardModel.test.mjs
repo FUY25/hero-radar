@@ -9,8 +9,11 @@ import {
   detailRowsForItem,
   filterAndSortRows,
   formatProjectList,
+  getConfigValue,
   initialDashboardState,
   rowsForChannel,
+  setConfigValue,
+  settingsPanelDefs,
   sortOptionsForChannel,
   visibleWindowsForChannel,
   workspaceSections,
@@ -182,4 +185,46 @@ test('formatProjectList renders extracted X project objects as names instead of 
     ]),
     'OpenAI，anthropic，Claude Code',
   );
+});
+
+test('settingsPanelDefs restores old writable settings panels with dynamic counts', () => {
+  const settingsPayload = {
+    channels: [
+      { id: 'github_trending', label: 'GitHub Trending', count: 2 },
+      { id: 'x_tweets', label: 'X Tweets', count: 3 },
+    ],
+    source_errors: { github_trending: null, x_tweets: 'disabled' },
+    config_meta: { api_status: { github: {}, deepseek: {}, apify: {} } },
+    config: {
+      github_search: { queries: [{ label: 'agent', query: 'agent stars:>20' }] },
+      hn: { algolia_queries: [{ label: 'agent', query: 'agent' }] },
+      npm: { queries: [{ label: 'mcp', query: 'mcp' }] },
+      apify: { x_keyword_queries: ['agent workflow'], x_seed_accounts: ['sama', 'karpathy'] },
+    },
+  };
+
+  assert.deepEqual(
+    settingsPanelDefs(settingsPayload).map((panel) => [panel.id, panel.label, panel.count]),
+    [
+      ['settings_run_sources', 'Run & Sources', 2],
+      ['settings_search_terms', 'Search Terms', 4],
+      ['settings_x_monitoring', 'X Monitoring', 2],
+      ['settings_display', 'Display', 2],
+      ['settings_api_status', 'API Status', 3],
+    ],
+  );
+});
+
+test('config path helpers update nested settings without mutating the original config', () => {
+  const config = {
+    github_movers: { trending_repos: { enabled: true, limit_per_period: 500 } },
+    apify: { x_seed_accounts: ['sama'] },
+  };
+
+  const next = setConfigValue(config, 'github_movers.trending_repos.limit_per_period', 250);
+  const withAccount = setConfigValue(next, 'apify.x_seed_accounts.1', 'karpathy');
+
+  assert.equal(getConfigValue(config, 'github_movers.trending_repos.limit_per_period'), 500);
+  assert.equal(getConfigValue(withAccount, 'github_movers.trending_repos.limit_per_period'), 250);
+  assert.deepEqual(getConfigValue(withAccount, 'apify.x_seed_accounts'), ['sama', 'karpathy']);
 });

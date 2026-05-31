@@ -9,9 +9,12 @@ import {
   defaultRangeId as modelDefaultRangeId,
   detailRowsForItem,
   formatProjectList,
+  getConfigValue,
   initialDashboardState,
   nativeRank as modelNativeRank,
   rowsForChannel as modelRowsForChannel,
+  setConfigValue,
+  settingsPanelDefs,
   sortOptionsForChannel as modelSortOptionsForChannel,
   valueAt as modelValueAt,
   workspaceSections,
@@ -37,6 +40,19 @@ function writeColumnWidths(channel, widths) {
 function storedPageSize() {
   const value = Number(localStorage.getItem('heroRadarDefaultPageSize') || 100);
   return PAGE_SIZES.includes(value) ? value : 100;
+}
+
+function cloneJson(value) {
+  return JSON.parse(JSON.stringify(value ?? {}));
+}
+
+function readLocalJson(key, fallback) {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(key) || 'null');
+    return parsed ?? fallback;
+  } catch (_) {
+    return fallback;
+  }
 }
 
 function column(label, help, path, cls = '', kind = 'text') {
@@ -626,8 +642,8 @@ function SourceTable({ payload, channel, state, onStateChange, titlePrefix = '' 
   );
 }
 
-function SourcesView({ payload, state, onStateChange }) {
-  const channels = activeChannelList(payload, 'sources');
+function SourcesView({ payload, state, onStateChange, hiddenSources = new Set() }) {
+  const channels = activeChannelList(payload, 'sources').filter((channel) => !hiddenSources.has(channel.id));
   const activeChannel = channels.some((channel) => channel.id === state.activeChannel) ? state.activeChannel : channels[0]?.id || '';
   return (
     <>
@@ -672,42 +688,460 @@ function SettingsSubrail({ channels, activeSettings, onSelect }) {
   );
 }
 
-function SettingsView({ payload, state, onStateChange }) {
-  const channels = activeChannelList(payload, 'settings');
-  const activeSettings = channels.some((channel) => channel.id === state.activeSettings) ? state.activeSettings : channels[0]?.id || '';
+function SourceHealthBadge({ payload, source }) {
+  return <StatusDot error={payload.source_errors?.[source]} />;
+}
+
+function SettingField({ config, path, label, help, type = 'text', onConfigChange, min, max, step }) {
+  const value = getConfigValue(config, path, '');
+  return (
+    <div className="setting-row two">
+      <div>
+        <div className="setting-label">{label}</div>
+        <div className="setting-help">{help}</div>
+      </div>
+      <input
+        className="field"
+        type={type}
+        min={min}
+        max={max}
+        step={step}
+        value={value ?? ''}
+        onChange={(event) => {
+          const nextValue = type === 'number' ? Number(event.target.value || 0) : event.target.value;
+          onConfigChange(path, nextValue);
+        }}
+      />
+    </div>
+  );
+}
+
+function SettingCheckbox({ config, path, label, help, onConfigChange }) {
+  return (
+    <label className="toggle-row">
+      <input
+        type="checkbox"
+        checked={Boolean(getConfigValue(config, path, false))}
+        onChange={(event) => onConfigChange(path, event.target.checked)}
+      />
+      <span>
+        <strong>{label}</strong>
+        <div className="setting-help">{help}</div>
+      </span>
+    </label>
+  );
+}
+
+function SettingSelect({ config, path, label, help, options, onConfigChange }) {
+  const value = String(getConfigValue(config, path, options[0] || ''));
+  return (
+    <div className="setting-row two">
+      <div>
+        <div className="setting-label">{label}</div>
+        <div className="setting-help">{help}</div>
+      </div>
+      <select className="select" value={value} onChange={(event) => onConfigChange(path, event.target.value)}>
+        {options.map((option) => <option value={option} key={option}>{option}</option>)}
+      </select>
+    </div>
+  );
+}
+
+function SettingsCard({ payload, title, source, note, children }) {
+  const error = payload.source_errors?.[source];
+  return (
+    <div className="settings-card">
+      <div className="settings-card-head">
+        <div>
+          <div className="settings-card-title">{title}</div>
+          <div className="settings-card-note">{note}</div>
+        </div>
+        <SourceHealthBadge payload={payload} source={source} />
+      </div>
+      <div className="setting-list">
+        {children}
+        {error ? <div className="message-line warn">{error}</div> : null}
+      </div>
+    </div>
+  );
+}
+
+function SettingsToolbar({ panel, configDirty, configBusy, message, messageKind, onSave, onReload, onRun }) {
+  return (
+    <section className="settings-toolbar">
+      <div>
+        <div className="title">{panel?.label || 'Settings'}</div>
+        <div className="copy">server mode · {configDirty ? '有未保存修改' : '配置已同步'} · 保存后下一次 pipeline run 生效</div>
+        {message ? <div className={`message-line ${messageKind || ''}`}>{message}</div> : null}
+      </div>
+      <div className="settings-actions">
+        <button type="button" className="primary-button" disabled={!configDirty || configBusy} onClick={onSave}>保存配置</button>
+        <button type="button" disabled={configBusy} onClick={onReload}>从 API 重载</button>
+        <button type="button" disabled={configDirty || configBusy} onClick={onRun}>Run now</button>
+      </div>
+    </section>
+  );
+}
+
+function RunSourcesSettings({ payload, config, onConfigChange }) {
   return (
     <>
+      <section className="settings-section">
+        <h2>Run & Sources</h2>
+        <p className="section-copy">控制每个 source 是否启用、抓取上限和最近一次运行状态。这里不做打分，只改变下一次 pipeline 如何采集。</p>
+        <div className="settings-grid">
+          <SettingsCard payload={payload} title="GitHub Trending" source="github_trending" note="抓 GitHub Trending daily / weekly / monthly；语言 scope 仍由 config 控制但不在 UI 主动调。">
+            <div className="setting-help">Always on。当前不在 Settings 暴露 language/scope filter。</div>
+          </SettingsCard>
+          <SettingsCard payload={payload} title="Trending Repos" source="github_movers" note="第三方 GitHub momentum source；抓 daily / weekly / monthly。">
+            <SettingCheckbox config={config} path="github_movers.trending_repos.enabled" label="启用 Trending Repos" help="关闭后下一次 run 不抓这个 mover source。" onConfigChange={onConfigChange} />
+            <SettingField config={config} path="github_movers.trending_repos.limit_per_period" label="每窗口上限" help="配置请求/解析后每个 period 最多保留多少条；source 可能实际只给更少。" type="number" min="1" step="1" onConfigChange={onConfigChange} />
+          </SettingsCard>
+          <SettingsCard payload={payload} title="RepoFOMO" source="github_movers" note="周/月级 repo movers 补充源。">
+            <SettingCheckbox config={config} path="github_movers.repofomo.enabled" label="启用 RepoFOMO" help="关闭后下一次 run 不抓 RepoFOMO leaderboard。" onConfigChange={onConfigChange} />
+            <SettingField config={config} path="github_movers.repofomo.limit" label="保留上限" help="leaderboard 最多保留多少条。" type="number" min="1" step="1" onConfigChange={onConfigChange} />
+          </SettingsCard>
+          <SettingsCard payload={payload} title="GitHub Search" source="github_search" note="按 Search Terms 里的 GitHub query 主动搜索 repo。">
+            <SettingField config={config} path="github_search.max_results_per_query" label="每个 query 最大结果" help="每个 GitHub Search query 最多抓多少条；受 GitHub API 分页和 rate limit 影响。" type="number" min="1" step="1" onConfigChange={onConfigChange} />
+            <SettingField config={config} path="github_search.per_page" label="每页大小" help="GitHub Search API per_page，最大通常是 100。" type="number" min="1" max="100" step="1" onConfigChange={onConfigChange} />
+          </SettingsCard>
+          <SettingsCard payload={payload} title="HN Search" source="hn_algolia" note="HN Algolia search_by_date，按 Search Terms 和窗口抓讨论。">
+            <SettingField config={config} path="hn.algolia_hits_per_page" label="每 query/window 上限" help="HN Algolia 每个 query 和时间窗最多返回多少条。" type="number" min="1" step="1" onConfigChange={onConfigChange} />
+          </SettingsCard>
+          <SettingsCard payload={payload} title="HN Top" source="hn_firebase" note="HN Firebase top/new/best 榜单。">
+            <SettingField config={config} path="hn.firebase_limit" label="每个榜单上限" help="topstories/newstories/beststories 每个 list 取多少条。" type="number" min="1" step="1" onConfigChange={onConfigChange} />
+            <SettingField config={config} path="hn.firebase_workers" label="并发 worker" help="拉 HN item detail 时的并发数；过高可能不稳。" type="number" min="1" step="1" onConfigChange={onConfigChange} />
+          </SettingsCard>
+          <SettingsCard payload={payload} title="Product Hunt" source="product_hunt" note="PH GraphQL launches/posts。">
+            <SettingCheckbox config={config} path="product_hunt.enabled" label="启用 Product Hunt" help="需要 PRODUCTHUNT_TOKEN；关闭后下一次 run 跳过。" onConfigChange={onConfigChange} />
+            <SettingField config={config} path="product_hunt.first" label="请求 first" help="GraphQL 请求的 first 参数；PH 可能仍只返回实际可用数量。" type="number" min="1" step="1" onConfigChange={onConfigChange} />
+          </SettingsCard>
+          <SettingsCard payload={payload} title="HF Spaces" source="huggingface_trending" note="Hugging Face trending。Models/Datasets 仍采集但 dashboard 主 source 隐藏。">
+            <SettingField config={config} path="huggingface.limit" label="每类上限" help="models / datasets / spaces 每类最多请求多少条。" type="number" min="1" step="1" onConfigChange={onConfigChange} />
+          </SettingsCard>
+          <SettingsCard payload={payload} title="npm Search" source="npm_search" note="按 Search Terms 里的 npm query 搜包。">
+            <SettingCheckbox config={config} path="npm.enabled" label="启用 npm Search" help="关闭后下一次 run 跳过 npm。" onConfigChange={onConfigChange} />
+            <SettingField config={config} path="npm.size" label="每个 query size" help="npm registry search 每个 query 请求数量。" type="number" min="1" step="1" onConfigChange={onConfigChange} />
+          </SettingsCard>
+          <SettingsCard payload={payload} title="PyPI Feeds" source="pypi_feeds" note="PyPI newest / updates RSS，并对前 N 条做 JSON enrich。">
+            <SettingCheckbox config={config} path="pypi.enabled" label="启用 PyPI" help="关闭后下一次 run 跳过 PyPI feeds。" onConfigChange={onConfigChange} />
+            <SettingField config={config} path="pypi.limit_per_feed" label="RSS 每 feed 上限" help="newest 和 updates 各保留多少条。" type="number" min="1" step="1" onConfigChange={onConfigChange} />
+            <SettingField config={config} path="pypi.json_enrich_limit_per_feed" label="JSON enrich 上限" help="每个 feed 对前多少条请求 PyPI JSON 补 project_urls/classifiers。" type="number" min="0" step="1" onConfigChange={onConfigChange} />
+          </SettingsCard>
+          <SettingsCard payload={payload} title="Apify configured" source="apify_configured" note="付费 actor 防误跑 gate；真正执行还需要 APIFY_ENABLE_RUNS=true。">
+            <SettingCheckbox config={config} path="apify.enabled" label="启用 Apify configured adapter" help="只打开 config 还不够；没有 APIFY_ENABLE_RUNS=true 时仍会拒绝付费 actor。" onConfigChange={onConfigChange} />
+            <SettingField config={config} path="apify.max_results_per_run" label="run 最大结果" help="通用 Apify adapter 的每轮最大结果。" type="number" min="1" step="1" onConfigChange={onConfigChange} />
+          </SettingsCard>
+          <SettingsCard payload={payload} title="OSSInsight optional" source="ossinsight_trending_optional" note="可选 source，目前 endpoint 不稳定，失败不阻塞。">
+            <SettingCheckbox config={config} path="ossinsight.enabled" label="启用 OSSInsight optional" help="关闭后下一次 run 不请求 OSSInsight。" onConfigChange={onConfigChange} />
+          </SettingsCard>
+        </div>
+      </section>
+      <section className="settings-section">
+        <h2>Source health</h2>
+        <p className="section-copy">最近一次 snapshot 的 adapter 状态。正常只表示请求/解析没有报错，不代表 source 数据一定完整。</p>
+        <div className="settings-table">
+          {Object.entries(payload.source_errors || {}).map(([source, error]) => (
+            <div className="status-row" key={source}>
+              <strong>{source}</strong>
+              <SourceHealthBadge payload={payload} source={source} />
+              <div className={`message-line ${error ? 'warn' : 'good'}`}>{error || '正常'}</div>
+            </div>
+          ))}
+        </div>
+      </section>
+    </>
+  );
+}
+
+function QueryEditor({ config, title, path, kind, copy, onConfigChange, replaceConfig }) {
+  const list = getConfigValue(config, path, []) || [];
+  function updateEntry(index, key, value) {
+    const next = [...list];
+    next[index] = kind === 'object' ? { ...(next[index] || {}), [key]: value } : value;
+    replaceConfig(setConfigValue(config, path, next), '配置已修改，尚未保存。', 'warn');
+  }
+  return (
+    <section className="settings-section">
+      <h2>{title}</h2>
+      <p className="section-copy">{copy}</p>
+      <div className="settings-table">
+        {list.length ? list.map((entry, index) => {
+          const label = kind === 'object' ? (entry?.label || '') : `X keyword ${index + 1}`;
+          const query = kind === 'object' ? (entry?.query || '') : String(entry || '');
+          return (
+            <div className="query-row" key={`${path}:${index}`}>
+              <div>
+                {kind === 'object' ? (
+                  <input className="field" value={label} placeholder="label" onChange={(event) => updateEntry(index, 'label', event.target.value)} />
+                ) : (
+                  <div className="setting-label">{label}</div>
+                )}
+              </div>
+              <textarea className="textarea" value={query} placeholder="query" onChange={(event) => updateEntry(index, 'query', event.target.value)} />
+              <button
+                type="button"
+                className="small-button danger-button"
+                onClick={() => {
+                  const next = [...list];
+                  next.splice(index, 1);
+                  replaceConfig(setConfigValue(config, path, next), '已删除 query，保存后下一次 run 生效。', 'warn');
+                }}
+              >
+                删除
+              </button>
+            </div>
+          );
+        }) : <div className="empty">还没有 query。</div>}
+      </div>
+      <div className="settings-section-actions">
+        <button
+          type="button"
+          className="small-button"
+          onClick={() => {
+            const next = [...list, kind === 'object' ? { label: 'new', query: '' } : ''];
+            replaceConfig(setConfigValue(config, path, next), '已新增 query，保存后下一次 run 生效。', 'warn');
+          }}
+        >
+          新增 query
+        </button>
+      </div>
+    </section>
+  );
+}
+
+function SearchTermsSettings({ config, onConfigChange, replaceConfig }) {
+  return (
+    <>
+      <QueryEditor config={config} title="GitHub Search queries" path="github_search.queries" kind="object" copy="真实传给 GitHub Search API 的 repo query。想关注什么就直接加 query。" onConfigChange={onConfigChange} replaceConfig={replaceConfig} />
+      <QueryEditor config={config} title="HN Algolia queries" path="hn.algolia_queries" kind="object" copy="真实传给 HN Algolia search_by_date 的 query。每个 query 会按 24h / 7d / 30d 窗口抓。" onConfigChange={onConfigChange} replaceConfig={replaceConfig} />
+      <QueryEditor config={config} title="npm Search queries" path="npm.queries" kind="object" copy="真实传给 npm registry search 的 query。适合补充 package 生态里的工具信号。" onConfigChange={onConfigChange} replaceConfig={replaceConfig} />
+      <QueryEditor config={config} title="X keyword queries" path="apify.x_keyword_queries" kind="string" copy="预留给 X keyword/topic 抓取。当前 X 主信号仍是 seed accounts tweets。" onConfigChange={onConfigChange} replaceConfig={replaceConfig} />
+    </>
+  );
+}
+
+function XMonitoringSettings({ payload, config, onConfigChange, replaceConfig }) {
+  const accounts = getConfigValue(config, 'apify.x_seed_accounts', []) || [];
+  const selectedWindows = new Set(getConfigValue(config, 'apify.x_tweets.windows', []) || []);
+  const [newAccount, setNewAccount] = useState('');
+  function setWindows(nextWindows) {
+    replaceConfig(setConfigValue(config, 'apify.x_tweets.windows', nextWindows), 'X 时间窗已修改，保存后下一次 run 生效。', 'warn');
+  }
+  return (
+    <>
+      <section className="settings-section">
+        <h2>X Monitoring</h2>
+        <p className="section-copy">X 先按 seed accounts 抓 tweets。这里弱化 engagement，重点是这些人提到了什么项目、原文怎么说。</p>
+        <div className="settings-grid">
+          <SettingsCard payload={payload} title="Tweet scrape" source="x_tweets" note="下一次 X tweets run 使用这些参数。">
+            <SettingCheckbox config={config} path="apify.x_tweets.enabled" label="启用 X tweets" help="关闭后 dashboard 不再从 x_tweets_latest.json 导入 tweets。" onConfigChange={onConfigChange} />
+            <SettingField config={config} path="apify.x_tweets.accounts_limit" label="账号上限" help="最多从 seed accounts 里取多少个账号抓 tweets。" type="number" min="1" step="1" onConfigChange={onConfigChange} />
+            <SettingField config={config} path="apify.x_tweets.max_tweets_per_account" label="每账号 tweet 上限" help="Apify 抓取时每个账号最多多少条；这个会影响成本。" type="number" min="1" step="1" onConfigChange={onConfigChange} />
+            <SettingField config={config} path="apify.x_tweets.dashboard_tweet_limit" label="dashboard tweet 上限" help="导入 dashboard 的 tweet 总数上限，不等于实际 actor 抓取上限。" type="number" min="1" step="1" onConfigChange={onConfigChange} />
+            <SettingCheckbox config={config} path="apify.x_tweets.use_since_date_filter" label="使用 actor sinceDate 过滤" help="默认关闭。该 actor 会先按每账号条数截断再做 date filter，容易把不活跃账号过滤成 0；关闭时由本地 tweet store 按窗口过滤。" onConfigChange={onConfigChange} />
+            <div className="setting-row stack">
+              <div className="setting-label">时间窗</div>
+              <div className="settings-actions">
+                {['24h', '7d', '30d', '30d+'].map((windowId) => (
+                  <label className="toggle-row" key={windowId}>
+                    <input
+                      type="checkbox"
+                      checked={selectedWindows.has(windowId)}
+                      onChange={(event) => {
+                        const next = new Set(selectedWindows);
+                        if (event.target.checked) next.add(windowId);
+                        else next.delete(windowId);
+                        setWindows([...next]);
+                      }}
+                    />
+                    <span>{windowId}</span>
+                  </label>
+                ))}
+              </div>
+              <div className="setting-help">用于给 tweet 标 24h / 7d / 30d / 30d+ 窗口；下一次 run 生效。</div>
+            </div>
+            <SettingCheckbox config={config} path="apify.x_tweets.include_retweets" label="包含 retweets" help="打开后 retweet 也会进入抓取/导入。" onConfigChange={onConfigChange} />
+            <SettingCheckbox config={config} path="apify.x_tweets.include_replies" label="包含 replies" help="打开后 replies 也会进入抓取/导入，噪声通常更高。" onConfigChange={onConfigChange} />
+          </SettingsCard>
+          <SettingsCard payload={payload} title="Seed discovery" source="x_seed_accounts" note="从 following 候选池筛 AI 相关个人账号。">
+            <SettingCheckbox config={config} path="apify.x_seed_from_following.enabled" label="启用 following seed file" help="从 x_following_ai_seed_candidates_latest.json 读取候选并筛个人账号。" onConfigChange={onConfigChange} />
+            <SettingField config={config} path="apify.x_seed_from_following.limit" label="候选展示上限" help="Settings 里 X Accounts 的候选数量上限。" type="number" min="1" step="1" onConfigChange={onConfigChange} />
+            <SettingSelect config={config} path="apify.x_seed_from_following.sort" label="候选排序" help="当前按 followers_count 筛前 N。" options={['followers_count', 'keyword_score', 'following_count']} onConfigChange={onConfigChange} />
+          </SettingsCard>
+        </div>
+      </section>
+      <section className="settings-section">
+        <h2>Seed accounts</h2>
+        <p className="section-copy">手动维护的账号池。这里只放个人账号，不放 official accounts。保存后下一次 X tweets run 生效。</p>
+        <div className="setting-row two">
+          <div>
+            <div className="setting-label">新增账号</div>
+            <div className="setting-help">输入 handle，不需要 @。</div>
+          </div>
+          <div className="settings-actions">
+            <input className="field" value={newAccount} placeholder="karpathy" onChange={(event) => setNewAccount(event.target.value)} />
+            <button
+              type="button"
+              className="small-button"
+              onClick={() => {
+                const handle = newAccount.trim().replace(/^@/, '');
+                if (!handle) return;
+                const next = accounts.includes(handle) ? accounts : [...accounts, handle];
+                replaceConfig(setConfigValue(config, 'apify.x_seed_accounts', next), `已加入 @${handle}，保存后下一次 X run 生效。`, 'warn');
+                setNewAccount('');
+              }}
+            >
+              添加
+            </button>
+          </div>
+        </div>
+        <div className="settings-table seed-account-table">
+          {accounts.length ? accounts.map((account, index) => (
+            <div className="account-row" key={`${account}:${index}`}>
+              <div>
+                <Handle value={account} items={payload.items || []} />
+                <div className="setting-help">apify.x_seed_accounts[{index}]</div>
+              </div>
+              <button
+                type="button"
+                className="small-button danger-button"
+                onClick={() => {
+                  const next = [...accounts];
+                  next.splice(index, 1);
+                  replaceConfig(setConfigValue(config, 'apify.x_seed_accounts', next), '已移除账号，保存后下一次 X run 生效。', 'warn');
+                }}
+              >
+                移除
+              </button>
+            </div>
+          )) : <div className="empty">还没有 seed account。</div>}
+        </div>
+      </section>
+    </>
+  );
+}
+
+function DisplaySettings({ payload, pageSize, onPageSizeChange, theme, onThemeChange, hiddenSources, onHiddenSourcesChange }) {
+  return (
+    <>
+      <section className="settings-section">
+        <h2>Display</h2>
+        <p className="section-copy">这些是浏览器本地显示偏好，存在 localStorage，不写入 pipeline/config.json。</p>
+        <div className="settings-grid">
+          <div className="settings-card">
+            <div className="settings-card-title">默认分页</div>
+            <div className="settings-card-note">新打开 tab 时使用的 page size。</div>
+            <select className="select settings-card-control" value={pageSize} onChange={(event) => onPageSizeChange(Number(event.target.value))}>
+              {PAGE_SIZES.map((size) => <option key={size} value={size}>{size}/页</option>)}
+            </select>
+          </div>
+          <div className="settings-card">
+            <div className="settings-card-title">Theme</div>
+            <div className="settings-card-note">只影响本浏览器显示，设置存在 localStorage。</div>
+            <div className="settings-actions settings-card-control">
+              {['light', 'dark'].map((mode) => (
+                <button type="button" key={mode} className={`control-button ${theme === mode ? 'active' : ''}`} onClick={() => onThemeChange(mode)}>
+                  {mode === 'light' ? '浅色' : '深色'}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      </section>
+      <section className="settings-section">
+        <h2>Source tabs visibility</h2>
+        <p className="section-copy">隐藏 source tab 只是 UI 偏好；不会删除 dashboard payload、数据库或采集配置。</p>
+        <div className="settings-grid">
+          {(payload.channels || []).map((channel) => (
+            <label className="toggle-row settings-card compact" key={channel.id}>
+              <input
+                type="checkbox"
+                checked={!hiddenSources.has(channel.id)}
+                onChange={(event) => {
+                  const next = new Set(hiddenSources);
+                  if (event.target.checked) next.delete(channel.id);
+                  else next.add(channel.id);
+                  onHiddenSourcesChange(next);
+                }}
+              />
+              <span>
+                <strong>{channel.label}</strong>
+                <div className="setting-help">{formatNumber(channel.count)} rows · 只影响本浏览器显示，不改数据库和 pipeline。</div>
+              </span>
+            </label>
+          ))}
+        </div>
+      </section>
+    </>
+  );
+}
+
+function ApiStatusSettings({ payload }) {
+  const rows = Object.values(payload.config_meta?.api_status || {});
+  return (
+    <section className="settings-section">
+      <h2>API Status</h2>
+      <p className="section-copy">这里只显示环境变量是否配置，不显示 token 明文。Apify paid actor 还额外受 APIFY_ENABLE_RUNS gate 控制。</p>
+      <div className="settings-table">
+        {rows.map((row) => (
+          <div className="status-row" key={`${row.label}:${row.env}`}>
+            <strong>{row.label}</strong>
+            <span className={`status-dot ${row.configured ? 'ok' : 'warn'}`}>{row.configured ? 'configured' : 'missing/off'}</span>
+            <div>
+              <code>{row.env}</code>
+              <div className="setting-help">{row.note}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function SettingsView({ payload, state, settings }) {
+  const panels = settingsPanelDefs({ ...payload, config: settings.config });
+  const activeSettings = panels.some((panel) => panel.id === state.activeSettings) ? state.activeSettings : panels[0]?.id || '';
+  const panel = panels.find((row) => row.id === activeSettings);
+  const body = activeSettings === 'settings_search_terms'
+    ? <SearchTermsSettings config={settings.config} onConfigChange={settings.updateConfig} replaceConfig={settings.replaceConfig} />
+    : activeSettings === 'settings_x_monitoring'
+      ? <XMonitoringSettings payload={payload} config={settings.config} onConfigChange={settings.updateConfig} replaceConfig={settings.replaceConfig} />
+      : activeSettings === 'settings_display'
+        ? (
+          <DisplaySettings
+            payload={payload}
+            pageSize={settings.pageSize}
+            onPageSizeChange={settings.onPageSizeChange}
+            theme={settings.theme}
+            onThemeChange={settings.onThemeChange}
+            hiddenSources={settings.hiddenSources}
+            onHiddenSourcesChange={settings.onHiddenSourcesChange}
+          />
+        )
+        : activeSettings === 'settings_api_status'
+          ? <ApiStatusSettings payload={payload} />
+          : <RunSourcesSettings payload={payload} config={settings.config} onConfigChange={settings.updateConfig} />;
+  return (
+    <section className="settings-panel">
       <section className="status-list">
         <div className="settings-note">
           <strong>Settings 是控制面板，不是项目榜。</strong>
-          {' '}这里展示 source health/search terms 等本地配置和运行状态；当前 React 迁移只读动态 payload，不写 pipeline/config.json。
+          {' '}配置改动的目标文件是 <code>pipeline/config.json</code>；确认后下一次 pipeline run 生效。默认节奏先按每 24 小时一轮设计，cron 暂不启用。
         </div>
       </section>
-      <section className="settings-panel">
-        <section className="settings-toolbar">
-          <div>
-            <div className="title">{channels.find((row) => row.id === activeSettings)?.label || 'Settings'}</div>
-            <div className="copy">default schedule: {payload.config_meta?.default_schedule || '24h'} · takes effect: {payload.config_meta?.takes_effect || 'next pipeline run'}</div>
-          </div>
-          <div className="settings-actions">
-            {Object.entries(payload.source_errors || {}).slice(0, 4).map(([source, error]) => (
-              <span className="status-pill" key={source}>
-                <strong>{source}</strong> · <StatusDot error={error} />
-              </span>
-            ))}
-          </div>
-        </section>
-      </section>
-      {activeSettings ? (
-        <SourceTable
-          payload={payload}
-          channel={activeSettings}
-          state={{ ...state, activeChannel: activeSettings }}
-          onStateChange={onStateChange}
-          titlePrefix="Settings rows come from the dynamic dashboard payload."
-        />
-      ) : <div className="empty">还没有 settings channel。</div>}
-    </>
+      <SettingsToolbar
+        panel={panel}
+        configDirty={settings.configDirty}
+        configBusy={settings.configBusy}
+        message={settings.configMessage}
+        messageKind={settings.configMessageKind}
+        onSave={settings.onSaveConfig}
+        onReload={settings.onReloadConfig}
+        onRun={settings.onRunPipeline}
+      />
+      {body}
+    </section>
   );
 }
 
@@ -783,7 +1217,13 @@ function App() {
   const [state, setState] = useState(null);
   const [error, setError] = useState('');
   const [railCollapsed, setRailCollapsed] = useState(() => localStorage.getItem('heroRadarRail') === 'collapsed');
-  const [theme] = useState(() => localStorage.getItem('heroRadarTheme') || 'light');
+  const [theme, setTheme] = useState(() => localStorage.getItem('heroRadarTheme') || 'light');
+  const [hiddenSources, setHiddenSources] = useState(() => new Set(readLocalJson('heroRadarHiddenSources', [])));
+  const [runtimeConfig, setRuntimeConfig] = useState({});
+  const [savedConfigText, setSavedConfigText] = useState('{}');
+  const [configMessage, setConfigMessage] = useState('');
+  const [configMessageKind, setConfigMessageKind] = useState('');
+  const [configBusy, setConfigBusy] = useState(false);
 
   useEffect(() => {
     fetch(dashboardApiUrl('/api/dashboard-data', API_BASE))
@@ -798,11 +1238,15 @@ function App() {
         const activeChannel = (data.channels || []).some((channel) => channel.id === localStorage.getItem('heroRadarSourceTab'))
           ? localStorage.getItem('heroRadarSourceTab')
           : initial.activeChannel;
-        const activeSettings = (data.settings_channels || []).some((channel) => channel.id === localStorage.getItem('heroRadarSettingsTab'))
+        const panels = settingsPanelDefs(data);
+        const activeSettings = panels.some((panel) => panel.id === localStorage.getItem('heroRadarSettingsTab'))
           ? localStorage.getItem('heroRadarSettingsTab')
-          : initial.activeSettings;
+          : panels[0]?.id || initial.activeSettings;
         const activeRangeChannel = section === 'settings' ? activeSettings : activeChannel;
+        const config = cloneJson(data.config || {});
         setPayload(data);
+        setRuntimeConfig(config);
+        setSavedConfigText(JSON.stringify(config));
         setState({
           ...initial,
           section: workspaceSections().some((row) => row.id === section && row.enabled) ? section : initial.section,
@@ -821,16 +1265,114 @@ function App() {
     localStorage.setItem('heroRadarRail', railCollapsed ? 'collapsed' : 'expanded');
   }, [railCollapsed]);
 
+  useEffect(() => {
+    localStorage.setItem('heroRadarTheme', theme);
+  }, [theme]);
+
+  useEffect(() => {
+    localStorage.setItem('heroRadarHiddenSources', JSON.stringify([...hiddenSources]));
+  }, [hiddenSources]);
+
   function patchState(patch) {
     setState((current) => ({ ...(current || {}), ...patch }));
   }
 
+  function markConfigMessage(message, kind = 'warn') {
+    setConfigMessage(message);
+    setConfigMessageKind(kind);
+  }
+
+  function updateConfig(path, value) {
+    setRuntimeConfig((current) => setConfigValue(current, path, value));
+    markConfigMessage('配置已修改，尚未保存。', 'warn');
+  }
+
+  function replaceConfig(nextConfig, message, kind = 'warn') {
+    setRuntimeConfig(nextConfig);
+    markConfigMessage(message, kind);
+  }
+
+  async function reloadConfigFromApi() {
+    if (configBusy) return;
+    setConfigBusy(true);
+    try {
+      const response = await fetch(dashboardApiUrl('/api/config', API_BASE), { cache: 'no-store' });
+      const data = await response.json();
+      if (!response.ok || !data.config) throw new Error(data.error || `HTTP ${response.status}`);
+      const config = cloneJson(data.config);
+      setRuntimeConfig(config);
+      setSavedConfigText(JSON.stringify(config));
+      markConfigMessage('已从 /api/config 重载。', 'good');
+    } catch (err) {
+      markConfigMessage(`重载失败：${String(err.message || err)}`, 'warn');
+    } finally {
+      setConfigBusy(false);
+    }
+  }
+
+  async function saveConfig() {
+    if (configBusy) return;
+    setConfigBusy(true);
+    markConfigMessage('正在保存 pipeline/config.json...', '');
+    try {
+      const response = await fetch(dashboardApiUrl('/api/config', API_BASE), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ config: runtimeConfig }),
+      });
+      const data = await response.json();
+      if (!response.ok || !data.ok) throw new Error(data.error || `HTTP ${response.status}`);
+      setSavedConfigText(JSON.stringify(runtimeConfig));
+      markConfigMessage(`已保存；backup: ${data.backup_path || 'created'}。下一次 run 生效。`, 'good');
+    } catch (err) {
+      markConfigMessage(`保存失败：${String(err.message || err)}`, 'warn');
+    } finally {
+      setConfigBusy(false);
+    }
+  }
+
+  async function runPipelineNow() {
+    if (configBusy || JSON.stringify(runtimeConfig || {}) !== savedConfigText) return;
+    setConfigBusy(true);
+    markConfigMessage('Pipeline 正在运行；完成后会刷新 dashboard。', '');
+    try {
+      const response = await fetch(dashboardApiUrl('/api/run', API_BASE), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      const data = await response.json();
+      if (!response.ok || !data.ok) throw new Error(data.stderr || data.error || `HTTP ${response.status}`);
+      markConfigMessage('Pipeline 完成，正在刷新 dashboard。', 'good');
+      window.location.reload();
+    } catch (err) {
+      markConfigMessage(`Run failed：${String(err.message || err).slice(0, 800)}`, 'warn');
+      setConfigBusy(false);
+    }
+  }
+
+  function updateHiddenSources(nextHiddenSources) {
+    setHiddenSources(nextHiddenSources);
+    markConfigMessage('Source tab 显示偏好已更新；这不影响采集。', 'good');
+    if (state?.activeChannel && nextHiddenSources.has(state.activeChannel)) {
+      const nextChannel = (payload?.channels || []).find((channel) => !nextHiddenSources.has(channel.id));
+      if (nextChannel) patchState({ activeChannel: nextChannel.id, activeWindow: defaultRangeId(payload.items || [], nextChannel.id), page: 1 });
+    }
+  }
+
+  function updatePageSize(size) {
+    localStorage.setItem('heroRadarDefaultPageSize', String(size));
+    patchState({ pageSize: size, page: 1 });
+    markConfigMessage(`默认分页已改为 ${size}/页。`, 'good');
+  }
+
   const sections = workspaceSections();
   const activeSection = state?.section || 'sources';
-  const settingsChannels = payload ? activeChannelList(payload, 'settings') : [];
+  const settingsChannels = payload ? settingsPanelDefs({ ...payload, config: runtimeConfig }) : [];
   const activeSettings = state && settingsChannels.some((channel) => channel.id === state.activeSettings)
     ? state.activeSettings
     : settingsChannels[0]?.id || '';
+  const configDirty = JSON.stringify(runtimeConfig || {}) !== savedConfigText;
 
   return (
     <div className={`app-root ${railCollapsed ? 'rail-collapsed' : ''} ${activeSection === 'settings' ? 'settings-mode' : ''}`} data-theme={theme}>
@@ -877,7 +1419,7 @@ function App() {
             activeSettings={activeSettings}
             onSelect={(id) => {
               localStorage.setItem('heroRadarSettingsTab', id);
-              patchState({ activeSettings: id, activeWindow: defaultRangeId(payload.items || [], id), sort: 'native', sortDir: 'asc', page: 1 });
+              patchState({ activeSettings: id, page: 1 });
             }}
           />
         ) : null}
@@ -886,8 +1428,34 @@ function App() {
           <main>
             {error ? <div className="error visible">Failed to load dashboard data: {error}</div> : null}
             {!payload || !state ? <div className="empty">Loading dashboard data from {dashboardApiUrl('/api/dashboard-data', API_BASE)}...</div> : null}
-            {payload && state && activeSection === 'sources' ? <SourcesView payload={payload} state={state} onStateChange={patchState} /> : null}
-            {payload && state && activeSection === 'settings' ? <SettingsView payload={payload} state={{ ...state, activeSettings }} onStateChange={patchState} /> : null}
+            {payload && state && activeSection === 'sources' ? <SourcesView payload={payload} state={state} onStateChange={patchState} hiddenSources={hiddenSources} /> : null}
+            {payload && state && activeSection === 'settings' ? (
+              <SettingsView
+                payload={payload}
+                state={{ ...state, activeSettings }}
+                settings={{
+                  config: runtimeConfig,
+                  updateConfig,
+                  replaceConfig,
+                  configDirty,
+                  configBusy,
+                  configMessage,
+                  configMessageKind,
+                  onSaveConfig: saveConfig,
+                  onReloadConfig: reloadConfigFromApi,
+                  onRunPipeline: runPipelineNow,
+                  pageSize: state.pageSize,
+                  onPageSizeChange: updatePageSize,
+                  theme,
+                  onThemeChange: (mode) => {
+                    setTheme(mode);
+                    markConfigMessage(`显示主题已切换为 ${mode === 'dark' ? '深色' : '浅色'}。`, 'good');
+                  },
+                  hiddenSources,
+                  onHiddenSourcesChange: updateHiddenSources,
+                }}
+              />
+            ) : null}
             {payload && state && activeSection === 'feed' ? <FeedView payload={payload} /> : null}
           </main>
         </div>

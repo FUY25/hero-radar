@@ -351,6 +351,55 @@ export function formatProjectList(projects, limit = 8) {
     .join('，');
 }
 
+export function getConfigValue(config, path, fallback = undefined) {
+  const parts = String(path || '').split('.').filter(Boolean);
+  let current = config;
+  for (const part of parts) {
+    if (current == null || typeof current !== 'object') return fallback;
+    current = current[part];
+  }
+  return current === undefined ? fallback : current;
+}
+
+export function setConfigValue(config, path, value) {
+  const parts = String(path || '').split('.').filter(Boolean);
+  if (!parts.length) return config;
+  const clone = Array.isArray(config) ? [...config] : { ...(config || {}) };
+  let current = clone;
+  for (let index = 0; index < parts.length - 1; index += 1) {
+    const part = parts[index];
+    const existing = current[part];
+    const nextPart = parts[index + 1];
+    const child = existing && typeof existing === 'object'
+      ? (Array.isArray(existing) ? [...existing] : { ...existing })
+      : (/^\d+$/.test(nextPart || '') ? [] : {});
+    current[part] = child;
+    current = child;
+  }
+  current[parts[parts.length - 1]] = value;
+  return clone;
+}
+
+export function settingsPanelDefs(payload) {
+  const config = payload?.config || {};
+  const searchCount =
+    (getConfigValue(config, 'github_search.queries', []) || []).length
+    + (getConfigValue(config, 'hn.algolia_queries', []) || []).length
+    + (getConfigValue(config, 'npm.queries', []) || []).length
+    + (getConfigValue(config, 'apify.x_keyword_queries', []) || []).length;
+  const xAccountCount = (getConfigValue(config, 'apify.x_seed_accounts', []) || []).length;
+  const sourceCount = Object.keys(payload?.source_errors || {}).length;
+  const displayCount = (payload?.channels || []).length;
+  const apiCount = Object.keys(payload?.config_meta?.api_status || {}).length;
+  return [
+    { id: 'settings_run_sources', label: 'Run & Sources', count: sourceCount },
+    { id: 'settings_search_terms', label: 'Search Terms', count: searchCount },
+    { id: 'settings_x_monitoring', label: 'X Monitoring', count: xAccountCount },
+    { id: 'settings_display', label: 'Display', count: displayCount },
+    { id: 'settings_api_status', label: 'API Status', count: apiCount },
+  ];
+}
+
 export function detailRowsForItem(item) {
   if (!item) return [];
   const rows = [];
