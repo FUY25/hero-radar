@@ -508,6 +508,14 @@ def run_decision(
             rule_version=str(rules.get("version", "rules-v1")),
         )
         reset_decision_stage(conn, run_id=run_id, tables=RUN_SCOPED_TABLES)
+        from pipeline.decision.classifier_preflight import classifier_preflight_summary
+
+        preflight_summary = classifier_preflight_summary(
+            conn,
+            now=now,
+            x_limit=x_classifier_limit,
+            hn_limit=hn_classifier_limit,
+        )
         rows = read_latest_items(conn)
         resolution = resolve_entities(rows, first_seen=now)
         reconciled_ids = reconcile_entity_ids(conn, resolution)
@@ -664,6 +672,7 @@ def run_decision(
             "readme_cached": int(readme_summary.get("cached") or 0),
             "export": str(export_json_path),
         }
+        summary.update(preflight_summary)
         return summary
     except Exception as exc:
         finish_decision_run(conn, run_id=run_id, status="failed", note=str(exc))
@@ -791,6 +800,13 @@ def main() -> None:
         print(f"x_stage1_mentions: {summary['x_stage1_mentions']}")
     if "x_stage2_tiered" in summary:
         print(f"x_stage2_tiered: {summary['x_stage2_tiered']}")
+    if "x_classifier_candidates_7d" in summary:
+        print(f"x_time_basis: {summary['x_time_basis']}")
+        print(f"x_classifier_candidates_7d: {summary['x_classifier_candidates_7d']}")
+        print(f"x_classifier_will_process: {summary['x_classifier_will_process']}")
+    if "hn_classifier_units" in summary:
+        print(f"hn_classifier_units: {summary['hn_classifier_units']}")
+        print(f"hn_classifier_will_process: {summary['hn_classifier_will_process']}")
     if "resolver_researched" in summary:
         print(f"resolver_researched: {summary['resolver_researched']}")
     if "readme_fetched" in summary:

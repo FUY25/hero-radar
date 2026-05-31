@@ -595,6 +595,9 @@ class DecisionRunnerTest(unittest.TestCase):
             )
 
             self.assertEqual(summary["potential_candidates"], 1)
+            self.assertEqual(summary["x_time_basis"], "x_tweets_store.created_at")
+            self.assertEqual(summary["x_classifier_candidates_7d"], 0)
+            self.assertEqual(summary["hn_classifier_units"], 0)
             self.assertTrue(export_path.exists())
 
             payload = json.loads(export_path.read_text())
