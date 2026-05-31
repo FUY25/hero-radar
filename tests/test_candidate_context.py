@@ -117,6 +117,51 @@ class CandidateContextTest(unittest.TestCase):
         )
         self.assertEqual(bundle["evidence_bullets"][2]["origin_type"], "source_classifier")
 
+    def test_context_dedupes_repeated_evidence_bullets_and_keeps_refs(self):
+        from pipeline.decision.candidate_context import context_bundle_for_entity
+
+        conn = self.make_conn()
+        duplicate_rows = [
+            ("hn_llm_classifier", "hn_projectness", "project", "hn", "hn_llm_projectness", "potential", "item:10"),
+            ("hn_llm_classifier", "hn_projectness", "project", "hn", "hn_llm_projectness", "potential", "item:11"),
+        ]
+        for source, metric_name, metric_value, family, rule_id, signal_label, raw_ref in duplicate_rows:
+            conn.execute(
+                """
+                insert into evidence_rows(entity_id, canonical_entity, alias, source, event_at, metric_name, metric_value, family, rule_id, rule_version, signal_label, historical_safety, note, raw_url_or_ref, run_id)
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "entity:repo",
+                    "owner/repo",
+                    "owner/repo",
+                    source,
+                    "2026-05-31T00:00:00Z",
+                    metric_name,
+                    metric_value,
+                    family,
+                    rule_id,
+                    "rules-v1",
+                    signal_label,
+                    "snapshot_only",
+                    "note",
+                    raw_ref,
+                    "run-1",
+                ),
+            )
+        conn.commit()
+
+        bundle = context_bundle_for_entity(conn, entity_id="entity:repo", run_id="run-1")
+
+        classifier_bullets = [
+            bullet
+            for bullet in bundle["evidence_bullets"]
+            if bullet["label"] == "HN classifier: project"
+        ]
+        self.assertEqual(len(classifier_bullets), 1)
+        self.assertEqual(classifier_bullets[0]["source_refs"], ["item:10", "item:11"])
+        self.assertEqual(bundle["evidence_count"], len(bundle["evidence_bullets"]))
+
     def test_context_prefers_resolver_alias_when_canonical_key_is_name(self):
         from pipeline.decision.candidate_context import context_bundle_for_entity
 

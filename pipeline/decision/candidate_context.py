@@ -43,7 +43,7 @@ def context_bundle_for_entity(
 
     readme_preview = _readme_preview(conn, canonical_key, alias_key)
     context_preview = readme_preview or _best_source_description(conn, entity)
-    bullets = [_evidence_bullet(row) for row in evidence]
+    bullets = _dedupe_bullets([_evidence_bullet(row) for row in evidence])
 
     return {
         "entity_id": entity_id,
@@ -265,6 +265,27 @@ def _evidence_bullet(row: dict[str, Any]) -> dict[str, Any]:
         "strength": row["signal_label"],
         "source_refs": [row["raw_url_or_ref"]] if row.get("raw_url_or_ref") else [],
     }
+
+
+def _dedupe_bullets(bullets: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: dict[tuple[Any, ...], dict[str, Any]] = {}
+    order: list[tuple[Any, ...]] = []
+    for bullet in bullets:
+        key = (
+            bullet.get("label"),
+            bullet.get("family"),
+            bullet.get("origin_type"),
+            bullet.get("provenance_badge"),
+            bullet.get("strength"),
+        )
+        if key not in merged:
+            merged[key] = {**bullet, "source_refs": []}
+            order.append(key)
+        refs = merged[key]["source_refs"]
+        for ref in bullet.get("source_refs") or []:
+            if ref and ref not in refs:
+                refs.append(ref)
+    return [merged[key] for key in order]
 
 
 def _evidence_label(row: dict[str, Any]) -> str:
