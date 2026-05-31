@@ -4,6 +4,13 @@ data/exports/
 __pycache__/
 *.pyc
 .env
+
+# Local secrets / API keys
+*.local.json
+*.local.md
+secrets*.json
+secrets*.md
+
 .DS_Store
 .agents/
 .claude/

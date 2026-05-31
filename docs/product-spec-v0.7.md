@@ -4,7 +4,7 @@ Internal tool version. This is for personal use first: no selling, no fundraisin
 
 ## 0. One Sentence
 
-Crawl GitHub, HN, Reddit, Product Hunt, X, Hugging Face, and other useful channels; compute what can be computed; rank what is starting to move; automatically analyze the top few items for whether they may represent an application-layer paradigm shift.
+Crawl GitHub, HN, Reddit, Product Hunt, X, Hugging Face, and other useful channels; compute what can be computed; rank what is starting to move; automatically analyze Potential-and-above candidates for whether they may represent an application-layer paradigm shift.
 
 Target: product/application-layer paradigm opportunities, not pure research or paper trends. Good examples are Claude Code, Hermes Agent, and OpenClaw-style changes in user behavior, workflow, and product interaction.
 
@@ -17,7 +17,7 @@ Four pieces:
    Source adapters -> raw source items -> source-native facts + raw snapshots -> local storage.
 
 2. Scoring pipeline
-   Lightweight weighted ranking -> integrated recommendation list -> top 3 LLM analysis.
+   Deterministic candidate rules -> Potential pool -> LLM analysis for Potential+.
 
 3. Settings + newsletter
    Simple local config -> scheduled digest to myself.
@@ -46,7 +46,7 @@ Keep:
 - More data sources.
 - Computable metrics.
 - Recommendation ranking.
-- Top 3 automatic analysis.
+- Potential+ automatic analysis.
 - Newsletter.
 - DeerFlow agent with API tools.
 - Historical snapshots, because seeing how something rose is directly useful.
@@ -137,9 +137,29 @@ Where:
 
 Display the components, not just one opaque score. Do not let this formula hide the source-native dashboard facts.
 
-## 7. Top 3 LLM Analysis
+## 7. LLM Routing + Candidate Analysis
 
-Only run LLM analysis on the top 3 items per digest.
+Model routing:
+
+```text
+DeepSeek
+  Use for pipeline / deterministic-adjacent tasks:
+  - Potential+ candidate analysis
+  - structured summaries / JSON outputs
+  - cheap batch classification
+  - semantic checks that do not need heavy tool use
+
+Kimi / Moonshot
+  Use for chatbot / agent / code-understanding tasks:
+  - Explore / Agentic Search
+  - multi-turn deep dives
+  - long-context repo/source reading
+  - codebase or implementation understanding
+```
+
+Default rule: run LLM analysis on `Potential` and above candidates. Do not use a
+hard Top 3 cap in the candidate layer. If cost becomes real, add a visible soft
+budget or manual review mode later.
 
 Analysis framework:
 
@@ -176,7 +196,7 @@ Tables:
 snapshots   one row per source run
 items       one row per raw source item per run
 scores      ranked items for a run
-analyses    future top-3 LLM outputs
+analyses    future Potential+ LLM outputs
 settings    local config
 ```
 
@@ -195,10 +215,10 @@ Step 2  Source-tab dashboard: native facts only, no cross-channel weighting. [do
 Step 3  Add targeted X tweets / mention aggregates through Apify. [done]
 Step 4  Add local backend for reading/writing config and manual run trigger. [done]
 Step 5  Export daily markdown digest.
-Step 6  Add top-3 DeepSeek analysis.
+Step 6  Add DeepSeek analysis for Potential+ candidates.
 Step 7  Add newsletter delivery.
 Step 8  Add Reddit / official X search if useful.
-Step 9  Add DeerFlow MCP/skills for live deep-dive search.
+Step 9  Add Kimi-backed DeerFlow MCP/skills for live deep-dive search.
 ```
 
 ## 10. API Ask From Founder
