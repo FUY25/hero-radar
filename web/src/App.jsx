@@ -1277,7 +1277,7 @@ function FeedView({ payload, tab = 'daily', onTabChange, onOpenSource }) {
           <p>Layer 2 selection is out of this slice. Candidate Pool below remains available for all Potential / High Potential / Edge Watch rows.</p>
         </section>
       ) : (
-        <section className="settings-panel">
+        <section className="settings-panel candidate-panel">
           <section className="settings-toolbar">
             <div>
               <div className="title">候选池</div>

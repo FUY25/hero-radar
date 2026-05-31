@@ -519,6 +519,10 @@ button:disabled {
   max-width: 1180px;
 }
 
+.candidate-panel {
+  max-width: none;
+}
+
 .settings-section {
   display: grid;
   gap: 12px;
