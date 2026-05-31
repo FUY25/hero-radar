@@ -18,3 +18,5 @@ secrets*.md
 .mypy_cache/
 .venv/
 venv/
+web/node_modules/
+web/dist/

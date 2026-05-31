@@ -88,6 +88,29 @@ python3 -m pipeline.decision.backfill \
 
 Backfill only runs on `backfill_jobs`; it does not scan every repo.
 
+## Candidate Pool Web Shell
+
+Start the local API:
+
+```bash
+python3 pipeline/server.py --port 8787
+```
+
+Start the React shell:
+
+```bash
+cd web
+npm install
+VITE_API_BASE=http://127.0.0.1:8787 npm run dev
+```
+
+Open `http://127.0.0.1:5173/`. The `Daily Feed` internal tab is an empty state in
+this slice. `Candidate Pool` reads `/api/candidates` and shows the pre-Layer2
+candidate universe.
+
+After `npm run build`, the local backend also serves the built shell at
+`http://127.0.0.1:8787/app/`.
+
 Optional environment variables:
 
 - `GITHUB_TOKEN`: increases GitHub Search/Core API rate limits.
