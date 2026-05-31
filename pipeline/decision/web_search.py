@@ -21,14 +21,22 @@ class _DuckDuckGoHtmlParser(HTMLParser):
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         attr_map = {key: value or "" for key, value in attrs}
         classes = set(attr_map.get("class", "").split())
-        if tag == "a" and "result__a" in classes:
+        if self._capture_snippet and (
+            tag == "tr" or "link-text" in classes or "result-link" in classes or "result__a" in classes
+        ):
+            self._finish_snippet()
+        if tag == "a" and ("result__a" in classes or "result-link" in classes):
             if len(self.results) >= self.limit:
                 return
             self._pending_href = attr_map.get("href", "")
             self._active_title = []
             self._capture_title = True
             return
-        if "result__snippet" in classes and self.results and not self.results[-1]["description"]:
+        if (
+            ("result__snippet" in classes or "result-snippet" in classes)
+            and self.results
+            and not self.results[-1]["description"]
+        ):
             self._active_snippet = []
             self._capture_snippet = True
 
@@ -42,16 +50,20 @@ class _DuckDuckGoHtmlParser(HTMLParser):
             self._active_title = []
             self._pending_href = ""
             return
-        if self._capture_snippet and self.results and tag in {"a", "div"}:
-            self.results[-1]["description"] = _clean_text("".join(self._active_snippet))
-            self._capture_snippet = False
-            self._active_snippet = []
+        if self._capture_snippet and self.results and tag in {"a", "div", "td", "span"}:
+            self._finish_snippet()
 
     def handle_data(self, data: str) -> None:
         if self._capture_title:
             self._active_title.append(data)
         if self._capture_snippet:
             self._active_snippet.append(data)
+
+    def _finish_snippet(self) -> None:
+        if self.results:
+            self.results[-1]["description"] = _clean_text("".join(self._active_snippet))
+        self._capture_snippet = False
+        self._active_snippet = []
 
 
 def _clean_text(value: str) -> str:
@@ -81,7 +93,7 @@ class DuckDuckGoSearchClient:
         *,
         opener: Any | None = None,
         timeout: int = 20,
-        endpoint: str = "https://duckduckgo.com/html/",
+        endpoint: str = "https://duckduckgo.com/lite/",
     ) -> None:
         self.opener = opener or urllib.request.urlopen
         self.timeout = timeout

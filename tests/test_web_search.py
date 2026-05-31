@@ -62,6 +62,19 @@ class WebSearchClientTest(unittest.TestCase):
         self.assertIn("Clawdbot+GitHub+repo", calls[0]["url"])
         self.assertEqual(calls[0]["timeout"], 7)
 
+    def test_duckduckgo_lite_parser_shape_is_supported(self):
+        from pipeline.decision.web_search import parse_duckduckgo_html
+
+        html = """
+        <tr><td><a class='result-link' href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fgithub.com%2Fopenai%2F">OpenAI - GitHub</a></td></tr>
+        <tr><td class='result-snippet'>OpenAI has repositories on GitHub.</td></tr>
+        """
+
+        results = parse_duckduckgo_html(html, limit=1)
+
+        self.assertEqual(results[0]["url"], "https://github.com/openai/")
+        self.assertEqual(results[0]["description"], "OpenAI has repositories on GitHub.")
+
 
 if __name__ == "__main__":
     unittest.main()
