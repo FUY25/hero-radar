@@ -202,13 +202,16 @@ def query_candidates(conn: sqlite3.Connection, run_id: str) -> dict[str, Any]:
 
 def query_dashboard_data_payload() -> dict[str, Any]:
     payload = build_dashboard_data(db_path=DB_PATH, config=read_json(CONFIG_PATH))
-    with connect_decision_db() as conn:
+    conn = connect_decision_db()
+    try:
         run_id = query_latest_decision_run(conn) or ""
         payload["candidates"] = (
             query_candidates(conn, run_id)
             if run_id
             else {"run_id": "", "candidates": [], "edge_watch": []}
         )
+    finally:
+        conn.close()
     return payload
 
 
