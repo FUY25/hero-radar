@@ -42,6 +42,12 @@ export function candidateRowsForFeed(candidates) {
   ];
 }
 
+export function dashboardApiUrl(path, base = '') {
+  const cleanPath = path.startsWith('/') ? path : `/${path}`;
+  const cleanBase = String(base || '').replace(/\/+$/, '');
+  return cleanBase ? `${cleanBase}${cleanPath}` : cleanPath;
+}
+
 export function visibleWindowsForChannel(items, channel) {
   const windows = new Set();
   for (const item of items || []) {

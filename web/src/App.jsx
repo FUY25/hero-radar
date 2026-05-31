@@ -2,13 +2,14 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
   activeChannelList,
   candidateRowsForFeed,
+  dashboardApiUrl,
   detailRowsForItem,
   initialDashboardState,
   visibleWindowsForChannel,
   workspaceSections,
 } from './dashboardModel.js';
 
-const API_BASE = import.meta.env.VITE_API_BASE || 'http://127.0.0.1:8787';
+const API_BASE = import.meta.env.VITE_API_BASE || '';
 const PAGE_SIZES = [50, 100, 200, 500];
 
 function column(label, help, path, cls = '', kind = 'text') {
@@ -785,7 +786,7 @@ function App() {
   const [theme] = useState(() => localStorage.getItem('heroRadarTheme') || 'light');
 
   useEffect(() => {
-    fetch(`${API_BASE}/api/dashboard-data`)
+    fetch(dashboardApiUrl('/api/dashboard-data', API_BASE))
       .then((response) => {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         return response.json();
@@ -859,7 +860,7 @@ function App() {
         <div className="workspace">
           <main>
             {error ? <div className="error visible">Failed to load dashboard data: {error}</div> : null}
-            {!payload || !state ? <div className="empty">Loading dashboard data from {API_BASE}/api/dashboard-data...</div> : null}
+            {!payload || !state ? <div className="empty">Loading dashboard data from {dashboardApiUrl('/api/dashboard-data', API_BASE)}...</div> : null}
             {payload && state && activeSection === 'sources' ? <SourcesView payload={payload} state={state} onStateChange={patchState} /> : null}
             {payload && state && activeSection === 'settings' ? <SettingsView payload={payload} state={{ ...state, activeSettings }} onStateChange={patchState} /> : null}
             {payload && state && activeSection === 'feed' ? <FeedView payload={payload} /> : null}

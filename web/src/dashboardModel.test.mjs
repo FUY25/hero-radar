@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   activeChannelList,
   candidateRowsForFeed,
+  dashboardApiUrl,
   detailRowsForItem,
   filterAndSortRows,
   initialDashboardState,
@@ -67,4 +68,12 @@ test('candidateRowsForFeed merges potential and edge watch rows', () => {
     edge_watch: [{ entity_id: 'entity:2', canonical_entity: 'Topic', reasons: ['hn'], status: 'open' }],
   };
   assert.deepEqual(candidateRowsForFeed(candidates).map((row) => row.level), ['potential', 'edge_watch']);
+});
+
+test('dashboardApiUrl defaults to same-origin api and respects explicit base', () => {
+  assert.equal(dashboardApiUrl('/api/dashboard-data', ''), '/api/dashboard-data');
+  assert.equal(
+    dashboardApiUrl('/api/dashboard-data', 'http://127.0.0.1:8787/'),
+    'http://127.0.0.1:8787/api/dashboard-data',
+  );
 });
