@@ -27,10 +27,9 @@
     "new_forks_high": 300
   },
   "hn": {
-    "front_page_score_watch": 50,
-    "front_page_score_potential": 100,
-    "strict_story_count_7d_watch": 1,
-    "strict_story_count_7d_potential": 3
+    "points_floor_watch": 30,
+    "points_breakthrough_potential": 200,
+    "window_days": 7
   },
   "product_hunt": {
     "rank_potential": 5,

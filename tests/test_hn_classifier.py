@@ -592,6 +592,47 @@ class HnClassifierTest(unittest.TestCase):
             cached, ("fake", "fake-json", "hn-projectness-v1", "hn_classifier", "ok")
         )
 
+    def test_hn_classifier_marks_company_product_as_context_not_admission(self) -> None:
+        from pipeline.decision.hn_classifier import run_hn_classifier
+
+        conn = self.make_conn(title="Show HN: Clawdbot, a review tool for coding agents")
+        provider = FakeLLMProvider(
+            [
+                {
+                    "item_id": 1,
+                    "projectness": "company_product",
+                    "confidence": 0.9,
+                    "canonical_name": "Clawdbot",
+                    "deterministic_links": [
+                        {
+                            "type": "domain",
+                            "key": "domain:clawdbot.dev",
+                            "url": "https://clawdbot.dev",
+                        }
+                    ],
+                    "proposed_links": [],
+                    "summary": "Concrete company/product launch, but not classified as project/package.",
+                }
+            ]
+        )
+
+        run_hn_classifier(
+            conn,
+            run_id="decision_run",
+            provider=provider,
+            limit=5,
+            now="2026-05-31T00:00:00Z",
+        )
+
+        row = conn.execute(
+            "select metric_value, signal_label from evidence_rows"
+        ).fetchone()
+        self.assertEqual(row, ("company_product", "context"))
+        self.assertEqual(
+            conn.execute("select alias from alias_links").fetchone()[0],
+            "domain:clawdbot.dev",
+        )
+
     def test_hn_classifier_marks_news_article_as_noise_for_rules(self) -> None:
         from pipeline.decision.hn_classifier import run_hn_classifier
 

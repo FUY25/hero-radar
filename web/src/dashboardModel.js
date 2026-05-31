@@ -325,6 +325,9 @@ function readableEvidenceLabel(bullet) {
   const hnStoryCount = label.match(/^hn:\s*strict_story_count_(\d+d)\s+(\d+)$/i);
   if (hnStoryCount) return `HN: ${hnStoryCount[2]} qualifying stories in ${hnStoryCount[1]}`;
 
+  const hnMaxPoints = label.match(/^HN max (.+) pts \/ (.+)$/i);
+  if (hnMaxPoints) return `HN: max ${hnMaxPoints[1]} points in ${hnMaxPoints[2]}`;
+
   const hnClassifier = label.match(/^HN classifier:\s*(.+)$/i);
   if (hnClassifier) return `HN: LLM says ${readableClassifierValue(hnClassifier[1])}`;
 

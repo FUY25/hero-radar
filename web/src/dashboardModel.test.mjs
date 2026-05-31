@@ -151,6 +151,13 @@ test('candidateRowsForFeed adds readable evidence pill labels', () => {
           provenance_badge: 'LLM classifier',
           strength: 'potential',
         },
+        {
+          label: 'HN max 143 pts / 7d',
+          family: 'hn',
+          origin_type: 'deterministic_rule',
+          provenance_badge: 'rule',
+          strength: 'watch',
+        },
       ],
     }],
     edge_watch: [],
@@ -162,11 +169,13 @@ test('candidateRowsForFeed adds readable evidence pill labels', () => {
     'HN: LLM says product/company',
     'HN: 3 qualifying stories in 7d',
     'X: LLM marked potential',
+    'HN: max 143 points in 7d',
   ]);
   assert.deepEqual(row.evidence_bullets.map((bullet) => bullet.display_badge), [
     'LLM',
     'Deterministic',
     'LLM',
+    'Deterministic',
   ]);
 });
 

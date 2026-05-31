@@ -165,7 +165,7 @@ def seed_hn_source_tables(conn: sqlite3.Connection) -> None:
             "AI lab announces policy news",
             "https://github.com/owner/repo",
             "2026-05-31T00:00:00Z",
-            json.dumps({"score": 180, "comments": 55, "list": "topstories"}),
+            json.dumps({"score": 220, "comments": 55, "list": "topstories", "created_at_unix": 1780185600}),
             "{}",
         ),
     )

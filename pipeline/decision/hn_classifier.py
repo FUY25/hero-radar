@@ -33,6 +33,7 @@ PROJECTNESS_ORDER = [
 ]
 PROJECTNESS_VALUES = set(PROJECTNESS_ORDER)
 PROJECT_SIGNAL_VALUES = {"project", "package", "company_product"}
+PROJECT_ADMISSION_VALUES = {"project", "package"}
 LINK_TYPES = {"github", "domain", "npm"}
 
 
@@ -413,7 +414,12 @@ def _insert_evidence(
     now: str,
 ) -> None:
     projectness = output["projectness"]
-    signal_label = "watch" if projectness in PROJECT_SIGNAL_VALUES else "noise"
+    if projectness in PROJECT_ADMISSION_VALUES:
+        signal_label = "watch"
+    elif projectness == "company_product":
+        signal_label = "context"
+    else:
+        signal_label = "noise"
     canonical_name = output.get("canonical_name") or row["title"]
     note = f"{canonical_name}: {output['summary']}".strip()
     conn.execute(

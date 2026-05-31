@@ -231,6 +231,40 @@ class CandidateContextTest(unittest.TestCase):
         self.assertEqual(classifier_bullets[0]["source_refs"], ["item:10", "item:11"])
         self.assertEqual(bundle["evidence_count"], len(bundle["evidence_bullets"]))
 
+    def test_context_labels_hn_max_points_evidence(self):
+        from pipeline.decision.candidate_context import context_bundle_for_entity
+
+        conn = self.make_conn()
+        conn.execute("delete from evidence_rows")
+        conn.execute(
+            """
+            insert into evidence_rows(entity_id, canonical_entity, alias, source, event_at, metric_name, metric_value, family, rule_id, rule_version, signal_label, historical_safety, note, raw_url_or_ref, run_id)
+            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "entity:repo",
+                "owner/repo",
+                "owner/repo",
+                "hn_algolia",
+                "2026-05-31T00:00:00Z",
+                "hn_max_points_7d",
+                "143",
+                "hn",
+                "hn_max_points_7d_watch",
+                "rules-v1",
+                "watch",
+                "as_of_safe",
+                "max HN points in 7d",
+                "item:1",
+                "run-1",
+            ),
+        )
+        conn.commit()
+
+        bundle = context_bundle_for_entity(conn, entity_id="entity:repo", run_id="run-1")
+
+        self.assertEqual(bundle["evidence_bullets"][0]["label"], "HN max 143 pts / 7d")
+
     def test_context_dedupes_same_label_even_when_signal_strength_differs(self):
         from pipeline.decision.candidate_context import context_bundle_for_entity
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import dataclasses
 import datetime as dt
 import json
+import urllib.parse
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +18,10 @@ GITHUB_BOARD_SOURCES = {
 }
 HF_SOURCES = {"huggingface_models", "huggingface_datasets", "huggingface_spaces"}
 HN_NOISE_PROJECTNESS = {"news_article", "topic_discussion", "research_paper", "unknown"}
-HN_PROJECT_PROJECTNESS = {"project", "package", "company_product"}
+HN_ADMISSION_PROJECTNESS = {"project", "package"}
+HN_CONTENT_DOMAIN_EXACT = {"medium.com", "substack.com", "techcrunch.com"}
+HN_CONTENT_DOMAIN_SUFFIXES = (".medium.com", ".substack.com")
+HN_CONTENT_DOMAIN_PREFIXES = ("blog.", "news.", "newsroom.")
 X_TIER_LEVELS = {"watch": "watch", "potential": "potential", "high": "high_potential", "high_potential": "high_potential"}
 
 
@@ -275,7 +279,7 @@ def hn_project_item_ids(classifier_evidence: list[Any] | None) -> set[int]:
         if evidence_field(row, "metric_name") != "hn_projectness":
             continue
         projectness = str(evidence_field(row, "metric_value") or "")
-        if projectness not in HN_PROJECT_PROJECTNESS:
+        if projectness not in HN_ADMISSION_PROJECTNESS:
             continue
         raw_ref = str(evidence_field(row, "raw_url_or_ref") or "")
         if not raw_ref.startswith("item:"):
@@ -301,6 +305,32 @@ def hn_row_is_project(row: dict[str, Any], project_item_ids: set[int]) -> bool:
         return int(row_id) in project_item_ids
     except (TypeError, ValueError):
         return False
+
+
+def domain_from_key(key: str | None) -> str:
+    value = str(key or "").strip().lower()
+    if not value.startswith("domain:"):
+        return ""
+    return value.split(":", 1)[1].strip(".")
+
+
+def is_hn_content_domain(domain: str) -> bool:
+    value = str(domain or "").strip().lower().removeprefix("www.").strip(".")
+    if not value:
+        return False
+    if value in HN_CONTENT_DOMAIN_EXACT:
+        return True
+    if any(value.endswith(suffix) for suffix in HN_CONTENT_DOMAIN_SUFFIXES):
+        return True
+    return value.startswith(HN_CONTENT_DOMAIN_PREFIXES)
+
+
+def hn_strong_entity_bypass(entity: Entity) -> bool:
+    if entity.key_type == "github":
+        return True
+    if entity.key_type != "domain":
+        return False
+    return not is_hn_content_domain(domain_from_key(entity.canonical_key))
 
 
 def entity_map(resolution: ResolutionResult) -> dict[str, Entity]:
@@ -348,18 +378,7 @@ def evaluate_entities(
             evaluate_repofomo(state, entity_rows, active_rules, rule_version, run_id)
         )
         evidence_rows.extend(
-            evaluate_hn_firebase(
-                state,
-                entity_rows,
-                active_rules,
-                rule_version,
-                run_id,
-                hn_noise_items,
-                hn_project_items,
-            )
-        )
-        evidence_rows.extend(
-            evaluate_hn_algolia(
+            evaluate_hn(
                 state,
                 entity_rows,
                 active_rules,
@@ -568,58 +587,53 @@ def evaluate_repofomo(
     return output
 
 
-def evaluate_hn_firebase(
+def hn_story_id(row: dict[str, Any]) -> str:
+    metadata = row.get("metadata") or {}
+    for key in ("story_id", "objectID"):
+        value = metadata.get(key)
+        if value:
+            return str(value)
+    hn_url = str(metadata.get("hn_url") or "")
+    if hn_url:
+        parsed = urllib.parse.urlparse(hn_url)
+        query_id = urllib.parse.parse_qs(parsed.query).get("id", [""])[0]
+        if query_id:
+            return str(query_id)
+    external_id = str(row.get("external_id") or "")
+    if ":" in external_id:
+        return external_id.rsplit(":", 1)[1]
+    return external_id or str(row.get("id") or "")
+
+
+def hn_story_points(row: dict[str, Any]) -> float:
+    metadata = row.get("metadata") or {}
+    if row.get("source") == "hn_firebase":
+        return number(metadata.get("score"))
+    return number(metadata.get("points"))
+
+
+def hn_story_time(row: dict[str, Any]) -> dt.datetime | None:
+    metadata = row.get("metadata") or {}
+    if row.get("source") == "hn_firebase" and metadata.get("created_at_unix"):
+        try:
+            return dt.datetime.fromtimestamp(float(metadata["created_at_unix"]), dt.timezone.utc)
+        except (TypeError, ValueError, OSError):
+            pass
+    parsed = parse_time(metadata.get("created_at"))
+    if parsed:
+        return parsed
+    return parse_time(row.get("fetched_at"))
+
+
+def hn_row_is_qualified(
     state: EntityState,
-    rows: list[dict[str, Any]],
-    rules: dict[str, Any],
-    rule_version: str,
-    run_id: str,
-    hn_noise_items: set[int] | None = None,
-    hn_project_items: set[int] | None = None,
-) -> list[EvidenceRow]:
-    output: list[EvidenceRow] = []
-    thresholds = rules["hn"]
-    strong_entity = state.entity.key_type in {"github", "domain"}
-    for row in rows:
-        metadata = row.get("metadata") or {}
-        if row.get("source") != "hn_firebase":
-            continue
-        if hn_row_is_noise(row, hn_noise_items or set()):
-            continue
-        strong = strong_entity or hn_row_is_project(row, hn_project_items or set())
-        score = number(metadata.get("score"))
-        level = "none"
-        if score >= number(thresholds["front_page_score_watch"]):
-            level = "watch"
-        if strong and score >= number(thresholds["front_page_score_potential"]):
-            level = "potential"
-        if level == "none":
-            continue
-        event_at = row_time(row)
-        promote(state, level, "hn", event_at, "hn_firebase_score")
-        if level == "watch":
-            add_weak_signal(state, "hn", event_at)
-        output.append(
-            evidence(
-                state=state,
-                row=row,
-                source="hn_firebase",
-                event_at=event_at,
-                metric_name="hn_score",
-                metric_value=score,
-                family="hn",
-                rule_id=f"hn_firebase_score_{level}",
-                rule_version=rule_version,
-                level=level,
-                historical_safety="snapshot_only",
-                note="hn front page threshold passed",
-                run_id=run_id,
-            )
-        )
-    return output
+    row: dict[str, Any],
+    hn_project_items: set[int],
+) -> bool:
+    return hn_strong_entity_bypass(state.entity) or hn_row_is_project(row, hn_project_items)
 
 
-def evaluate_hn_algolia(
+def evaluate_hn(
     state: EntityState,
     rows: list[dict[str, Any]],
     rules: dict[str, Any],
@@ -629,47 +643,59 @@ def evaluate_hn_algolia(
     hn_noise_items: set[int] | None = None,
     hn_project_items: set[int] | None = None,
 ) -> list[EvidenceRow]:
-    strong_entity = state.entity.key_type in {"github", "domain"}
+    thresholds = rules["hn"]
+    window_days = number(thresholds.get("window_days", 7), 7)
+    window_start = now_dt - dt.timedelta(days=window_days)
     stories: dict[str, dict[str, Any]] = {}
     for row in rows:
-        metadata = row.get("metadata") or {}
-        if row.get("source") != "hn_algolia":
+        if row.get("source") not in {"hn_firebase", "hn_algolia"}:
             continue
         if hn_row_is_noise(row, hn_noise_items or set()):
             continue
-        if not strong_entity and not hn_row_is_project(row, hn_project_items or set()):
+        if not hn_row_is_qualified(state, row, hn_project_items or set()):
             continue
-        created = parse_time(metadata.get("created_at") or row.get("fetched_at"))
-        if not created or created < now_dt - dt.timedelta(days=7) or created > now_dt:
+        story_time = hn_story_time(row)
+        if not story_time or story_time < window_start or story_time > now_dt:
             continue
-        story_id = str(metadata.get("story_id") or metadata.get("objectID") or row.get("external_id"))
-        stories.setdefault(story_id, row)
-    count = len(stories)
-    if count < number(rules["hn"]["strict_story_count_7d_watch"]):
+        story_id = hn_story_id(row)
+        existing = stories.get(story_id)
+        if not existing or hn_story_points(row) > hn_story_points(existing):
+            stories[story_id] = row
+    if not stories:
         return []
-    level = "potential" if count >= number(rules["hn"]["strict_story_count_7d_potential"]) else "watch"
-    first_row = sorted(
-        stories.values(),
-        key=lambda row: row_time(row, "created_at"),
-    )[0]
-    event_at = row_time(first_row, "created_at")
-    promote(state, level, "hn", event_at, "hn_algolia_strict_story_count")
+
+    top_row = max(stories.values(), key=hn_story_points)
+    max_points = hn_story_points(top_row)
+    if max_points < number(thresholds["points_floor_watch"]):
+        return []
+
+    level = "potential" if max_points >= number(thresholds["points_breakthrough_potential"]) else "watch"
+    story_time = hn_story_time(top_row) or now_dt
+    event_at = iso_time(story_time)
+    promote(state, level, "hn", event_at, "hn_max_points_7d")
     if level == "watch":
         add_weak_signal(state, "hn", event_at)
+    source_names = sorted({str(row.get("source") or "") for row in stories.values() if row.get("source")})
+    note = (
+        f"max HN points in {int(window_days)}d; "
+        f"qualified_story_count={len(stories)}; "
+        f"top_story_id={hn_story_id(top_row)}; "
+        f"sources={','.join(source_names)}"
+    )
     return [
         evidence(
             state=state,
-            row=first_row,
-            source="hn_algolia",
+            row=top_row,
+            source=str(top_row.get("source") or "hn"),
             event_at=event_at,
-            metric_name="strict_story_count_7d",
-            metric_value=count,
+            metric_name="hn_max_points_7d",
+            metric_value=max_points,
             family="hn",
-            rule_id=f"hn_algolia_strict_story_count_7d_{level}",
+            rule_id=f"hn_max_points_7d_{level}",
             rule_version=rule_version,
             level=level,
             historical_safety="as_of_safe",
-            note="strict linked HN story count in 7d",
+            note=note,
             run_id=run_id,
         )
     ]

@@ -444,6 +444,8 @@ def _evidence_label(row: dict[str, Any]) -> str:
     value = str(row.get("metric_value") or "")
     if family == "github" and metric in {"stars_today", "period_stars", "stargazers_delta"}:
         return f"GH +{_compact_number(value)} stars / 24h"
+    if family == "hn" and metric == "hn_max_points_7d":
+        return f"HN max {_compact_number(value)} pts / 7d"
     if family == "hn" and metric in {"hn_score", "score"}:
         return f"HN front page, {value} pts"
     if source == "x_tweets" and metric == "x_tier":
