@@ -136,7 +136,7 @@ def extract_github_keys(texts: Iterable[str]) -> set[str]:
     return keys
 
 
-def registrable_domain(url: str) -> str | None:
+def registrable_domain(url: str, *, preserve_subdomain: bool = False) -> str | None:
     parsed = urllib.parse.urlparse(url if "://" in url else f"https://{url}")
     host = (parsed.hostname or "").lower().strip(".")
     if not host:
@@ -149,15 +149,17 @@ def registrable_domain(url: str) -> str | None:
     domain = ".".join(parts[-2:])
     if domain in SHARED_DOMAIN_BLOCKLIST:
         return None
+    if preserve_subdomain and len(parts) > 2:
+        return host
     return domain
 
 
-def extract_domain_keys(texts: Iterable[str]) -> set[str]:
+def extract_domain_keys(texts: Iterable[str], *, preserve_subdomains: bool = False) -> set[str]:
     keys: set[str] = set()
     url_re = re.compile(r"https?://[^\s)>\"]+")
     for text in texts:
         for raw_url in url_re.findall(text):
-            domain = registrable_domain(raw_url)
+            domain = registrable_domain(raw_url, preserve_subdomain=preserve_subdomains)
             if domain:
                 keys.add(f"domain:{domain}")
     return keys
@@ -179,7 +181,8 @@ def normalize_name_key(name: str | None) -> str | None:
 def extract_keys(row: dict[str, Any]) -> ExtractedKeys:
     texts = urls_from_row(row)
     github_keys = extract_github_keys(texts)
-    domain_keys = set() if github_keys else extract_domain_keys(texts)
+    preserve_subdomains = str(row.get("source") or "").startswith("hn_")
+    domain_keys = set() if github_keys else extract_domain_keys(texts, preserve_subdomains=preserve_subdomains)
     raw_name = str(row.get("name") or "")
     alias_candidates = {raw_name.strip()} if raw_name.strip() else set()
     return ExtractedKeys(

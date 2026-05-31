@@ -90,6 +90,34 @@ class EntityResolutionTest(unittest.TestCase):
         self.assertEqual(entity.canonical_key, "github:owner/repo")
         self.assertEqual({ref.item_id for ref in entity.source_refs}, {10, 11})
 
+    def test_hn_subdomain_project_does_not_merge_with_parent_domain_article(self):
+        rows = [
+            {
+                "id": 20,
+                "source": "hn_algolia",
+                "external_id": "hn-article",
+                "name": "AI Agent Permissions: The Missing Layer Between Works and Safe",
+                "url": "https://scalex.dev/blog/ai-agent-permissions/",
+                "description": "",
+                "metadata": {},
+            },
+            {
+                "id": 21,
+                "source": "hn_algolia",
+                "external_id": "hn-game",
+                "name": "Show HN: Continue? Y/N: A 60-second game about AI agent permission fatigue",
+                "url": "https://llmgame.scalex.dev",
+                "description": "",
+                "metadata": {},
+            },
+        ]
+
+        result = resolve_entities(rows, first_seen="2026-05-31T00:00:00Z")
+
+        canonical_keys = {entity.canonical_key for entity in result.entities}
+        self.assertEqual(canonical_keys, {"domain:scalex.dev", "domain:llmgame.scalex.dev"})
+        self.assertNotEqual(result.item_to_entity[20], result.item_to_entity[21])
+
 
 if __name__ == "__main__":
     unittest.main()
