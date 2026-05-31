@@ -152,6 +152,25 @@ class ResolverTest(unittest.TestCase):
         self.assertEqual(len(search_client.calls), 1)
         self.assertEqual(search_client.calls[0]["limit"], 1)
 
+    def test_resolver_ignores_shortener_domains_from_internal_rows(self) -> None:
+        from pipeline.decision.resolver import resolve_candidate_links
+
+        conn = self.make_conn()
+        self.insert_item(
+            conn,
+            name="Codex",
+            url="https://t.co/short",
+        )
+
+        result = resolve_candidate_links(
+            conn,
+            "name:codex",
+            search_client=None,
+            max_searches=0,
+        )
+
+        self.assertEqual(result["resolved_links"], [])
+
     def test_enrich_classifier_candidates_writes_alias_after_accepted_x_tier(self) -> None:
         from pipeline.decision.resolver import enrich_classifier_candidates
 

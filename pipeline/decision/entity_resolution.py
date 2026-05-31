@@ -20,6 +20,7 @@ SHARED_DOMAIN_BLOCKLIST = {
     "producthunt.com",
     "x.com",
     "twitter.com",
+    "t.co",
     "github.com",
     "news.ycombinator.com",
     "ycombinator.com",
