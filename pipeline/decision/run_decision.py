@@ -1,0 +1,540 @@
+from __future__ import annotations
+
+import argparse
+import dataclasses
+import datetime as dt
+import hashlib
+import json
+import os
+import sqlite3
+from pathlib import Path
+from typing import Any
+
+from pipeline.decision.entity_resolution import Entity, ResolutionResult, resolve_entities
+from pipeline.decision.rules import (
+    BackfillJob,
+    EdgeWatchCandidate,
+    EvidenceRow,
+    PotentialCandidate,
+    evaluate_entities,
+    load_rules,
+)
+from pipeline.decision.schema import (
+    begin_decision_run,
+    finish_decision_run,
+    init_decision_db,
+    reset_decision_stage,
+    to_json,
+    utc_now,
+)
+
+
+ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_DB_PATH = ROOT / "data" / "hero_radar.sqlite"
+DEFAULT_EXPORT_PATH = ROOT / "data" / "exports" / "candidates_latest.json"
+RUN_SCOPED_TABLES = [
+    "potential_candidates",
+    "edge_watch_candidates",
+    "backfill_jobs",
+    "entity_mentions",
+    "evidence_rows",
+]
+
+
+def read_latest_items(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """
+        select
+            i.id,
+            i.run_id,
+            i.snapshot_id,
+            i.source,
+            i.external_id,
+            i.name,
+            i.url,
+            i.fetched_at,
+            i.heat,
+            i.velocity,
+            i.acceleration,
+            i.source_rank,
+            i.description,
+            i.metadata_json,
+            i.raw_json
+        from items i
+        join (
+            select source, max(id) as snapshot_id
+            from snapshots
+            where status = 'ok'
+            group by source
+        ) latest on latest.source = i.source and latest.snapshot_id = i.snapshot_id
+        order by i.source, i.source_rank is null, i.source_rank, i.id
+        """
+    ).fetchall()
+    columns = [
+        "id",
+        "run_id",
+        "snapshot_id",
+        "source",
+        "external_id",
+        "name",
+        "url",
+        "fetched_at",
+        "heat",
+        "velocity",
+        "acceleration",
+        "source_rank",
+        "description",
+        "metadata_json",
+        "raw_json",
+    ]
+    output: list[dict[str, Any]] = []
+    for db_row in rows:
+        row = dict(zip(columns, db_row, strict=True))
+        row["metadata"] = safe_json(row.pop("metadata_json"), default={})
+        row["raw"] = safe_json(row.pop("raw_json"), default={})
+        output.append(row)
+    return output
+
+
+def safe_json(value: Any, *, default: Any) -> Any:
+    if value is None:
+        return default
+    if isinstance(value, (dict, list)):
+        return value
+    try:
+        return json.loads(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def config_hash(rules: dict[str, Any]) -> str:
+    raw = json.dumps(rules, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def latest_source_run_id(conn: sqlite3.Connection) -> str | None:
+    row = conn.execute(
+        "select run_id from snapshots where status = 'ok' order by id desc limit 1"
+    ).fetchone()
+    return row[0] if row else None
+
+
+def reconcile_entity_ids(
+    conn: sqlite3.Connection,
+    resolution: ResolutionResult,
+) -> dict[str, str]:
+    reconciled: dict[str, str] = {}
+    for entity in resolution.entities:
+        lookup_values = {entity.canonical_key, *entity.aliases}
+        placeholders = ",".join("?" for _ in lookup_values)
+        prior_id: str | None = None
+        if lookup_values:
+            row = conn.execute(
+                f"""
+                select entity_id
+                from alias_links
+                where alias in ({placeholders})
+                order by approved desc, id asc
+                limit 1
+                """,
+                tuple(sorted(lookup_values)),
+            ).fetchone()
+            if row:
+                prior_id = row[0]
+        reconciled[entity.entity_id] = prior_id or entity.entity_id
+    return reconciled
+
+
+def remap_resolution_ids(
+    resolution: ResolutionResult,
+    reconciled_ids: dict[str, str],
+) -> ResolutionResult:
+    entities: list[Entity] = []
+    for entity in resolution.entities:
+        new_id = reconciled_ids.get(entity.entity_id, entity.entity_id)
+        entities.append(dataclasses.replace(entity, entity_id=new_id))
+    item_to_entity = {
+        item_id: reconciled_ids.get(entity_id, entity_id)
+        for item_id, entity_id in resolution.item_to_entity.items()
+    }
+    return ResolutionResult(entities=entities, item_to_entity=item_to_entity)
+
+
+def referenced_entity_ids(result) -> set[str]:
+    entity_ids = {row.entity_id for row in result.evidence_rows}
+    entity_ids.update(candidate.entity_id for candidate in result.potential_candidates)
+    entity_ids.update(candidate.entity_id for candidate in result.edge_watch_candidates)
+    entity_ids.update(job.entity_id for job in result.backfill_jobs)
+    return entity_ids
+
+
+def write_entities(
+    conn: sqlite3.Connection,
+    resolution: ResolutionResult,
+    referenced_ids: set[str],
+    first_seen: str,
+) -> None:
+    for entity in resolution.entities:
+        if entity.entity_id not in referenced_ids:
+            continue
+        source_item_ids = [ref.item_id for ref in entity.source_refs]
+        conn.execute(
+            """
+            insert into entities(entity_id, canonical_entity, canonical_key, key_type, first_seen, aliases_json, source_item_ids_json)
+            values (?, ?, ?, ?, ?, ?, ?)
+            on conflict(entity_id) do update set
+                canonical_entity = excluded.canonical_entity,
+                canonical_key = excluded.canonical_key,
+                key_type = excluded.key_type,
+                aliases_json = excluded.aliases_json,
+                source_item_ids_json = excluded.source_item_ids_json
+            """,
+            (
+                entity.entity_id,
+                entity.canonical_entity,
+                entity.canonical_key,
+                entity.key_type,
+                first_seen,
+                to_json(list(entity.aliases)),
+                to_json(source_item_ids),
+            ),
+        )
+        for alias in {entity.canonical_key, *entity.aliases}:
+            if not alias:
+                continue
+            conn.execute(
+                """
+                insert into alias_links(entity_id, source, external_id, alias, confidence, origin, approved, created_at)
+                select ?, ?, ?, ?, ?, ?, ?, ?
+                where not exists (
+                    select 1 from alias_links
+                    where entity_id = ? and alias = ? and origin = ?
+                )
+                """,
+                (
+                    entity.entity_id,
+                    "decision",
+                    entity.canonical_key,
+                    alias,
+                    "deterministic",
+                    "stage_a",
+                    1,
+                    first_seen,
+                    entity.entity_id,
+                    alias,
+                    "stage_a",
+                ),
+            )
+    conn.commit()
+
+
+def write_evidence(conn: sqlite3.Connection, evidence_rows: list[EvidenceRow]) -> None:
+    conn.executemany(
+        """
+        insert into evidence_rows(entity_id, canonical_entity, alias, source, event_at, relative_to_reference, metric_name, metric_value, family, rule_id, rule_version, signal_label, historical_safety, note, raw_url_or_ref, run_id)
+        values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                row.entity_id,
+                row.canonical_entity,
+                row.alias,
+                row.source,
+                row.event_at,
+                row.relative_to_reference,
+                row.metric_name,
+                row.metric_value,
+                row.family,
+                row.rule_id,
+                row.rule_version,
+                row.signal_label,
+                row.historical_safety,
+                row.note,
+                row.raw_url_or_ref,
+                row.run_id,
+            )
+            for row in evidence_rows
+        ],
+    )
+    conn.commit()
+
+
+def write_candidates(
+    conn: sqlite3.Connection,
+    *,
+    potential_candidates: list[PotentialCandidate],
+    edge_watch_candidates: list[EdgeWatchCandidate],
+    backfill_jobs: list[BackfillJob],
+) -> None:
+    conn.executemany(
+        """
+        insert into potential_candidates(entity_id, run_id, level, fired_families_json, first_trigger_at)
+        values (?, ?, ?, ?, ?)
+        on conflict(run_id, entity_id) do update set
+            level = excluded.level,
+            fired_families_json = excluded.fired_families_json,
+            first_trigger_at = excluded.first_trigger_at
+        """,
+        [
+            (
+                candidate.entity_id,
+                candidate.run_id,
+                candidate.level,
+                to_json(list(candidate.fired_families)),
+                candidate.first_trigger_at,
+            )
+            for candidate in potential_candidates
+        ],
+    )
+    conn.executemany(
+        """
+        insert into edge_watch_candidates(entity_id, run_id, reason_json, source_refs_json, status)
+        values (?, ?, ?, ?, ?)
+        on conflict(run_id, entity_id) do update set
+            reason_json = excluded.reason_json,
+            source_refs_json = excluded.source_refs_json,
+            status = excluded.status
+        """,
+        [
+            (
+                candidate.entity_id,
+                candidate.run_id,
+                to_json(list(candidate.reasons)),
+                to_json(list(candidate.source_refs)),
+                candidate.status,
+            )
+            for candidate in edge_watch_candidates
+        ],
+    )
+    conn.executemany(
+        """
+        insert into backfill_jobs(entity_id, run_id, source, reason, status, requested_at)
+        values (?, ?, ?, ?, ?, ?)
+        on conflict(run_id, entity_id, source, reason) do update set
+            status = excluded.status,
+            requested_at = excluded.requested_at
+        """,
+        [
+            (
+                job.entity_id,
+                job.run_id,
+                job.source,
+                job.reason,
+                job.status,
+                job.requested_at,
+            )
+            for job in backfill_jobs
+        ],
+    )
+    conn.commit()
+
+
+def persist_pending_backfill_jobs(conn: sqlite3.Connection, jobs: list[BackfillJob]) -> None:
+    write_candidates(
+        conn,
+        potential_candidates=[],
+        edge_watch_candidates=[],
+        backfill_jobs=jobs,
+    )
+
+
+def export_candidates(conn: sqlite3.Connection, run_id: str, path: Path) -> None:
+    candidates = [
+        {
+            "entity_id": row[0],
+            "canonical_entity": row[1],
+            "canonical_key": row[2],
+            "level": row[3],
+            "fired_families": safe_json(row[4], default=[]),
+            "first_trigger_at": row[5],
+        }
+        for row in conn.execute(
+            """
+            select pc.entity_id, e.canonical_entity, e.canonical_key, pc.level, pc.fired_families_json, pc.first_trigger_at
+            from potential_candidates pc
+            join entities e on e.entity_id = pc.entity_id
+            where pc.run_id = ?
+            order by
+                case pc.level when 'high_potential' then 0 when 'potential' then 1 else 2 end,
+                e.canonical_entity
+            """,
+            (run_id,),
+        ).fetchall()
+    ]
+    edge_watch = [
+        {
+            "entity_id": row[0],
+            "canonical_entity": row[1],
+            "canonical_key": row[2],
+            "reasons": safe_json(row[3], default=[]),
+            "source_refs": safe_json(row[4], default=[]),
+            "status": row[5],
+        }
+        for row in conn.execute(
+            """
+            select ew.entity_id, e.canonical_entity, e.canonical_key, ew.reason_json, ew.source_refs_json, ew.status
+            from edge_watch_candidates ew
+            join entities e on e.entity_id = ew.entity_id
+            where ew.run_id = ?
+            order by e.canonical_entity
+            """,
+            (run_id,),
+        ).fetchall()
+    ]
+    backfill_jobs = [
+        {
+            "entity_id": row[0],
+            "source": row[1],
+            "reason": row[2],
+            "status": row[3],
+            "requested_at": row[4],
+            "completed_at": row[5],
+            "result_ref": row[6],
+        }
+        for row in conn.execute(
+            """
+            select entity_id, source, reason, status, requested_at, completed_at, result_ref
+            from backfill_jobs
+            where run_id = ?
+            order by id
+            """,
+            (run_id,),
+        ).fetchall()
+    ]
+    payload = {
+        "run_id": run_id,
+        "generated_at": utc_now(),
+        "candidates": candidates,
+        "edge_watch": edge_watch,
+        "backfill_jobs": backfill_jobs,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+
+
+def run_decision(
+    *,
+    db_path: Path,
+    run_id: str,
+    export_json_path: Path,
+    now: str,
+    github_client: Any | None = None,
+) -> dict[str, int | str]:
+    rules = load_rules()
+    conn = sqlite3.connect(db_path)
+    try:
+        init_decision_db(conn)
+        begin_decision_run(
+            conn,
+            run_id=run_id,
+            source_snapshot_run_id=latest_source_run_id(conn),
+            config_hash=config_hash(rules),
+            rule_version=str(rules.get("version", "rules-v1")),
+        )
+        reset_decision_stage(conn, run_id=run_id, tables=RUN_SCOPED_TABLES)
+        rows = read_latest_items(conn)
+        resolution = resolve_entities(rows, first_seen=now)
+        reconciled_ids = reconcile_entity_ids(conn, resolution)
+        resolution = remap_resolution_ids(resolution, reconciled_ids)
+
+        pass1 = evaluate_entities(
+            rows,
+            resolution,
+            run_id=run_id,
+            rule_version=str(rules.get("version", "rules-v1")),
+            now=now,
+            rules=rules,
+        )
+        extra_github_signals: dict[str, dict[str, float]] = {}
+        if github_client is not None and pass1.backfill_jobs:
+            # Persist the shortlist before the bounded external runner reads pending jobs.
+            referenced = referenced_entity_ids(pass1)
+            write_entities(conn, resolution, referenced, now)
+            persist_pending_backfill_jobs(conn, pass1.backfill_jobs)
+            from pipeline.decision.backfill import run_backfill_jobs
+
+            extra_github_signals = run_backfill_jobs(
+                conn,
+                run_id=run_id,
+                github_client=github_client,
+                now=now,
+            ).get("signals", {})
+
+        final_result = (
+            evaluate_entities(
+                rows,
+                resolution,
+                run_id=run_id,
+                rule_version=str(rules.get("version", "rules-v1")),
+                now=now,
+                rules=rules,
+                extra_github_signals=extra_github_signals,
+            )
+            if extra_github_signals
+            else pass1
+        )
+
+        referenced = referenced_entity_ids(final_result)
+        write_entities(conn, resolution, referenced, now)
+        write_evidence(conn, final_result.evidence_rows)
+        write_candidates(
+            conn,
+            potential_candidates=final_result.potential_candidates,
+            edge_watch_candidates=final_result.edge_watch_candidates,
+            backfill_jobs=final_result.backfill_jobs,
+        )
+        export_candidates(conn, run_id, export_json_path)
+        finish_decision_run(conn, run_id=run_id, status="ok", note="done")
+
+        summary: dict[str, int | str] = {
+            "entities": len(referenced),
+            "potential_candidates": len(final_result.potential_candidates),
+            "edge_watch_candidates": len(final_result.edge_watch_candidates),
+            "backfill_jobs": len(final_result.backfill_jobs),
+            "export": str(export_json_path),
+        }
+        return summary
+    except Exception as exc:
+        finish_decision_run(conn, run_id=run_id, status="failed", note=str(exc))
+        raise
+    finally:
+        conn.close()
+
+
+def default_run_id(now: dt.datetime | None = None) -> str:
+    active_now = now or dt.datetime.now(dt.timezone.utc)
+    return f"decision_{active_now.strftime('%Y%m%d')}"
+
+
+def build_github_client() -> Any:
+    from pipeline.decision.backfill import GitHubClient
+
+    return GitHubClient(token=os.environ.get("GITHUB_TOKEN"))
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Run deterministic pre-Layer2 decision pipeline")
+    parser.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
+    parser.add_argument("--run-id", default=default_run_id())
+    parser.add_argument("--export-json", type=Path, default=DEFAULT_EXPORT_PATH)
+    parser.add_argument("--now", default=utc_now())
+    parser.add_argument("--backfill", action="store_true")
+    args = parser.parse_args()
+
+    summary = run_decision(
+        db_path=args.db,
+        run_id=args.run_id,
+        export_json_path=args.export_json,
+        now=args.now,
+        github_client=build_github_client() if args.backfill else None,
+    )
+    print("Decision run complete")
+    print(f"entities: {summary['entities']}")
+    print(f"potential_candidates: {summary['potential_candidates']}")
+    print(f"edge_watch_candidates: {summary['edge_watch_candidates']}")
+    print(f"backfill_jobs: {summary['backfill_jobs']}")
+    print(f"export: {summary['export']}")
+
+
+if __name__ == "__main__":
+    main()

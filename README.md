@@ -61,6 +61,23 @@ Local backend endpoints:
 
 Cron is not configured yet. The current product assumption is one full run every 24 hours once scheduling is added.
 
+## Decision Pipeline Slice
+
+Run the deterministic pre-Layer2 decision pipeline:
+
+```bash
+python3 -m pipeline.decision.run_decision \
+  --db data/hero_radar.sqlite \
+  --export-json data/exports/candidates_latest.json
+```
+
+This reads the latest source snapshots, performs Stage A entity resolution,
+evaluates deterministic source rules, writes `potential_candidates`,
+`edge_watch_candidates`, `backfill_jobs`, and `evidence_rows`, then exports
+`data/exports/candidates_latest.json`.
+
+This command does not call any LLM and does not run Layer 2 Daily Feed selection.
+
 Optional environment variables:
 
 - `GITHUB_TOKEN`: increases GitHub Search/Core API rate limits.
