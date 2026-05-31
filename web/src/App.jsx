@@ -2,12 +2,16 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
   activeChannelList,
   availableRanges as modelAvailableRanges,
+  candidateSourceOptions,
   candidateRowsForFeed,
+  candidateTableColumns,
+  candidateVisibleEvidence,
   columnWidthKey,
   columnWidthStyle,
   dashboardApiUrl,
   defaultRangeId as modelDefaultRangeId,
   detailRowsForItem,
+  filterCandidateRows,
   formatProjectList,
   getConfigValue,
   initialDashboardState,
@@ -15,6 +19,7 @@ import {
   rowsForChannel as modelRowsForChannel,
   setConfigValue,
   settingsPanelDefs,
+  sourceItemNavigationState,
   sortOptionsForChannel as modelSortOptionsForChannel,
   valueAt as modelValueAt,
   workspaceSections,
@@ -53,6 +58,52 @@ function readLocalJson(key, fallback) {
   } catch (_) {
     return fallback;
   }
+}
+
+function readAppUrlState() {
+  const params = new URLSearchParams(window.location.search || '');
+  const section = params.get('section');
+  const feed = params.get('feed');
+  const source = params.get('source');
+  const settings = params.get('settings');
+  const sourceWindow = params.get('window');
+  const item = Number(params.get('item'));
+  return {
+    section: workspaceSections().some((row) => row.id === section && row.enabled) ? section : '',
+    feedTab: feed === 'pool' || feed === 'daily' ? feed : '',
+    activeChannel: source || '',
+    activeSettings: settings || '',
+    activeWindow: sourceWindow || '',
+    selectedItemId: Number.isFinite(item) ? item : null,
+  };
+}
+
+function appUrlForState(state) {
+  const params = new URLSearchParams();
+  const section = state?.section || 'sources';
+  params.set('section', section);
+  if (section === 'feed') {
+    params.set('feed', state.feedTab || 'daily');
+  }
+  if (section === 'sources') {
+    if (state.activeChannel) params.set('source', state.activeChannel);
+    if (state.activeWindow) params.set('window', state.activeWindow);
+    if (state.selectedItemId != null) params.set('item', String(state.selectedItemId));
+  }
+  if (section === 'settings' && state.activeSettings) {
+    params.set('settings', state.activeSettings);
+  }
+  const query = params.toString();
+  return `${window.location.pathname}${query ? `?${query}` : ''}${window.location.hash || ''}`;
+}
+
+function writeAppHistory(state, mode = 'push') {
+  if (!state || !window.history) return;
+  const nextUrl = appUrlForState(state);
+  const currentUrl = `${window.location.pathname}${window.location.search}${window.location.hash || ''}`;
+  if (nextUrl === currentUrl) return;
+  const fn = mode === 'replace' ? window.history.replaceState : window.history.pushState;
+  fn.call(window.history, { heroRadar: true }, '', nextUrl);
 }
 
 function column(label, help, path, cls = '', kind = 'text') {
@@ -342,6 +393,11 @@ function levelLabel(level) {
   return level || 'Unknown';
 }
 
+function sourceChipLabel(sourceLink) {
+  const base = sourceLink?.channel_label || sourceLink?.label || sourceLink?.channel || '来源';
+  return sourceLink?.window ? `${base} ${sourceLink.window}` : base;
+}
+
 function StatusDot({ error }) {
   if (error === undefined) return <span className="status-dot">n/a</span>;
   return <span className={`status-dot ${error ? 'warn' : 'ok'}`}>{error ? '注意' : '正常'}</span>;
@@ -418,7 +474,7 @@ function DetailBlock({ item }) {
   );
 }
 
-function Cell({ item, column: col, rowRank, items }) {
+function Cell({ item, column: col, rowRank, items, selected = false }) {
   const value = valueAt(item, col.path, rowRank);
   if (col.kind === 'num') return formatNumber(value);
   if (col.kind === 'date') return formatDate(value);
@@ -435,7 +491,7 @@ function Cell({ item, column: col, rowRank, items }) {
   if (col.kind === 'handle') return <Handle value={value} item={item} items={items} />;
   if (col.kind === 'detail') {
     return (
-      <details>
+      <details open={selected}>
         <summary>查看</summary>
         <DetailBlock item={item} />
       </details>
@@ -468,6 +524,12 @@ function SourceTable({ payload, channel, state, onStateChange, titlePrefix = '' 
   useEffect(() => {
     setColumnWidths(readColumnWidths(channel));
   }, [channel]);
+
+  useEffect(() => {
+    if (!state.selectedItemId) return;
+    const row = document.getElementById(`source-item-${state.selectedItemId}`);
+    if (row) row.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  }, [state.selectedItemId, channel, page]);
 
   function sortBy(option) {
     if (!option) return;
@@ -591,19 +653,26 @@ function SourceTable({ payload, channel, state, onStateChange, titlePrefix = '' 
             </tr>
           </thead>
           <tbody>
-            {pagedRows.length ? pagedRows.map((item) => (
-              <tr key={`${item.channel}:${item.item_id}:${item.external_id || item.name}`}>
+            {pagedRows.length ? pagedRows.map((item) => {
+              const selected = Number(state.selectedItemId) === Number(item.item_id);
+              return (
+              <tr
+                key={`${item.channel}:${item.item_id}:${item.external_id || item.name}`}
+                id={`source-item-${item.item_id}`}
+                className={selected ? 'selected-source-row' : ''}
+              >
                 {columns.map((col, index) => (
                   <td
                     className={col.cls || ''}
                     key={`${item.item_id}:${col.path}:${index}`}
                     style={columnWidthStyle(columnWidths, index)}
                   >
-                    <Cell item={item} column={col} rowRank={item.__display_rank ?? nativeRank(item)} items={items} />
+                    <Cell item={item} column={col} rowRank={item.__display_rank ?? nativeRank(item)} items={items} selected={selected} />
                   </td>
                 ))}
               </tr>
-            )) : (
+              );
+            }) : (
               <tr><td colSpan={columns.length}><div className="empty">这个筛选条件下没有数据。</div></td></tr>
             )}
           </tbody>
@@ -656,7 +725,10 @@ function SourcesView({ payload, state, onStateChange, hiddenSources = new Set() 
             data-tip={channel.description || ''}
             onClick={() => {
               localStorage.setItem('heroRadarSourceTab', channel.id);
-              onStateChange({ activeChannel: channel.id, activeWindow: defaultRangeId(payload.items || [], channel.id), sort: 'native', sortDir: 'asc', page: 1 });
+              onStateChange(
+                { activeChannel: channel.id, activeWindow: defaultRangeId(payload.items || [], channel.id), sort: 'native', sortDir: 'asc', page: 1, selectedItemId: null },
+                { history: 'push' },
+              );
             }}
           >
             {channel.label}
@@ -675,12 +747,11 @@ function SettingsSubrail({ channels, activeSettings, onSelect }) {
   return (
     <aside className="settings-subrail">
       <div className="subrail-eyebrow">Settings</div>
-      <div className="subrail-title">Controls</div>
+      <div className="subrail-title">控制台</div>
       <nav className="settings-subnav" aria-label="Settings">
         {channels.map((channel) => (
           <button type="button" key={channel.id} className={channel.id === activeSettings ? 'active' : ''} onClick={() => onSelect(channel.id)}>
             <span className="subnav-label">{channel.label}</span>
-            <span className="tab-count">{formatNumber(channel.count)}</span>
           </button>
         ))}
       </nav>
@@ -777,7 +848,7 @@ function SettingsToolbar({ panel, configDirty, configBusy, message, messageKind,
       <div className="settings-actions">
         <button type="button" className="primary-button" disabled={!configDirty || configBusy} onClick={onSave}>保存配置</button>
         <button type="button" disabled={configBusy} onClick={onReload}>从 API 重载</button>
-        <button type="button" disabled={configDirty || configBusy} onClick={onRun}>Run now</button>
+        <button type="button" disabled={configDirty || configBusy} onClick={onRun}>立即运行</button>
       </div>
     </section>
   );
@@ -787,7 +858,7 @@ function RunSourcesSettings({ payload, config, onConfigChange }) {
   return (
     <>
       <section className="settings-section">
-        <h2>Run & Sources</h2>
+        <h2>运行与来源</h2>
         <p className="section-copy">控制每个 source 是否启用、抓取上限和最近一次运行状态。这里不做打分，只改变下一次 pipeline 如何采集。</p>
         <div className="settings-grid">
           <SettingsCard payload={payload} title="GitHub Trending" source="github_trending" note="抓 GitHub Trending daily / weekly / monthly；语言 scope 仍由 config 控制但不在 UI 主动调。">
@@ -832,13 +903,10 @@ function RunSourcesSettings({ payload, config, onConfigChange }) {
             <SettingCheckbox config={config} path="apify.enabled" label="启用 Apify configured adapter" help="只打开 config 还不够；没有 APIFY_ENABLE_RUNS=true 时仍会拒绝付费 actor。" onConfigChange={onConfigChange} />
             <SettingField config={config} path="apify.max_results_per_run" label="run 最大结果" help="通用 Apify adapter 的每轮最大结果。" type="number" min="1" step="1" onConfigChange={onConfigChange} />
           </SettingsCard>
-          <SettingsCard payload={payload} title="OSSInsight optional" source="ossinsight_trending_optional" note="可选 source，目前 endpoint 不稳定，失败不阻塞。">
-            <SettingCheckbox config={config} path="ossinsight.enabled" label="启用 OSSInsight optional" help="关闭后下一次 run 不请求 OSSInsight。" onConfigChange={onConfigChange} />
-          </SettingsCard>
         </div>
       </section>
       <section className="settings-section">
-        <h2>Source health</h2>
+        <h2>Source 状态</h2>
         <p className="section-copy">最近一次 snapshot 的 adapter 状态。正常只表示请求/解析没有报错，不代表 source 数据一定完整。</p>
         <div className="settings-table">
           {Object.entries(payload.source_errors || {}).map(([source, error]) => (
@@ -913,10 +981,10 @@ function QueryEditor({ config, title, path, kind, copy, onConfigChange, replaceC
 function SearchTermsSettings({ config, onConfigChange, replaceConfig }) {
   return (
     <>
-      <QueryEditor config={config} title="GitHub Search queries" path="github_search.queries" kind="object" copy="真实传给 GitHub Search API 的 repo query。想关注什么就直接加 query。" onConfigChange={onConfigChange} replaceConfig={replaceConfig} />
-      <QueryEditor config={config} title="HN Algolia queries" path="hn.algolia_queries" kind="object" copy="真实传给 HN Algolia search_by_date 的 query。每个 query 会按 24h / 7d / 30d 窗口抓。" onConfigChange={onConfigChange} replaceConfig={replaceConfig} />
-      <QueryEditor config={config} title="npm Search queries" path="npm.queries" kind="object" copy="真实传给 npm registry search 的 query。适合补充 package 生态里的工具信号。" onConfigChange={onConfigChange} replaceConfig={replaceConfig} />
-      <QueryEditor config={config} title="X keyword queries" path="apify.x_keyword_queries" kind="string" copy="预留给 X keyword/topic 抓取。当前 X 主信号仍是 seed accounts tweets。" onConfigChange={onConfigChange} replaceConfig={replaceConfig} />
+      <QueryEditor config={config} title="GitHub 搜索词" path="github_search.queries" kind="object" copy="真实传给 GitHub Search API 的 repo query。想关注什么就直接加 query。" onConfigChange={onConfigChange} replaceConfig={replaceConfig} />
+      <QueryEditor config={config} title="HN 搜索词" path="hn.algolia_queries" kind="object" copy="真实传给 HN Algolia search_by_date 的 query。每个 query 会按 24h / 7d / 30d 窗口抓。" onConfigChange={onConfigChange} replaceConfig={replaceConfig} />
+      <QueryEditor config={config} title="npm 搜索词" path="npm.queries" kind="object" copy="真实传给 npm registry search 的 query。适合补充 package 生态里的工具信号。" onConfigChange={onConfigChange} replaceConfig={replaceConfig} />
+      <QueryEditor config={config} title="X 关键词" path="apify.x_keyword_queries" kind="string" copy="预留给 X keyword/topic 抓取。当前 X 主信号仍是 seed accounts tweets。" onConfigChange={onConfigChange} replaceConfig={replaceConfig} />
     </>
   );
 }
@@ -931,10 +999,10 @@ function XMonitoringSettings({ payload, config, onConfigChange, replaceConfig })
   return (
     <>
       <section className="settings-section">
-        <h2>X Monitoring</h2>
+        <h2>X 监控</h2>
         <p className="section-copy">X 先按 seed accounts 抓 tweets。这里弱化 engagement，重点是这些人提到了什么项目、原文怎么说。</p>
         <div className="settings-grid">
-          <SettingsCard payload={payload} title="Tweet scrape" source="x_tweets" note="下一次 X tweets run 使用这些参数。">
+          <SettingsCard payload={payload} title="Tweet 抓取" source="x_tweets" note="下一次 X tweets run 使用这些参数。">
             <SettingCheckbox config={config} path="apify.x_tweets.enabled" label="启用 X tweets" help="关闭后 dashboard 不再从 x_tweets_latest.json 导入 tweets。" onConfigChange={onConfigChange} />
             <SettingField config={config} path="apify.x_tweets.accounts_limit" label="账号上限" help="最多从 seed accounts 里取多少个账号抓 tweets。" type="number" min="1" step="1" onConfigChange={onConfigChange} />
             <SettingField config={config} path="apify.x_tweets.max_tweets_per_account" label="每账号 tweet 上限" help="Apify 抓取时每个账号最多多少条；这个会影响成本。" type="number" min="1" step="1" onConfigChange={onConfigChange} />
@@ -964,7 +1032,7 @@ function XMonitoringSettings({ payload, config, onConfigChange, replaceConfig })
             <SettingCheckbox config={config} path="apify.x_tweets.include_retweets" label="包含 retweets" help="打开后 retweet 也会进入抓取/导入。" onConfigChange={onConfigChange} />
             <SettingCheckbox config={config} path="apify.x_tweets.include_replies" label="包含 replies" help="打开后 replies 也会进入抓取/导入，噪声通常更高。" onConfigChange={onConfigChange} />
           </SettingsCard>
-          <SettingsCard payload={payload} title="Seed discovery" source="x_seed_accounts" note="从 following 候选池筛 AI 相关个人账号。">
+          <SettingsCard payload={payload} title="Seed 发现" source="x_seed_accounts" note="从 following 候选池筛 AI 相关个人账号。">
             <SettingCheckbox config={config} path="apify.x_seed_from_following.enabled" label="启用 following seed file" help="从 x_following_ai_seed_candidates_latest.json 读取候选并筛个人账号。" onConfigChange={onConfigChange} />
             <SettingField config={config} path="apify.x_seed_from_following.limit" label="候选展示上限" help="Settings 里 X Accounts 的候选数量上限。" type="number" min="1" step="1" onConfigChange={onConfigChange} />
             <SettingSelect config={config} path="apify.x_seed_from_following.sort" label="候选排序" help="当前按 followers_count 筛前 N。" options={['followers_count', 'keyword_score', 'following_count']} onConfigChange={onConfigChange} />
@@ -972,7 +1040,7 @@ function XMonitoringSettings({ payload, config, onConfigChange, replaceConfig })
         </div>
       </section>
       <section className="settings-section">
-        <h2>Seed accounts</h2>
+        <h2>Seed 账号</h2>
         <p className="section-copy">手动维护的账号池。这里只放个人账号，不放 official accounts。保存后下一次 X tweets run 生效。</p>
         <div className="setting-row two">
           <div>
@@ -1026,7 +1094,7 @@ function DisplaySettings({ payload, pageSize, onPageSizeChange, theme, onThemeCh
   return (
     <>
       <section className="settings-section">
-        <h2>Display</h2>
+        <h2>显示设置</h2>
         <p className="section-copy">这些是浏览器本地显示偏好，存在 localStorage，不写入 pipeline/config.json。</p>
         <div className="settings-grid">
           <div className="settings-card">
@@ -1050,7 +1118,7 @@ function DisplaySettings({ payload, pageSize, onPageSizeChange, theme, onThemeCh
         </div>
       </section>
       <section className="settings-section">
-        <h2>Source tabs visibility</h2>
+        <h2>Source 标签显示</h2>
         <p className="section-copy">隐藏 source tab 只是 UI 偏好；不会删除 dashboard payload、数据库或采集配置。</p>
         <div className="settings-grid">
           {(payload.channels || []).map((channel) => (
@@ -1081,7 +1149,7 @@ function ApiStatusSettings({ payload }) {
   const rows = Object.values(payload.config_meta?.api_status || {});
   return (
     <section className="settings-section">
-      <h2>API Status</h2>
+      <h2>API 状态</h2>
       <p className="section-copy">这里只显示环境变量是否配置，不显示 token 明文。Apify paid actor 还额外受 APIFY_ENABLE_RUNS gate 控制。</p>
       <div className="settings-table">
         {rows.map((row) => (
@@ -1145,16 +1213,63 @@ function SettingsView({ payload, state, settings }) {
   );
 }
 
-function FeedView({ payload }) {
-  const [tab, setTab] = useState('daily');
+function FeedView({ payload, tab = 'daily', onTabChange, onOpenSource }) {
   const [levelFilter, setLevelFilter] = useState('all');
+  const [sourceFilters, setSourceFilters] = useState([]);
+  const [expandedEvidenceIds, setExpandedEvidenceIds] = useState(() => new Set());
+  const [columnWidths, setColumnWidths] = useState(() => readColumnWidths('candidate_pool'));
+  const columns = candidateTableColumns();
   const rows = useMemo(() => candidateRowsForFeed(payload.candidates), [payload.candidates]);
-  const filteredRows = levelFilter === 'all' ? rows : rows.filter((row) => row.level === levelFilter);
+  const sourceOptions = useMemo(() => candidateSourceOptions(rows), [rows]);
+  const filteredRows = useMemo(
+    () => filterCandidateRows(rows, { levelFilter, sourceFilters }),
+    [rows, levelFilter, sourceFilters],
+  );
+  const toggleSourceFilter = (source) => {
+    setSourceFilters((current) => (
+      current.includes(source)
+        ? current.filter((value) => value !== source)
+        : [...current, source]
+    ));
+  };
+  const toggleEvidence = (entityId) => {
+    setExpandedEvidenceIds((current) => {
+      const next = new Set(current);
+      if (next.has(entityId)) next.delete(entityId);
+      else next.add(entityId);
+      return next;
+    });
+  };
+  function startColumnResize(event, index) {
+    event.preventDefault();
+    event.stopPropagation();
+    const th = event.currentTarget.closest('th');
+    if (!th) return;
+    const startX = event.clientX;
+    const startWidth = th.getBoundingClientRect().width;
+    th.classList.add('is-resizing');
+    document.body.classList.add('resizing-columns');
+    const onMove = (moveEvent) => {
+      const nextWidth = Math.max(56, Math.round(startWidth + moveEvent.clientX - startX));
+      setColumnWidths((current) => {
+        const next = { ...(current || {}), [index]: nextWidth };
+        writeColumnWidths('candidate_pool', next);
+        return next;
+      });
+    };
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove);
+      th.classList.remove('is-resizing');
+      document.body.classList.remove('resizing-columns');
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp, { once: true });
+  }
   return (
     <>
       <section className="channel-tabs feed-tabs" aria-label="Feed views">
-        <button type="button" className={tab === 'daily' ? 'active' : ''} onClick={() => setTab('daily')}>Daily Feed</button>
-        <button type="button" className={tab === 'pool' ? 'active' : ''} onClick={() => setTab('pool')}>Candidate Pool</button>
+        <button type="button" className={tab === 'daily' ? 'active' : ''} onClick={() => onTabChange?.('daily')}>每日 Feed</button>
+        <button type="button" className={tab === 'pool' ? 'active' : ''} onClick={() => onTabChange?.('pool')}>候选池</button>
       </section>
       {tab === 'daily' ? (
         <section className="empty feed-locked">
@@ -1165,61 +1280,143 @@ function FeedView({ payload }) {
         <section className="settings-panel">
           <section className="settings-toolbar">
             <div>
-              <div className="title">Candidate Pool</div>
+              <div className="title">候选池</div>
               <div className="copy">Dynamic candidates from /api/dashboard-data · run {payload.candidates?.run_id || payload.run_id || 'unknown'}</div>
             </div>
             <div className="settings-actions">
               <select className="select compact-select" value={levelFilter} onChange={(event) => setLevelFilter(event.target.value)}>
-                <option value="all">All levels</option>
-                <option value="high_potential">High Potential</option>
-                <option value="potential">Potential</option>
-                <option value="edge_watch">Edge Watch</option>
+                <option value="all">全部重要性</option>
+                <option value="high_potential">高潜力</option>
+                <option value="potential">潜力</option>
+                <option value="edge_watch">观察</option>
               </select>
+              <div className="candidate-source-filters" aria-label="Candidate source filters">
+                <button
+                  type="button"
+                  className={!sourceFilters.length ? 'active' : ''}
+                  onClick={() => setSourceFilters([])}
+                >
+                  全部来源
+                </button>
+                {sourceOptions.map((source) => (
+                  <button
+                    type="button"
+                    key={source.value}
+                    className={sourceFilters.includes(source.value) ? 'active' : ''}
+                    aria-pressed={sourceFilters.includes(source.value)}
+                    onClick={() => toggleSourceFilter(source.value)}
+                  >
+                    {source.label}
+                    <span>{source.count}</span>
+                  </button>
+                ))}
+              </div>
             </div>
           </section>
           <div className="table-wrap">
             <table className="candidate-table">
               <thead>
                 <tr>
-                  <th>Candidate</th>
-                  <th>Level</th>
-                  <th>Evidence</th>
-                  <th>Link</th>
-                  <th>Context</th>
+                  {columns.map((column, index) => (
+                    <th
+                      key={column.label}
+                      className={column.cls || ''}
+                      data-col-index={index}
+                      style={columnWidthStyle(columnWidths, index)}
+                    >
+                      <span className="th-inner">
+                        <span className="th-label">{column.label}</span>
+                      </span>
+                      <span
+                        className="col-resizer"
+                        data-col-index={index}
+                        title="拖动调整列宽"
+                        aria-hidden="true"
+                        onPointerDown={(event) => startColumnResize(event, index)}
+                        onClick={(event) => {
+                          event.preventDefault();
+                          event.stopPropagation();
+                        }}
+                      />
+                    </th>
+                  ))}
                 </tr>
               </thead>
               <tbody>
-                {filteredRows.length ? filteredRows.map((row) => (
-                  <tr key={`${row.pool_type}:${row.entity_id}`}>
-                    <td>
-                      <strong>{row.canonical_entity || row.entity_id}</strong>
-                      <code>{row.canonical_key || row.entity_id}</code>
-                    </td>
-                    <td><span className={`badge ${row.level}`}>{levelLabel(row.level)}</span></td>
-                    <td>
-                      <div className="evidence-list">
-                        {(row.evidence_bullets || []).slice(0, 3).map((bullet) => (
-                          <span className="evidence-pill" key={`${row.entity_id}:${bullet.label}:${bullet.origin_type}`}>
-                            {bullet.label}
-                            {bullet.provenance_badge ? <small>{bullet.provenance_badge}</small> : null}
-                          </span>
-                        ))}
-                        {row.evidence_extra_count > 0 ? <span className="evidence-more">+{row.evidence_extra_count}</span> : null}
-                      </div>
-                    </td>
-                    <td>
-                      {row.canonical_link ? (
-                        <a className="candidate-link" href={row.canonical_link} target="_blank" rel="noreferrer">
-                          Open
-                        </a>
-                      ) : (
-                        <span className="muted">{row.binding_confidence === 'weak' ? 'Weak binding' : 'No link'}</span>
-                      )}
-                    </td>
-                    <td className="candidate-context">{row.context_preview || row.first_trigger_at || row.status || ''}</td>
-                  </tr>
-                )) : (
-                  <tr><td colSpan="5"><div className="empty">Candidate Pool 当前没有数据。</div></td></tr>
+                {filteredRows.length ? filteredRows.map((row) => {
+                  const evidence = candidateVisibleEvidence(row, expandedEvidenceIds.has(row.entity_id));
+                  return (
+                    <tr key={`${row.pool_type}:${row.entity_id}`}>
+                      <td className="candidate-name-cell" style={columnWidthStyle(columnWidths, 0)}>
+                        <strong>{row.canonical_entity || row.entity_id}</strong>
+                        <code>{row.canonical_key || row.entity_id}</code>
+                      </td>
+                      <td style={columnWidthStyle(columnWidths, 1)}><span className={`badge ${row.level}`}>{levelLabel(row.level)}</span></td>
+                      <td style={columnWidthStyle(columnWidths, 2)}>
+                        <div className="evidence-list">
+                          {evidence.bullets.map((bullet) => (
+                            <span className="evidence-pill" title={bullet.label} key={`${row.entity_id}:${bullet.label}:${bullet.origin_type}`}>
+                              {bullet.display_label || bullet.label}
+                              {(bullet.display_badge || bullet.provenance_badge) ? <small>{bullet.display_badge || bullet.provenance_badge}</small> : null}
+                            </span>
+                          ))}
+                          {evidence.extraCount > 0 ? (
+                            <button
+                              type="button"
+                              className="evidence-more"
+                              aria-expanded={false}
+                              onClick={() => toggleEvidence(row.entity_id)}
+                            >
+                              +{evidence.extraCount}
+                            </button>
+                          ) : null}
+                          {evidence.expandable && evidence.extraCount === 0 ? (
+                            <button
+                              type="button"
+                              className="evidence-more"
+                              aria-expanded
+                              onClick={() => toggleEvidence(row.entity_id)}
+                            >
+                              收起
+                            </button>
+                          ) : null}
+                        </div>
+                      </td>
+                      <td style={columnWidthStyle(columnWidths, 3)}>
+                        <div className="candidate-source-list">
+                          {(row.source_links || []).slice(0, 4).map((sourceLink) => (
+                            <button
+                              type="button"
+                              className="candidate-source-chip"
+                              key={`${row.entity_id}:${sourceLink.ref || sourceLink.channel}:${sourceLink.item_id}`}
+                              title={sourceLink.name || sourceLink.external_url || sourceLink.channel_label}
+                              onClick={() => onOpenSource?.(sourceLink)}
+                            >
+                              {sourceChipLabel(sourceLink)}
+                            </button>
+                          ))}
+                          {Math.max(0, Number(row.source_link_count || 0) - (row.source_links || []).slice(0, 4).length) > 0 ? (
+                            <span className="candidate-source-more">
+                              +{Math.max(0, Number(row.source_link_count || 0) - (row.source_links || []).slice(0, 4).length)}
+                            </span>
+                          ) : null}
+                          {!(row.source_links || []).length ? <span className="muted">暂无内部来源</span> : null}
+                        </div>
+                      </td>
+                      <td style={columnWidthStyle(columnWidths, 4)}>
+                        {row.canonical_link ? (
+                          <a className="candidate-link" href={row.canonical_link} target="_blank" rel="noreferrer">
+                            打开
+                          </a>
+                        ) : (
+                          <span className="muted">{row.binding_confidence === 'weak' ? '弱绑定' : '暂无链接'}</span>
+                        )}
+                      </td>
+                      <td className="candidate-context" style={columnWidthStyle(columnWidths, 5)}>{row.context_preview || row.first_trigger_at || row.status || ''}</td>
+                    </tr>
+                  );
+                }) : (
+                  <tr><td colSpan={columns.length}><div className="empty">Candidate Pool 当前没有数据。</div></td></tr>
                 )}
               </tbody>
             </table>
@@ -1227,6 +1424,48 @@ function FeedView({ payload }) {
         </section>
       )}
     </>
+  );
+}
+
+function WorkspaceIcon({ name: iconName }) {
+  if (iconName === 'search') {
+    return (
+      <svg viewBox="0 0 20 20" aria-hidden="true">
+        <circle cx="8.5" cy="8.5" r="5.5" />
+        <path d="M13 13l4 4" />
+      </svg>
+    );
+  }
+  if (iconName === 'feed') {
+    return (
+      <svg viewBox="0 0 20 20" aria-hidden="true">
+        <path d="M5 5h10" />
+        <path d="M5 10h10" />
+        <path d="M5 15h7" />
+      </svg>
+    );
+  }
+  if (iconName === 'database') {
+    return (
+      <svg viewBox="0 0 20 20" aria-hidden="true">
+        <ellipse cx="10" cy="5" rx="6" ry="2.5" />
+        <path d="M4 5v7c0 1.4 2.7 2.5 6 2.5s6-1.1 6-2.5V5" />
+        <path d="M4 8.5c0 1.4 2.7 2.5 6 2.5s6-1.1 6-2.5" />
+      </svg>
+    );
+  }
+  return (
+    <svg viewBox="0 0 20 20" aria-hidden="true">
+      <circle cx="10" cy="10" r="3" />
+      <path d="M10 2v3" />
+      <path d="M10 15v3" />
+      <path d="M2 10h3" />
+      <path d="M15 10h3" />
+      <path d="M4.3 4.3l2.1 2.1" />
+      <path d="M13.6 13.6l2.1 2.1" />
+      <path d="M15.7 4.3l-2.1 2.1" />
+      <path d="M6.4 13.6l-2.1 2.1" />
+    </svg>
   );
 }
 
@@ -1251,16 +1490,29 @@ function App() {
       })
       .then((data) => {
         const initial = initialDashboardState(data);
+        const urlState = readAppUrlState();
         const storedSection = localStorage.getItem('heroRadarSection');
-        const section = storedSection === 'source' ? 'sources' : storedSection === 'setting' ? 'settings' : storedSection;
-        const activeChannel = (data.channels || []).some((channel) => channel.id === localStorage.getItem('heroRadarSourceTab'))
-          ? localStorage.getItem('heroRadarSourceTab')
+        const storedNormalizedSection = storedSection === 'source' ? 'sources' : storedSection === 'setting' ? 'settings' : storedSection;
+        const section = urlState.section || (urlState.activeChannel ? 'sources' : storedNormalizedSection);
+        const storedSourceTab = localStorage.getItem('heroRadarSourceTab');
+        const activeChannel = (data.channels || []).some((channel) => channel.id === urlState.activeChannel)
+          ? urlState.activeChannel
+          : (data.channels || []).some((channel) => channel.id === storedSourceTab)
+          ? storedSourceTab
           : initial.activeChannel;
         const panels = settingsPanelDefs(data);
-        const activeSettings = panels.some((panel) => panel.id === localStorage.getItem('heroRadarSettingsTab'))
-          ? localStorage.getItem('heroRadarSettingsTab')
+        const storedSettingsTab = localStorage.getItem('heroRadarSettingsTab');
+        const activeSettings = panels.some((panel) => panel.id === urlState.activeSettings)
+          ? urlState.activeSettings
+          : panels.some((panel) => panel.id === storedSettingsTab)
+          ? storedSettingsTab
           : panels[0]?.id || initial.activeSettings;
+        const feedTab = urlState.feedTab || (localStorage.getItem('heroRadarFeedTab') === 'pool' ? 'pool' : 'daily');
         const activeRangeChannel = section === 'settings' ? activeSettings : activeChannel;
+        const rangeIds = availableRanges(data.items || [], activeRangeChannel).map((range) => range.id);
+        const activeWindow = rangeIds.includes(urlState.activeWindow)
+          ? urlState.activeWindow
+          : defaultRangeId(data.items || [], activeRangeChannel);
         const config = cloneJson(data.config || {});
         setPayload(data);
         setRuntimeConfig(config);
@@ -1270,10 +1522,12 @@ function App() {
           section: workspaceSections().some((row) => row.id === section && row.enabled) ? section : initial.section,
           activeChannel,
           activeSettings,
+          feedTab,
           page: 1,
           pageSize: storedPageSize(),
-          activeWindow: defaultRangeId(data.items || [], activeRangeChannel),
+          activeWindow,
           sortDir: 'asc',
+          selectedItemId: urlState.selectedItemId,
         });
       })
       .catch((err) => setError(String(err.message || err)));
@@ -1291,8 +1545,52 @@ function App() {
     localStorage.setItem('heroRadarHiddenSources', JSON.stringify([...hiddenSources]));
   }, [hiddenSources]);
 
-  function patchState(patch) {
-    setState((current) => ({ ...(current || {}), ...patch }));
+  useEffect(() => {
+    if (!payload) return undefined;
+    const onPopState = () => {
+      const urlState = readAppUrlState();
+      setState((current) => {
+        if (!current) return current;
+        const next = { ...current };
+        if (urlState.section) next.section = urlState.section;
+        if (urlState.feedTab) next.feedTab = urlState.feedTab;
+        if ((payload.channels || []).some((channel) => channel.id === urlState.activeChannel)) {
+          next.activeChannel = urlState.activeChannel;
+        }
+        if (settingsPanelDefs(payload).some((panel) => panel.id === urlState.activeSettings)) {
+          next.activeSettings = urlState.activeSettings;
+        }
+        next.selectedItemId = urlState.selectedItemId;
+        const activeRangeChannel = next.section === 'settings' ? next.activeSettings : next.activeChannel;
+        const ranges = availableRanges(payload.items || [], activeRangeChannel);
+        next.activeWindow = ranges.some((range) => range.id === urlState.activeWindow)
+          ? urlState.activeWindow
+          : defaultRangeId(payload.items || [], activeRangeChannel);
+        next.page = 1;
+        if (next.section === 'sources' && next.selectedItemId != null) {
+          const navState = sourceItemNavigationState(
+            payload.items || [],
+            { item_id: next.selectedItemId, channel: next.activeChannel, window: next.activeWindow },
+            next,
+          );
+          if (navState) {
+            next.activeWindow = navState.activeWindow;
+            next.page = navState.page;
+          }
+        }
+        return next;
+      });
+    };
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, [payload]);
+
+  function patchState(patch, options = {}) {
+    setState((current) => {
+      const next = { ...(current || {}), ...patch };
+      if (options.history) writeAppHistory(next, options.history);
+      return next;
+    });
   }
 
   function markConfigMessage(message, kind = 'warn') {
@@ -1384,6 +1682,33 @@ function App() {
     markConfigMessage(`默认分页已改为 ${size}/页。`, 'good');
   }
 
+  function updateFeedTab(nextTab) {
+    localStorage.setItem('heroRadarFeedTab', nextTab);
+    patchState({ section: 'feed', feedTab: nextTab, page: 1 }, { history: 'push' });
+  }
+
+  function openCandidateSource(sourceLink) {
+    if (!payload || !state) return;
+    const navState = sourceItemNavigationState(payload.items || [], sourceLink, state);
+    if (!navState) return;
+    const previousFeedState = {
+      ...state,
+      section: 'feed',
+      feedTab: 'pool',
+      selectedItemId: null,
+    };
+    const nextState = {
+      ...state,
+      ...navState,
+    };
+    localStorage.setItem('heroRadarFeedTab', 'pool');
+    localStorage.setItem('heroRadarSection', 'sources');
+    localStorage.setItem('heroRadarSourceTab', navState.activeChannel);
+    writeAppHistory(previousFeedState, 'replace');
+    writeAppHistory(nextState, 'push');
+    setState(nextState);
+  }
+
   const sections = workspaceSections();
   const activeSection = state?.section || 'sources';
   const settingsChannels = payload ? settingsPanelDefs({ ...payload, config: runtimeConfig }) : [];
@@ -1421,10 +1746,10 @@ function App() {
                 onClick={() => {
                   if (!section.enabled) return;
                   localStorage.setItem('heroRadarSection', section.id);
-                  patchState({ section: section.id, page: 1 });
+                  patchState({ section: section.id, page: 1, selectedItemId: null }, { history: 'push' });
                 }}
               >
-                <span className="nav-icon" aria-hidden="true">{section.label.slice(0, 1)}</span>
+                <span className="nav-icon" aria-hidden="true"><WorkspaceIcon name={section.icon} /></span>
                 <span className="full">{section.label}</span>
               </button>
             ))}
@@ -1437,7 +1762,7 @@ function App() {
             activeSettings={activeSettings}
             onSelect={(id) => {
               localStorage.setItem('heroRadarSettingsTab', id);
-              patchState({ activeSettings: id, page: 1 });
+              patchState({ activeSettings: id, page: 1, selectedItemId: null }, { history: 'push' });
             }}
           />
         ) : null}
@@ -1474,7 +1799,14 @@ function App() {
                 }}
               />
             ) : null}
-            {payload && state && activeSection === 'feed' ? <FeedView payload={payload} /> : null}
+            {payload && state && activeSection === 'feed' ? (
+              <FeedView
+                payload={payload}
+                tab={state.feedTab || 'daily'}
+                onTabChange={updateFeedTab}
+                onOpenSource={openCandidateSource}
+              />
+            ) : null}
           </main>
         </div>
       </div>

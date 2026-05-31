@@ -8,6 +8,26 @@ from typing import Any
 SOURCE_CLASSIFIER_SOURCES = {"hn_llm_classifier", "x_tweets", "npm_registry"}
 BACKFILL_SOURCES = {"github_api", "github_stargazers", "npm_downloads"}
 KEY_LINK_TYPES = {"github", "domain", "npm"}
+MAX_SOURCE_LINKS = 12
+
+SOURCE_CHANNEL_LABELS = {
+    "github_trending": "GitHub Trending",
+    "github_movers_trending_repos": "Trending Repos",
+    "github_movers_repofomo": "RepoFOMO",
+    "github_search": "GitHub Search",
+    "hn_search": "HN Search",
+    "hn_top": "HN Top",
+    "product_hunt": "Product Hunt",
+    "huggingface_models": "HF Models",
+    "huggingface_datasets": "HF Datasets",
+    "huggingface_spaces": "HF Spaces",
+    "npm_search": "npm Search",
+    "pypi_newest": "PyPI Newest",
+    "pypi_updates": "PyPI Updates",
+    "x_tweets": "X Tweets",
+}
+
+EXCLUDED_SOURCE_LINK_SOURCES = {"ossinsight_trending", "ossinsight_trending_optional", "x_project_mentions"}
 
 
 def key_to_url(key: str | None) -> str | None:
@@ -44,6 +64,14 @@ def context_bundle_for_entity(
     readme_preview = _readme_preview(conn, canonical_key, alias_key)
     context_preview = readme_preview or _best_source_description(conn, entity)
     bullets = _dedupe_bullets([_evidence_bullet(row) for row in evidence])
+    source_links = _source_links_for_bullets(conn, bullets)
+    links_by_ref = {link["ref"]: link for link in source_links}
+    for bullet in bullets:
+        bullet["source_links"] = [
+            links_by_ref[ref]
+            for ref in bullet.get("source_refs") or []
+            if ref in links_by_ref
+        ]
 
     return {
         "entity_id": entity_id,
@@ -54,6 +82,8 @@ def context_bundle_for_entity(
         "evidence_count": len(bullets),
         "evidence_bullets": bullets,
         "source_families": sorted({bullet["family"] for bullet in bullets if bullet.get("family")}),
+        "source_link_count": len(source_links),
+        "source_links": source_links[:MAX_SOURCE_LINKS],
     }
 
 
@@ -291,6 +321,120 @@ def _dedupe_bullets(bullets: list[dict[str, Any]]) -> list[dict[str, Any]]:
             if ref and ref not in refs:
                 refs.append(ref)
     return [merged[key] for key in order]
+
+
+def _source_links_for_bullets(conn: sqlite3.Connection, bullets: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    refs: list[str] = []
+    for bullet in bullets:
+        for ref in bullet.get("source_refs") or []:
+            value = str(ref or "").strip()
+            if value and value not in refs:
+                refs.append(value)
+
+    links: list[dict[str, Any]] = []
+    seen_items: set[int] = set()
+    for ref in refs:
+        link = _source_link_for_ref(conn, ref)
+        if not link:
+            continue
+        item_id = link.get("item_id")
+        if isinstance(item_id, int) and item_id in seen_items:
+            continue
+        if isinstance(item_id, int):
+            seen_items.add(item_id)
+        links.append(link)
+    return links
+
+
+def _source_link_for_ref(conn: sqlite3.Connection, ref: str) -> dict[str, Any] | None:
+    if ref.startswith("item:"):
+        try:
+            item_id = int(ref.split(":", 1)[1])
+        except (TypeError, ValueError):
+            return None
+        return _source_link_for_item_id(conn, item_id, ref)
+    if ref.startswith("tweet:"):
+        return _source_link_for_tweet_ref(conn, ref)
+    return None
+
+
+def _source_link_for_tweet_ref(conn: sqlite3.Connection, ref: str) -> dict[str, Any] | None:
+    tweet_id = ref.split(":", 1)[1].strip()
+    if not tweet_id:
+        return None
+    try:
+        row = conn.execute(
+            """
+            select id
+            from items
+            where source = 'x_tweets'
+              and (
+                external_id = ?
+                or external_id like ?
+                or url like ?
+              )
+            order by
+              case when external_id = ? then 0 else 1 end,
+              id
+            limit 1
+            """,
+            (ref, f"%:{tweet_id}", f"%/{tweet_id}", ref),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    if not row:
+        return None
+    return _source_link_for_item_id(conn, int(row[0]), ref)
+
+
+def _source_link_for_item_id(conn: sqlite3.Connection, item_id: int, ref: str) -> dict[str, Any] | None:
+    try:
+        row = conn.execute(
+            """
+            select id, source, name, url, metadata_json
+            from items
+            where id = ?
+            """,
+            (item_id,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    if not row:
+        return None
+
+    source = str(row[1] or "")
+    channel = _dashboard_channel_for_source(source)
+    if not channel:
+        return None
+    metadata = _json_loads(row[4], {})
+    label = _channel_label(channel)
+    return {
+        "ref": ref,
+        "item_id": int(row[0]),
+        "source": source,
+        "channel": channel,
+        "channel_label": label,
+        "label": label,
+        "name": str(row[2] or ""),
+        "external_url": str(row[3] or ""),
+        "window": str(metadata.get("window") or ""),
+    }
+
+
+def _dashboard_channel_for_source(source: str) -> str | None:
+    if source in EXCLUDED_SOURCE_LINK_SOURCES:
+        return None
+    if source == "hn_algolia":
+        return "hn_search"
+    if source == "hn_firebase":
+        return "hn_top"
+    if source.startswith("huggingface_") or source.startswith("pypi_"):
+        return source
+    return source
+
+
+def _channel_label(channel: str) -> str:
+    return SOURCE_CHANNEL_LABELS.get(channel, channel)
 
 
 def _evidence_label(row: dict[str, Any]) -> str:

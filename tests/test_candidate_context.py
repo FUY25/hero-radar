@@ -117,6 +117,75 @@ class CandidateContextTest(unittest.TestCase):
         )
         self.assertEqual(bundle["evidence_bullets"][2]["origin_type"], "source_classifier")
 
+    def test_context_bundle_expands_evidence_refs_to_internal_source_links(self):
+        from pipeline.decision.candidate_context import context_bundle_for_entity
+
+        conn = self.make_conn()
+        conn.execute(
+            """
+            insert into items(id, run_id, snapshot_id, source, external_id, name, url, fetched_at, description, metadata_json, raw_json)
+            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                2,
+                "source-run",
+                1,
+                "hn_algolia",
+                "story:123",
+                "Show HN: owner/repo",
+                "https://news.ycombinator.com/item?id=123",
+                "2026-05-31T00:00:00Z",
+                "HN story.",
+                json.dumps({"points": 142, "window": "7d"}),
+                "{}",
+            ),
+        )
+        conn.execute(
+            """
+            insert into items(id, run_id, snapshot_id, source, external_id, name, url, fetched_at, description, metadata_json, raw_json)
+            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                3,
+                "source-run",
+                1,
+                "x_tweets",
+                "tweet:t1",
+                "X post about owner/repo",
+                "https://x.com/alice/status/t1",
+                "2026-05-31T00:00:00Z",
+                "tweet.",
+                json.dumps({"author": "alice", "window": "7d"}),
+                "{}",
+            ),
+        )
+        conn.commit()
+
+        bundle = context_bundle_for_entity(conn, entity_id="entity:repo", run_id="run-1")
+
+        links = bundle["source_links"]
+        self.assertGreaterEqual(bundle["source_link_count"], 3)
+        self.assertEqual(links[0]["ref"], "item:1")
+        self.assertEqual(links[0]["item_id"], 1)
+        self.assertEqual(links[0]["channel"], "github_trending")
+        self.assertEqual(links[0]["channel_label"], "GitHub Trending")
+        self.assertEqual(links[0]["external_url"], "https://github.com/owner/repo")
+        self.assertIn(
+            {
+                "ref": "item:2",
+                "item_id": 2,
+                "source": "hn_algolia",
+                "channel": "hn_search",
+                "channel_label": "HN Search",
+                "label": "HN Search",
+                "name": "Show HN: owner/repo",
+                "external_url": "https://news.ycombinator.com/item?id=123",
+                "window": "7d",
+            },
+            links,
+        )
+        self.assertTrue(any(link["ref"] == "tweet:t1" and link["channel"] == "x_tweets" for link in links))
+
     def test_context_dedupes_repeated_evidence_bullets_and_keeps_refs(self):
         from pipeline.decision.candidate_context import context_bundle_for_entity
 

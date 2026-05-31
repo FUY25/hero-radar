@@ -2,11 +2,15 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   activeChannelList,
+  candidateSourceOptions,
   candidateRowsForFeed,
+  candidateTableColumns,
+  candidateVisibleEvidence,
   columnWidthKey,
   columnWidthStyle,
   dashboardApiUrl,
   detailRowsForItem,
+  filterCandidateRows,
   filterAndSortRows,
   formatProjectList,
   getConfigValue,
@@ -15,6 +19,7 @@ import {
   setConfigValue,
   settingsPanelDefs,
   sortOptionsForChannel,
+  sourceItemNavigationState,
   visibleWindowsForChannel,
   workspaceSections,
   xAvatarForHandle,
@@ -68,7 +73,9 @@ test('detailRowsForItem exposes metadata and raw fields for detail panel', () =>
 });
 
 test('workspaceSections keeps old top-level surfaces and feed candidate tab', () => {
-  assert.deepEqual(workspaceSections().map((row) => row.id), ['explore', 'feed', 'sources', 'settings']);
+  const sections = workspaceSections();
+  assert.deepEqual(sections.map((row) => row.id), ['explore', 'feed', 'sources', 'settings']);
+  assert.deepEqual(sections.map((row) => row.icon), ['search', 'feed', 'database', 'settings']);
 });
 
 test('candidateRowsForFeed merges potential and edge watch rows', () => {
@@ -90,6 +97,20 @@ test('candidateRowsForFeed keeps evidence and canonical link fields', () => {
       canonical_link: 'https://github.com/owner/repo',
       context_preview: 'Repo description',
       binding_confidence: 'verified',
+      source_links: [
+        {
+          ref: 'item:1',
+          item_id: 1,
+          source: 'github_trending',
+          channel: 'github_trending',
+          channel_label: 'GitHub Trending',
+          label: 'GitHub Trending',
+          name: 'owner/repo',
+          external_url: 'https://github.com/owner/repo',
+          window: '24h',
+        },
+      ],
+      source_link_count: 1,
     }],
     edge_watch: [],
   };
@@ -98,6 +119,98 @@ test('candidateRowsForFeed keeps evidence and canonical link fields', () => {
   assert.equal(row.evidence_extra_count, 1);
   assert.equal(row.canonical_link, 'https://github.com/owner/repo');
   assert.equal(row.binding_confidence, 'verified');
+  assert.equal(row.source_links[0].channel_label, 'GitHub Trending');
+  assert.equal(row.source_link_count, 1);
+});
+
+test('candidateRowsForFeed adds readable evidence pill labels', () => {
+  const candidates = {
+    candidates: [{
+      entity_id: 'entity:1',
+      canonical_entity: 'Project',
+      level: 'potential',
+      evidence_bullets: [
+        {
+          label: 'HN classifier: company_product',
+          family: 'hn',
+          origin_type: 'source_classifier',
+          provenance_badge: 'LLM classifier',
+          strength: 'watch',
+        },
+        {
+          label: 'hn: strict_story_count_7d 3',
+          family: 'hn',
+          origin_type: 'deterministic_rule',
+          provenance_badge: 'rule',
+          strength: 'early_trigger',
+        },
+        {
+          label: 'X potential',
+          family: 'x_social',
+          origin_type: 'source_classifier',
+          provenance_badge: 'LLM classifier',
+          strength: 'potential',
+        },
+      ],
+    }],
+    edge_watch: [],
+  };
+
+  const [row] = candidateRowsForFeed(candidates);
+
+  assert.deepEqual(row.evidence_bullets.map((bullet) => bullet.display_label), [
+    'HN: LLM says product/company',
+    'HN: 3 qualifying stories in 7d',
+    'X: LLM marked potential',
+  ]);
+  assert.deepEqual(row.evidence_bullets.map((bullet) => bullet.display_badge), [
+    'LLM',
+    'Deterministic',
+    'LLM',
+  ]);
+});
+
+test('candidate source options and filters use source families, not rule provenance', () => {
+  const rows = candidateRowsForFeed({
+    candidates: [
+      {
+        entity_id: 'entity:hn',
+        canonical_entity: 'HN project',
+        level: 'potential',
+        source_families: ['hn'],
+        evidence_bullets: [{ label: 'hn: strict_story_count_7d 3', family: 'hn', provenance_badge: 'rule' }],
+      },
+      {
+        entity_id: 'entity:x',
+        canonical_entity: 'X project',
+        level: 'potential',
+        source_families: ['x_social'],
+        evidence_bullets: [{ label: 'X potential', family: 'x_social', provenance_badge: 'LLM classifier' }],
+      },
+      {
+        entity_id: 'entity:gh',
+        canonical_entity: 'GitHub project',
+        level: 'edge_watch',
+        source_families: ['github'],
+        evidence_bullets: [{ label: 'GH +321 stars / 24h', family: 'github', provenance_badge: 'rule' }],
+      },
+    ],
+    edge_watch: [],
+  });
+
+  assert.deepEqual(candidateSourceOptions(rows), [
+    { value: 'github', label: 'GitHub', count: 1 },
+    { value: 'hn', label: 'Hacker News', count: 1 },
+    { value: 'x_social', label: 'X / social', count: 1 },
+  ]);
+  assert.deepEqual(
+    filterCandidateRows(rows, { levelFilter: 'all', sourceFilters: ['hn', 'x_social'] }).map((row) => row.entity_id),
+    ['entity:hn', 'entity:x'],
+  );
+  assert.deepEqual(
+    filterCandidateRows(rows, { levelFilter: 'edge_watch', sourceFilters: ['hn', 'x_social'] }).map((row) => row.entity_id),
+    [],
+  );
 });
 
 test('dashboardApiUrl defaults to same-origin api and respects explicit base', () => {
@@ -227,12 +340,63 @@ test('settingsPanelDefs restores old writable settings panels with dynamic count
   assert.deepEqual(
     settingsPanelDefs(settingsPayload).map((panel) => [panel.id, panel.label, panel.count]),
     [
-      ['settings_run_sources', 'Run & Sources', 2],
-      ['settings_search_terms', 'Search Terms', 4],
-      ['settings_x_monitoring', 'X Monitoring', 2],
-      ['settings_display', 'Display', 2],
-      ['settings_api_status', 'API Status', 3],
+      ['settings_run_sources', '运行与来源', 2],
+      ['settings_search_terms', '搜索词', 4],
+      ['settings_x_monitoring', 'X 监控', 2],
+      ['settings_display', '显示设置', 2],
+      ['settings_api_status', 'API 状态', 3],
     ],
+  );
+});
+
+test('candidateTableColumns uses Chinese column names', () => {
+  const columns = candidateTableColumns();
+  assert.deepEqual(columns.map((column) => column.label), ['候选', '重要性', '证据', '来源', '链接', '上下文']);
+  assert.equal(columns.at(-1).cls, 'candidate-context-col');
+});
+
+test('candidateVisibleEvidence expands the full evidence list', () => {
+  const row = {
+    evidence_bullets: [
+      { label: 'one' },
+      { label: 'two' },
+      { label: 'three' },
+      { label: 'four' },
+      { label: 'five' },
+    ],
+  };
+
+  assert.deepEqual(candidateVisibleEvidence(row, false), {
+    bullets: row.evidence_bullets.slice(0, 3),
+    extraCount: 2,
+    expandable: true,
+  });
+  assert.deepEqual(candidateVisibleEvidence(row, true), {
+    bullets: row.evidence_bullets,
+    extraCount: 0,
+    expandable: true,
+  });
+});
+
+test('sourceItemNavigationState opens the internal source row and page from a candidate source link', () => {
+  const items = [
+    { item_id: 10, channel: 'hn_search', name: 'old story', window: '7d', channel_rank: 1, window_rank: 1, metadata: {}, raw: {} },
+    { item_id: 11, channel: 'hn_search', name: 'target story', window: '7d', channel_rank: 2, window_rank: 2, metadata: {}, raw: {} },
+    { item_id: 12, channel: 'hn_search', name: 'new story', window: '24h', channel_rank: 3, window_rank: 1, metadata: {}, raw: {} },
+  ];
+
+  assert.deepEqual(
+    sourceItemNavigationState(items, { item_id: 11, channel: 'hn_search', window: '7d' }, { pageSize: 1 }),
+    {
+      section: 'sources',
+      activeChannel: 'hn_search',
+      activeWindow: '7d',
+      selectedItemId: 11,
+      query: '',
+      sort: 'native',
+      sortDir: 'asc',
+      page: 2,
+    },
   );
 });
 

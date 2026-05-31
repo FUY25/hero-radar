@@ -60,7 +60,8 @@ X_WINDOW_HOURS = {"24h": 24.0, "7d": 7 * 24.0, "30d": 30 * 24.0}
 SOURCE_DASHBOARD_HIDDEN_CHANNELS = {"huggingface_models", "huggingface_datasets", "x_seed_accounts"}
 SETTINGS_CHANNEL_ORDER = ["settings_source_health", "settings_search_terms", "x_seed_accounts"]
 SETTINGS_CHANNELS = set(SETTINGS_CHANNEL_ORDER)
-EXCLUDED_ITEM_SOURCES = {"x_project_mentions"}
+RETIRED_SOURCES = {"ossinsight_trending", "ossinsight_trending_optional"}
+EXCLUDED_ITEM_SOURCES = {"x_project_mentions", *RETIRED_SOURCES}
 
 
 @dataclasses.dataclass
@@ -1224,50 +1225,6 @@ def collect_x_tweets(config: dict[str, Any], fetched_at: str) -> tuple[list[Sour
     return items, None
 
 
-def collect_ossinsight_optional(config: dict[str, Any], fetched_at: str) -> tuple[list[SourceItem], str | None]:
-    if not config.get("ossinsight", {}).get("enabled", False):
-        return [], "disabled"
-    items: list[SourceItem] = []
-    errors: list[str] = []
-    settings = config["ossinsight"]
-    for period in settings["periods"]:
-        for language in settings["languages"]:
-            params = urllib.parse.urlencode({"period": period, "language": language})
-            url = f"https://api.ossinsight.io/v1/trends/repos/?{params}"
-            try:
-                data = request_json(url)
-            except urllib.error.HTTPError as exc:
-                body = exc.read().decode("utf-8", "replace")
-                errors.append(f"{period}/{language}: HTTP {exc.code}: {body[:160]}")
-                continue
-            except Exception as exc:  # noqa: BLE001
-                errors.append(f"{period}/{language}: {type(exc).__name__}: {exc}")
-                continue
-
-            raw_file = RAW_DIR / f"ossinsight_{language}_{period}_{fetched_at.replace(':', '').replace('-', '')}.json"
-            raw_file.write_text(json.dumps(data, ensure_ascii=False, indent=2))
-            rows = normalize_ossinsight_rows(data)
-            for rank, row in enumerate(rows, start=1):
-                repo_name = row.get("repo_name") or row.get("full_name") or row.get("repository") or ""
-                if not repo_name:
-                    continue
-                stars = row.get("stars") or row.get("star_count") or row.get("stars_count")
-                items.append(
-                    SourceItem(
-                        source="ossinsight_trending",
-                        external_id=f"{period}:{repo_name}",
-                        name=repo_name,
-                        url=f"https://github.com/{repo_name}",
-                        source_rank=rank,
-                        description=row.get("description") or "",
-                        fetched_at=fetched_at,
-                        metadata={"period": period, "window": period_to_window(period), "language": language, **row},
-                        raw=row,
-                    )
-                )
-    return items, "; ".join(errors) if errors else None
-
-
 def collect_apify_configured(config: dict[str, Any], fetched_at: str) -> tuple[list[SourceItem], str | None]:
     """Safety adapter.
 
@@ -1282,20 +1239,6 @@ def collect_apify_configured(config: dict[str, Any], fetched_at: str) -> tuple[l
     if not os.environ.get("APIFY_TOKEN"):
         return [], "APIFY_TOKEN is not set"
     return [], "Apify actor execution is not implemented until actor + budget are approved"
-
-
-def normalize_ossinsight_rows(data: Any) -> list[dict[str, Any]]:
-    if isinstance(data, list):
-        return [x for x in data if isinstance(x, dict)]
-    if not isinstance(data, dict):
-        return []
-    if isinstance(data.get("data"), list):
-        return [x for x in data["data"] if isinstance(x, dict)]
-    if isinstance(data.get("data"), dict) and isinstance(data["data"].get("rows"), list):
-        return [x for x in data["data"]["rows"] if isinstance(x, dict)]
-    if isinstance(data.get("rows"), list):
-        return [x for x in data["rows"] if isinstance(x, dict)]
-    return []
 
 
 def safe_name(value: str) -> str:
@@ -1793,7 +1736,7 @@ def channel_label(channel: str) -> str:
         "x_seed_accounts": "X Accounts",
         "x_tweets": "X Tweets",
         "settings_source_health": "Source Health",
-        "settings_search_terms": "Search Terms",
+        "settings_search_terms": "搜索词",
     }.get(channel, channel)
 
 
@@ -1857,7 +1800,7 @@ def channel_description(channel: str) -> str:
         ),
         "x_seed_accounts": (
             "来源：你的 X following 候选池和手动 seed list。口径：筛 AI 相关个人账号，去掉官方账号，按 followers_count 等字段排序。"
-            "怎么看：这是 X Monitoring 的账号池配置，不是项目榜。"
+            "怎么看：这是 X 监控的账号池配置，不是项目榜。"
         ),
         "settings_source_health": "Settings 内部页：展示每个 adapter 本轮是否成功、错误信息、disabled 状态和 token/API 配置情况。",
         "settings_search_terms": "Settings 内部页：展示 GitHub/HN/npm/X keyword queries 等搜索词配置；修改后保存，并在下一次 pipeline run 生效。",
@@ -2118,7 +2061,7 @@ def latest_source_errors(conn: sqlite3.Connection) -> dict[str, str | None]:
         order by s.id
         """
     ).fetchall()
-    return {row["source"]: row["error"] for row in rows}
+    return {row["source"]: row["error"] for row in rows if row["source"] not in RETIRED_SOURCES}
 
 
 def score_rows(
@@ -4137,11 +4080,11 @@ def export_dashboard_v3(scored: list[dict[str, Any]], run_id: str, fetched_at: s
       const sourceCount = Object.keys(data.source_errors || {}).length;
       const apiCount = Object.values(data.config_meta?.api_status || {}).length;
       return [
-        {id: 'settings_run_sources', label: 'Run & Sources', count: sourceCount},
-        {id: 'settings_search_terms', label: 'Search Terms', count: searchCount},
-        {id: 'settings_x_monitoring', label: 'X Monitoring', count: xAccountCount},
-        {id: 'settings_display', label: 'Display', count: visibleSourceChannels().length},
-        {id: 'settings_api_status', label: 'API Status', count: apiCount},
+        {id: 'settings_run_sources', label: '运行与来源', count: sourceCount},
+        {id: 'settings_search_terms', label: '搜索词', count: searchCount},
+        {id: 'settings_x_monitoring', label: 'X 监控', count: xAccountCount},
+        {id: 'settings_display', label: '显示设置', count: visibleSourceChannels().length},
+        {id: 'settings_api_status', label: 'API 状态', count: apiCount},
       ];
     }
     function channelLabel(id) {
@@ -4661,7 +4604,7 @@ def export_dashboard_v3(scored: list[dict[str, Any]], run_id: str, fetched_at: s
         <div class="settings-actions">
           <button type="button" class="primary-button" data-action="save-config" ${saveDisabled}>保存配置</button>
           <button type="button" data-action="reload-config" ${reloadDisabled}>从 API 重载</button>
-          <button type="button" data-action="run-now" ${runDisabled}>Run now</button>
+          <button type="button" data-action="run-now" ${runDisabled}>立即运行</button>
         </div>
       </section>`;
     }
@@ -4678,9 +4621,8 @@ def export_dashboard_v3(scored: list[dict[str, Any]], run_id: str, fetched_at: s
         sourceCard('npm Search', 'npm_search', '按 Search Terms 里的 npm query 搜包。', settingCheckbox('npm.enabled', '启用 npm Search', '关闭后下一次 run 跳过 npm。') + settingField('npm.size', '每个 query size', 'npm registry search 每个 query 请求数量。', 'number', 'min="1" step="1"')),
         sourceCard('PyPI Feeds', 'pypi_feeds', 'PyPI newest / updates RSS，并对前 N 条做 JSON enrich。', settingCheckbox('pypi.enabled', '启用 PyPI', '关闭后下一次 run 跳过 PyPI feeds。') + settingField('pypi.limit_per_feed', 'RSS 每 feed 上限', 'newest 和 updates 各保留多少条。', 'number', 'min="1" step="1"') + settingField('pypi.json_enrich_limit_per_feed', 'JSON enrich 上限', '每个 feed 对前多少条请求 PyPI JSON 补 project_urls/classifiers。', 'number', 'min="0" step="1"')),
         sourceCard('Apify configured', 'apify_configured', '付费 actor 防误跑 gate；真正执行还需要 APIFY_ENABLE_RUNS=true。', settingCheckbox('apify.enabled', '启用 Apify configured adapter', '只打开 config 还不够；没有 APIFY_ENABLE_RUNS=true 时仍会拒绝付费 actor。') + settingField('apify.max_results_per_run', 'run 最大结果', '通用 Apify adapter 的每轮最大结果。', 'number', 'min="1" step="1"')),
-        sourceCard('OSSInsight optional', 'ossinsight_trending_optional', '可选 source，目前 endpoint 不稳定，失败不阻塞。', settingCheckbox('ossinsight.enabled', '启用 OSSInsight optional', '关闭后下一次 run 不请求 OSSInsight。')),
       ];
-      return `<section class="settings-section"><h2>Run & Sources</h2><p class="section-copy">控制每个 source 是否启用、抓取上限和最近一次运行状态。这里不做打分，只改变下一次 pipeline 如何采集。</p><div class="settings-grid">${cards.join('')}</div></section>
+      return `<section class="settings-section"><h2>运行与来源</h2><p class="section-copy">控制每个 source 是否启用、抓取上限和最近一次运行状态。这里不做打分，只改变下一次 pipeline 如何采集。</p><div class="settings-grid">${cards.join('')}</div></section>
         <section class="settings-section"><h2>Source health</h2><p class="section-copy">最近一次 snapshot 的 adapter 状态。正常只表示请求/解析没有报错，不代表 source 数据一定完整。</p><div class="settings-table">${Object.entries(data.source_errors || {}).map(([source, error]) => `<div class="status-row"><strong>${escapeText(source)}</strong>${sourceHealthBadge(source)}<div class="message-line ${error ? 'warn' : 'good'}">${escapeText(error || '正常')}</div></div>`).join('')}</div></section>`;
     }
     function queryEditor(title, path, kind, copy) {
@@ -4706,7 +4648,7 @@ def export_dashboard_v3(scored: list[dict[str, Any]], run_id: str, fetched_at: s
       const windows = ['24h', '7d', '30d', '30d+'];
       const selectedWindows = new Set(getConfig('apify.x_tweets.windows', []) || []);
       const windowToggles = windows.map(win => `<label class="toggle-row"><input type="checkbox" data-action="toggle-x-window" data-window="${win}" ${selectedWindows.has(win) ? 'checked' : ''}><span>${win}</span></label>`).join('');
-      return `<section class="settings-section"><h2>X Monitoring</h2><p class="section-copy">X 先按 seed accounts 抓 tweets。我们现在弱化 engagement，重点是这些人提到了什么项目、原文怎么说。</p><div class="settings-grid">
+      return `<section class="settings-section"><h2>X 监控</h2><p class="section-copy">X 先按 seed accounts 抓 tweets。我们现在弱化 engagement，重点是这些人提到了什么项目、原文怎么说。</p><div class="settings-grid">
           <div class="settings-card"><div class="settings-card-head"><div><div class="settings-card-title">Tweet scrape</div><div class="settings-card-note">下一次 X tweets run 使用这些参数。</div></div>${sourceHealthBadge('x_tweets')}</div>
             <div class="setting-list">
               ${settingCheckbox('apify.x_tweets.enabled', '启用 X tweets', '关闭后 dashboard 不再从 x_tweets_latest.json 导入 tweets。')}
@@ -4719,7 +4661,7 @@ def export_dashboard_v3(scored: list[dict[str, Any]], run_id: str, fetched_at: s
               ${settingCheckbox('apify.x_tweets.include_replies', '包含 replies', '打开后 replies 也会进入抓取/导入，噪声通常更高。')}
             </div>
           </div>
-          <div class="settings-card"><div class="settings-card-head"><div><div class="settings-card-title">Seed discovery</div><div class="settings-card-note">从 following 候选池筛 AI 相关个人账号。</div></div>${sourceHealthBadge('x_seed_accounts')}</div>
+          <div class="settings-card"><div class="settings-card-head"><div><div class="settings-card-title">Seed 发现</div><div class="settings-card-note">从 following 候选池筛 AI 相关个人账号。</div></div>${sourceHealthBadge('x_seed_accounts')}</div>
             <div class="setting-list">
               ${settingCheckbox('apify.x_seed_from_following.enabled', '启用 following seed file', '从 x_following_ai_seed_candidates_latest.json 读取候选并筛个人账号。')}
               ${settingField('apify.x_seed_from_following.limit', '候选展示上限', 'Settings 里 X Accounts 的候选数量上限。', 'number', 'min="1" step="1"')}
@@ -4727,7 +4669,7 @@ def export_dashboard_v3(scored: list[dict[str, Any]], run_id: str, fetched_at: s
             </div>
           </div>
         </div></section>
-        <section class="settings-section"><h2>Seed accounts</h2><p class="section-copy">手动维护的账号池。这里只放个人账号，不放 official accounts。保存后下一次 X tweets run 生效。</p><div class="setting-row two"><div><div class="setting-label">新增账号</div><div class="setting-help">输入 handle，不需要 @。</div></div><div class="settings-actions"><input class="field" id="newXAccount" placeholder="karpathy"><button type="button" class="small-button" data-action="add-account">添加</button></div></div><div class="settings-table" style="margin-top:10px">${accountRows}</div></section>`;
+        <section class="settings-section"><h2>Seed 账号</h2><p class="section-copy">手动维护的账号池。这里只放个人账号，不放 official accounts。保存后下一次 X tweets run 生效。</p><div class="setting-row two"><div><div class="setting-label">新增账号</div><div class="setting-help">输入 handle，不需要 @。</div></div><div class="settings-actions"><input class="field" id="newXAccount" placeholder="karpathy"><button type="button" class="small-button" data-action="add-account">添加</button></div></div><div class="settings-table" style="margin-top:10px">${accountRows}</div></section>`;
     }
     function renderDisplaySettings() {
       const hidden = hiddenSourceSet();
@@ -4735,15 +4677,15 @@ def export_dashboard_v3(scored: list[dict[str, Any]], run_id: str, fetched_at: s
       const currentTheme = document.body.dataset.theme === 'dark' ? 'dark' : 'light';
       const themeButtons = ['light', 'dark'].map(theme => `<button type="button" class="control-button ${theme === currentTheme ? 'active' : ''}" data-action="set-theme" data-theme-value="${theme}">${theme === 'light' ? '浅色' : '深色'}</button>`).join('');
       const sourceRows = channels.map(channel => `<label class="toggle-row settings-card compact"><input type="checkbox" data-action="toggle-source-visibility" data-channel="${escapeText(channel.id)}" ${hidden.has(channel.id) ? '' : 'checked'}><span><strong>${escapeText(channel.label)}</strong><div class="setting-help">${fmt(channel.count)} rows · 只影响本浏览器显示，不改数据库和 pipeline。</div></span></label>`).join('');
-      return `<section class="settings-section"><h2>Display</h2><p class="section-copy">这些是浏览器本地显示偏好，存在 localStorage，不写入 pipeline/config.json。</p><div class="settings-grid">
+      return `<section class="settings-section"><h2>显示设置</h2><p class="section-copy">这些是浏览器本地显示偏好，存在 localStorage，不写入 pipeline/config.json。</p><div class="settings-grid">
         <div class="settings-card"><div class="settings-card-title">默认分页</div><div class="settings-card-note">新打开 tab 时使用的 page size。</div><select class="select" data-action="default-page-size" style="margin-top:8px">${pageSizes.map(size => `<option value="${size}" ${size === defaultPageSize ? 'selected' : ''}>${size}/页</option>`).join('')}</select></div>
         <div class="settings-card"><div class="settings-card-title">Theme</div><div class="settings-card-note">只影响本浏览器显示，设置存在 localStorage。</div><div class="settings-actions" style="margin-top:8px">${themeButtons}</div></div>
-      </div></section><section class="settings-section"><h2>Source tabs visibility</h2><p class="section-copy">隐藏 source tab 只是 UI 偏好；不会删除 dashboard payload、数据库或采集配置。</p><div class="settings-grid">${sourceRows}</div></section>`;
+      </div></section><section class="settings-section"><h2>Source 标签显示</h2><p class="section-copy">隐藏 source tab 只是 UI 偏好；不会删除 dashboard payload、数据库或采集配置。</p><div class="settings-grid">${sourceRows}</div></section>`;
     }
     function renderApiStatusSettings() {
       const apiStatus = data.config_meta?.api_status || {};
       const rows = Object.values(apiStatus).map(row => `<div class="status-row"><strong>${escapeText(row.label)}</strong><span class="status-dot ${row.configured ? 'ok' : 'warn'}">${row.configured ? 'configured' : 'missing/off'}</span><div><code>${escapeText(row.env)}</code><div class="setting-help">${escapeText(row.note)}</div></div></div>`).join('');
-      return `<section class="settings-section"><h2>API Status</h2><p class="section-copy">这里只显示环境变量是否配置，不显示 token 明文。Apify paid actor 还额外受 APIFY_ENABLE_RUNS gate 控制。</p><div class="settings-table">${rows}</div></section>`;
+      return `<section class="settings-section"><h2>API 状态</h2><p class="section-copy">这里只显示环境变量是否配置，不显示 token 明文。Apify paid actor 还额外受 APIFY_ENABLE_RUNS gate 控制。</p><div class="settings-table">${rows}</div></section>`;
     }
     function renderSettingsPanel() {
       const panel = document.getElementById('settingsPanel');
@@ -5030,7 +4972,6 @@ def pipeline_adapters() -> list[tuple[str, Any]]:
         ("x_seed_accounts", collect_x_seed_accounts),
         ("x_tweets", collect_x_tweets),
         ("apify_configured", collect_apify_configured),
-        ("ossinsight_trending_optional", collect_ossinsight_optional),
     ]
 
 

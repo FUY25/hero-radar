@@ -229,17 +229,5 @@
       "\"agent workflow\"",
       "\"MCP\" \"agent\""
     ]
-  },
-  "ossinsight": {
-    "enabled": true,
-    "periods": [
-      "past_24_hours"
-    ],
-    "languages": [
-      "All",
-      "Python",
-      "TypeScript",
-      "JavaScript"
-    ]
   }
 }

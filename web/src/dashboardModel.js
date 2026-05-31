@@ -13,6 +13,30 @@ const REPOFOMO_RANGES = [
   { id: '60d', label: '60d', kind: 'metric', path: 'm.stars_60d', dir: 'desc', onlyPositive: true },
 ];
 
+const CANDIDATE_SOURCE_LABELS = {
+  github: 'GitHub',
+  hn: 'Hacker News',
+  x_social: 'X / social',
+  product_hunt: 'Product Hunt',
+  package_family: 'npm',
+  npm: 'npm',
+  huggingface: 'Hugging Face',
+  hf: 'Hugging Face',
+};
+
+const CANDIDATE_SOURCE_ORDER = new Map([
+  ['github', 0],
+  ['hn', 1],
+  ['x_social', 2],
+  ['product_hunt', 3],
+  ['package_family', 4],
+  ['npm', 5],
+  ['huggingface', 6],
+  ['hf', 7],
+]);
+
+const NON_SOURCE_FAMILIES = new Set(['', 'rule', 'resolver', 'cross_source']);
+
 const SORT_OPTIONS_BY_CHANNEL = {
   github_trending: [
     ['native', '原生顺序', '$rank', 'asc'],
@@ -126,6 +150,7 @@ export function initialDashboardState(payload) {
     sort: 'native',
     sortDir: 'asc',
     selectedItemId: null,
+    feedTab: 'daily',
     railCollapsed: false,
     theme: 'light',
   };
@@ -137,25 +162,72 @@ export function activeChannelList(payload, section) {
 
 export function workspaceSections() {
   return [
-    { id: 'explore', label: 'Explore', enabled: false },
-    { id: 'feed', label: 'Feed', enabled: true },
-    { id: 'sources', label: 'Sources', enabled: true },
-    { id: 'settings', label: 'Settings', enabled: true },
+    { id: 'explore', label: 'Explore', icon: 'search', enabled: false },
+    { id: 'feed', label: 'Feed', icon: 'feed', enabled: true },
+    { id: 'sources', label: 'Sources', icon: 'database', enabled: true },
+    { id: 'settings', label: 'Settings', icon: 'settings', enabled: true },
   ];
+}
+
+export function candidateTableColumns() {
+  return [
+    { label: '候选', cls: 'candidate-name-col' },
+    { label: '重要性', cls: 'candidate-level-col' },
+    { label: '证据', cls: 'candidate-evidence-col' },
+    { label: '来源', cls: 'candidate-source-col' },
+    { label: '链接', cls: 'candidate-link-col' },
+    { label: '上下文', cls: 'candidate-context-col' },
+  ];
+}
+
+export function candidateVisibleEvidence(row, expanded = false) {
+  const bullets = Array.isArray(row?.evidence_bullets) ? row.evidence_bullets : [];
+  const hidden = Math.max(0, Number(row?.evidence_count || bullets.length) - 3);
+  return {
+    bullets: expanded ? bullets : bullets.slice(0, 3),
+    extraCount: expanded ? 0 : hidden,
+    expandable: bullets.length > 3 || hidden > 0,
+  };
 }
 
 function normalizeCandidateRow(row, poolType) {
   const evidence = Array.isArray(row.evidence_bullets) ? row.evidence_bullets : [];
+  const evidenceBullets = evidence.map((bullet) => ({
+    ...bullet,
+    display_label: readableEvidenceLabel(bullet),
+    display_badge: readableProvenanceBadge(bullet),
+  }));
+  const sourceLinks = normalizeCandidateSourceLinks(row.source_links);
   return {
     ...row,
     level: row.level || poolType,
     pool_type: poolType,
-    evidence_bullets: evidence,
-    evidence_extra_count: Math.max(0, Number(row.evidence_count || evidence.length) - 3),
+    source_families: candidateSourceFamilies({ ...row, evidence_bullets: evidenceBullets }),
+    evidence_bullets: evidenceBullets,
+    evidence_extra_count: Math.max(0, Number(row.evidence_count || evidenceBullets.length) - 3),
     canonical_link: row.canonical_link || '',
     context_preview: row.context_preview || '',
     binding_confidence: row.binding_confidence || 'none',
+    source_links: sourceLinks,
+    source_link_count: Number(row.source_link_count || sourceLinks.length),
   };
+}
+
+function normalizeCandidateSourceLinks(rawLinks) {
+  if (!Array.isArray(rawLinks)) return [];
+  return rawLinks
+    .filter((link) => link && link.item_id != null && link.channel)
+    .map((link) => ({
+      ...link,
+      item_id: Number(link.item_id),
+      channel: String(link.channel || ''),
+      channel_label: String(link.channel_label || link.label || link.channel || ''),
+      label: String(link.label || link.channel_label || link.channel || ''),
+      name: String(link.name || ''),
+      external_url: String(link.external_url || ''),
+      window: String(link.window || ''),
+    }))
+    .filter((link) => Number.isFinite(link.item_id) && link.channel);
 }
 
 export function candidateRowsForFeed(candidates) {
@@ -163,6 +235,155 @@ export function candidateRowsForFeed(candidates) {
     ...(candidates?.candidates || []).map((row) => normalizeCandidateRow(row, row.level)),
     ...(candidates?.edge_watch || []).map((row) => normalizeCandidateRow({ ...row, level: 'edge_watch' }, 'edge_watch')),
   ];
+}
+
+export function candidateSourceLabel(source) {
+  return CANDIDATE_SOURCE_LABELS[source] || titleizeSource(source);
+}
+
+export function candidateSourceOptions(rows) {
+  const counts = new Map();
+  for (const row of rows || []) {
+    for (const source of candidateSourceFamilies(row)) {
+      counts.set(source, (counts.get(source) || 0) + 1);
+    }
+  }
+  return [...counts.entries()]
+    .map(([value, count]) => ({ value, label: candidateSourceLabel(value), count }))
+    .sort((a, b) => (
+      (CANDIDATE_SOURCE_ORDER.get(a.value) ?? 99) - (CANDIDATE_SOURCE_ORDER.get(b.value) ?? 99)
+      || a.label.localeCompare(b.label)
+    ));
+}
+
+export function filterCandidateRows(rows, { levelFilter = 'all', sourceFilters = [] } = {}) {
+  const selectedSources = new Set(sourceFilters || []);
+  return (rows || []).filter((row) => {
+    if (levelFilter !== 'all' && row.level !== levelFilter) return false;
+    if (!selectedSources.size) return true;
+    return candidateSourceFamilies(row).some((source) => selectedSources.has(source));
+  });
+}
+
+export function sourceItemNavigationState(items, sourceLink, currentState = {}) {
+  const channel = String(sourceLink?.channel || '');
+  const itemId = Number(sourceLink?.item_id);
+  const pageSize = Number(currentState.pageSize || 100);
+  if (!channel || !Number.isFinite(itemId)) {
+    return null;
+  }
+  const ranges = availableRanges(items, channel);
+  const requestedWindow = String(sourceLink?.window || '');
+  const activeWindow = ranges.some((range) => range.id === requestedWindow)
+    ? requestedWindow
+    : defaultRangeId(items, channel);
+  const targetState = {
+    activeChannel: channel,
+    activeWindow,
+    query: '',
+    sort: 'native',
+    sortDir: 'asc',
+  };
+  const rows = rowsForChannel(items, channel, targetState);
+  const index = rows.findIndex((row) => Number(row.item_id) === itemId);
+  return {
+    section: 'sources',
+    activeChannel: channel,
+    activeWindow,
+    selectedItemId: itemId,
+    query: '',
+    sort: 'native',
+    sortDir: 'asc',
+    page: index >= 0 ? Math.floor(index / Math.max(1, pageSize)) + 1 : 1,
+  };
+}
+
+function candidateSourceFamilies(row) {
+  const rawFamilies = Array.isArray(row.source_families) && row.source_families.length
+    ? row.source_families
+    : [
+      ...(Array.isArray(row.evidence_bullets) ? row.evidence_bullets.map((bullet) => bullet.family) : []),
+      ...(Array.isArray(row.fired_families) ? row.fired_families : []),
+    ];
+  const families = [];
+  for (const family of rawFamilies) {
+    const value = String(family || '').trim();
+    if (!value || NON_SOURCE_FAMILIES.has(value) || families.includes(value)) continue;
+    families.push(value);
+  }
+  return families;
+}
+
+function readableEvidenceLabel(bullet) {
+  const label = String(bullet?.label || '').trim();
+  const family = String(bullet?.family || '').trim();
+  const strength = String(bullet?.strength || '').trim();
+
+  const githubStars = label.match(/^GH \+(.+) stars \/ 24h$/i);
+  if (githubStars) return `GitHub: +${githubStars[1]} stars in 24h`;
+
+  const hnStoryCount = label.match(/^hn:\s*strict_story_count_(\d+d)\s+(\d+)$/i);
+  if (hnStoryCount) return `HN: ${hnStoryCount[2]} qualifying stories in ${hnStoryCount[1]}`;
+
+  const hnClassifier = label.match(/^HN classifier:\s*(.+)$/i);
+  if (hnClassifier) return `HN: LLM says ${readableClassifierValue(hnClassifier[1])}`;
+
+  const xTier = label.match(/^X\s+(.+)$/i);
+  if (xTier) return `X: LLM marked ${readableTier(xTier[1])}`;
+
+  const resolved = label.match(/^Resolved\s+(.+)$/i);
+  if (resolved) return `Link resolved: ${readableLinkKey(resolved[1])}`;
+
+  if (family) return `${candidateSourceLabel(family)}: ${label.replace(`${family}:`, '').trim() || readableTier(strength)}`;
+  return label;
+}
+
+function readableProvenanceBadge(bullet) {
+  const origin = String(bullet?.origin_type || '').trim();
+  const badge = String(bullet?.provenance_badge || '').trim();
+  if (origin === 'source_classifier' || badge === 'LLM classifier') return 'LLM';
+  if (origin === 'deterministic_rule' || badge === 'rule') return 'Deterministic';
+  if (origin === 'backfill' || badge === 'backfill') return 'Backfill';
+  if (origin === 'resolver' || badge === 'resolver') return 'Resolver';
+  if (origin === 'cross_source_rule' || badge === 'cross-source') return 'Cross-source';
+  return badge;
+}
+
+function readableClassifierValue(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  return {
+    company_product: 'product/company',
+    project: 'project',
+    repo: 'repo/project',
+    package: 'package',
+    non_product: 'not a product',
+    topic: 'topic only',
+  }[normalized] || normalized.replaceAll('_', ' ');
+}
+
+function readableTier(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  return {
+    high_potential: 'high potential',
+    potential: 'potential',
+    watch: 'watch',
+    edge_watch: 'edge watch',
+    none: 'not relevant',
+  }[normalized] || normalized.replaceAll('_', ' ');
+}
+
+function readableLinkKey(value) {
+  const normalized = String(value || '').trim();
+  if (normalized.startsWith('github:')) return `GitHub ${normalized.slice('github:'.length)}`;
+  if (normalized.startsWith('domain:')) return normalized.slice('domain:'.length);
+  if (normalized.startsWith('npm:')) return `npm ${normalized.slice('npm:'.length)}`;
+  return normalized;
+}
+
+function titleizeSource(value) {
+  return String(value || '')
+    .replaceAll('_', ' ')
+    .replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
 export function dashboardApiUrl(path, base = '') {
@@ -406,11 +627,11 @@ export function settingsPanelDefs(payload) {
   const displayCount = (payload?.channels || []).length;
   const apiCount = Object.keys(payload?.config_meta?.api_status || {}).length;
   return [
-    { id: 'settings_run_sources', label: 'Run & Sources', count: sourceCount },
-    { id: 'settings_search_terms', label: 'Search Terms', count: searchCount },
-    { id: 'settings_x_monitoring', label: 'X Monitoring', count: xAccountCount },
-    { id: 'settings_display', label: 'Display', count: displayCount },
-    { id: 'settings_api_status', label: 'API Status', count: apiCount },
+    { id: 'settings_run_sources', label: '运行与来源', count: sourceCount },
+    { id: 'settings_search_terms', label: '搜索词', count: searchCount },
+    { id: 'settings_x_monitoring', label: 'X 监控', count: xAccountCount },
+    { id: 'settings_display', label: '显示设置', count: displayCount },
+    { id: 'settings_api_status', label: 'API 状态', count: apiCount },
   ];
 }
 

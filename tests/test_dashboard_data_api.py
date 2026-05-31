@@ -108,6 +108,39 @@ class DashboardDataApiTest(unittest.TestCase):
         self.assertTrue(payload["config_meta"]["api_status"]["github"]["configured"])
         self.assertNotIn("present", json.dumps(payload, ensure_ascii=False))
 
+    def test_dashboard_data_hides_retired_ossinsight_snapshots(self) -> None:
+        from pipeline.dashboard_data import build_dashboard_data
+
+        temp, db_path = self.make_db()
+        self.addCleanup(temp.cleanup)
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "insert into snapshots(run_id, source, fetched_at, status, item_count, error) values (?, ?, ?, ?, ?, ?)",
+            (
+                "source-run",
+                "ossinsight_trending_optional",
+                "2026-05-31T10:00:00Z",
+                "error",
+                0,
+                "retired source should not appear",
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+        payload = build_dashboard_data(
+            db_path=db_path,
+            config={
+                "github_search": {"queries": []},
+                "hn": {"algolia_queries": []},
+                "npm": {"queries": []},
+                "apify": {"enabled": False, "x_keyword_queries": []},
+            },
+        )
+
+        serialized = json.dumps(payload, ensure_ascii=False).lower()
+        self.assertNotIn("ossinsight", serialized)
+
     def test_server_exposes_dashboard_data_endpoint_payload(self) -> None:
         import pipeline.server as server
 
