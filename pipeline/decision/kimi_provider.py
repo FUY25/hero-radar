@@ -1,0 +1,161 @@
+from __future__ import annotations
+
+import json
+import os
+import urllib.error
+import urllib.request
+from typing import Any
+
+
+DEFAULT_KIMI_BASE_URL = "https://api.moonshot.ai/v1"
+DEFAULT_KIMI_SCOUT_MODEL = "kimi-k2.5"
+DEFAULT_KIMI_SCORING_MODEL = "kimi-k2.5"
+DEFAULT_KIMI_DEEPDIVE_MODEL = "kimi-k2.6"
+
+
+class KimiProvider:
+    provider_name = "kimi"
+
+    def __init__(
+        self,
+        *,
+        api_key: str | None = None,
+        model: str | None = None,
+        base_url: str | None = None,
+        timeout: int = 90,
+        max_retries: int = 2,
+    ) -> None:
+        self.api_key = (
+            api_key
+            or os.environ.get("KIMI_API_KEY", "")
+            or os.environ.get("MOONSHOT_API_KEY", "")
+        )
+        self.model = model or os.environ.get("KIMI_MODEL", DEFAULT_KIMI_SCORING_MODEL)
+        self.base_url = (
+            base_url or os.environ.get("KIMI_BASE_URL", DEFAULT_KIMI_BASE_URL)
+        ).rstrip("/")
+        self.timeout = timeout
+        self.max_retries = max(0, int(max_retries))
+
+    def __repr__(self) -> str:
+        return (
+            f"KimiProvider(model={self.model!r}, base_url={self.base_url!r}, "
+            f"api_key_configured={bool(self.api_key)})"
+        )
+
+    def build_payload(
+        self,
+        *,
+        system_prompt: str,
+        user_payload: dict[str, Any],
+        temperature: float = 0,
+        max_tokens: int | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        json_mode: bool = True,
+    ) -> dict[str, Any]:
+        system_content = system_prompt.strip() or "Return strict JSON only."
+        if json_mode and "json" not in system_content.lower():
+            system_content = f"{system_content}\nReturn strict JSON only."
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system_content},
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        user_payload, ensure_ascii=False, sort_keys=True
+                    ),
+                },
+            ],
+            "temperature": temperature,
+        }
+        if json_mode:
+            payload["response_format"] = {"type": "json_object"}
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
+        if tools:
+            payload["tools"] = tools
+        return payload
+
+    def complete_json(
+        self,
+        *,
+        task: str,
+        prompt_version: str,
+        input_payload: dict[str, Any],
+        system_prompt: str = "",
+    ) -> dict[str, Any]:
+        if not self.api_key:
+            raise RuntimeError("KIMI_API_KEY or MOONSHOT_API_KEY is not configured")
+        payload = self.build_payload(
+            system_prompt=system_prompt,
+            user_payload=input_payload,
+            temperature=0,
+        )
+        request = urllib.request.Request(
+            f"{self.base_url}/chat/completions",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+            method="POST",
+        )
+        last_error: BaseException | None = None
+        for _attempt in range(self.max_retries + 1):
+            try:
+                with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                    body = json.loads(response.read().decode("utf-8"))
+                content = body["choices"][0]["message"]["content"]
+                if not content:
+                    raise RuntimeError("Kimi returned empty JSON content")
+                return json.loads(content)
+            except (
+                TimeoutError,
+                urllib.error.URLError,
+                RuntimeError,
+                ValueError,
+                KeyError,
+                IndexError,
+            ) as exc:
+                last_error = exc
+        raise last_error or RuntimeError("Kimi request failed")
+
+
+class KimiWebSearchClient:
+    """Small wrapper around Kimi's built-in `$web_search` tool."""
+
+    WEB_SEARCH_TOOL = {"type": "builtin_function", "function": {"name": "$web_search"}}
+
+    def __init__(self, *, provider: KimiProvider) -> None:
+        self.provider = provider
+
+    def search(self, *, query: str, max_results: int = 5) -> dict[str, Any]:
+        if not self.provider.api_key:
+            raise RuntimeError("KIMI_API_KEY or MOONSHOT_API_KEY is not configured")
+        payload = self.provider.build_payload(
+            system_prompt=(
+                "Use web search to gather concise external context. "
+                "Return a compact plain-text summary with URLs when available."
+            ),
+            user_payload={"query": query, "max_results": max(1, min(8, int(max_results)))},
+            temperature=0,
+            max_tokens=1200,
+            tools=[self.WEB_SEARCH_TOOL],
+            json_mode=False,
+        )
+        request = urllib.request.Request(
+            f"{self.provider.base_url}/chat/completions",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {self.provider.api_key}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=self.provider.timeout) as response:
+            body = json.loads(response.read().decode("utf-8"))
+        content = str(body["choices"][0]["message"].get("content") or "")
+        return {"query": query, "content": content[:6000], "model": self.provider.model}
