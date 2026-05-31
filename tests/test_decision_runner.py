@@ -699,6 +699,42 @@ class DecisionRunnerTest(unittest.TestCase):
 
         self.assertEqual(reconciled, {repo_entity_id: repo_entity_id})
 
+    def test_classifier_only_entities_require_link_before_final_resolution(self):
+        from pipeline.decision.entity_resolution import ResolutionResult
+        from pipeline.decision.run_decision import add_classifier_entities_to_resolution
+
+        conn = sqlite3.connect(":memory:")
+        init_decision_db(conn)
+        conn.execute(
+            """
+            insert into entities(entity_id, canonical_entity, canonical_key, key_type, first_seen, aliases_json, source_item_ids_json)
+            values (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "entity:codex",
+                "Codex",
+                "name:Codex",
+                "name",
+                "2026-05-31T00:00:00Z",
+                '["name:Codex"]',
+                "[]",
+            ),
+        )
+        evidence = [
+            {
+                "entity_id": "entity:codex",
+                "canonical_entity": "name:Codex",
+                "alias": "name:Codex",
+                "source": "x_tweets",
+                "family": "x_social",
+            }
+        ]
+        resolution = ResolutionResult(entities=[], item_to_entity={})
+
+        augmented = add_classifier_entities_to_resolution(conn, resolution, evidence)
+
+        self.assertEqual(augmented.entities, [])
+
     def test_runner_does_not_reset_completed_backfill_jobs_to_pending(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "hero.sqlite"
