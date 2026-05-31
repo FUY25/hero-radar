@@ -2,10 +2,12 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   activeChannelList,
+  candidateRowsForFeed,
   detailRowsForItem,
   filterAndSortRows,
   initialDashboardState,
   visibleWindowsForChannel,
+  workspaceSections,
 } from './dashboardModel.js';
 
 const payload = {
@@ -53,4 +55,16 @@ test('filterAndSortRows filters by channel and window and supports name sort', (
 test('detailRowsForItem exposes metadata and raw fields for detail panel', () => {
   const rows = detailRowsForItem(payload.items[0]);
   assert.deepEqual(rows.map((row) => row.key), ['metadata.period_stars', 'raw']);
+});
+
+test('workspaceSections keeps old top-level surfaces and feed candidate tab', () => {
+  assert.deepEqual(workspaceSections().map((row) => row.id), ['explore', 'feed', 'sources', 'settings']);
+});
+
+test('candidateRowsForFeed merges potential and edge watch rows', () => {
+  const candidates = {
+    candidates: [{ entity_id: 'entity:1', canonical_entity: 'Repo', level: 'potential', fired_families: ['github'] }],
+    edge_watch: [{ entity_id: 'entity:2', canonical_entity: 'Topic', reasons: ['hn'], status: 'open' }],
+  };
+  assert.deepEqual(candidateRowsForFeed(candidates).map((row) => row.level), ['potential', 'edge_watch']);
 });

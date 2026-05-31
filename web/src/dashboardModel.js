@@ -1,4 +1,11 @@
-const WINDOW_ORDER = new Map([['24h', 0], ['7d', 1], ['30d', 2], ['30d+', 3], ['current', 4]]);
+const WINDOW_ORDER = new Map([
+  ['24h', 0],
+  ['7d', 1],
+  ['30d', 2],
+  ['30d+', 3],
+  ['7d+30d+60d', 4],
+  ['current', 5],
+]);
 
 export function initialDashboardState(payload) {
   return {
@@ -19,16 +26,37 @@ export function activeChannelList(payload, section) {
   return section === 'settings' ? (payload.settings_channels || []) : (payload.channels || []);
 }
 
+export function workspaceSections() {
+  return [
+    { id: 'explore', label: 'Explore', enabled: false },
+    { id: 'feed', label: 'Feed', enabled: true },
+    { id: 'sources', label: 'Sources', enabled: true },
+    { id: 'settings', label: 'Settings', enabled: true },
+  ];
+}
+
+export function candidateRowsForFeed(candidates) {
+  return [
+    ...(candidates?.candidates || []).map((row) => ({ ...row, pool_type: row.level })),
+    ...(candidates?.edge_watch || []).map((row) => ({ ...row, level: 'edge_watch', pool_type: 'edge_watch' })),
+  ];
+}
+
 export function visibleWindowsForChannel(items, channel) {
   const windows = new Set();
   for (const item of items || []) {
     if (item.channel === channel) windows.add(item.window || 'current');
   }
-  return [...windows].sort((a, b) => (WINDOW_ORDER.get(a) ?? 99) - (WINDOW_ORDER.get(b) ?? 99));
+  return [...windows].sort(
+    (a, b) => (WINDOW_ORDER.get(a) ?? 99) - (WINDOW_ORDER.get(b) ?? 99) || String(a).localeCompare(String(b)),
+  );
 }
 
 function searchableText(row) {
-  return [row.name, row.description, row.external_id, ...(row.facts || [])].join(' ').toLowerCase();
+  const metadata = row.metadata && typeof row.metadata === 'object' ? Object.values(row.metadata) : [];
+  return [row.name, row.description, row.external_id, row.source, ...(row.facts || []), ...metadata]
+    .join(' ')
+    .toLowerCase();
 }
 
 export function filterAndSortRows(items, state) {
