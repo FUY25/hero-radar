@@ -48,14 +48,14 @@ decision layer (this doc)
   Layer 1  Decision pipeline      deterministic rules + source classifiers + backfill
                                   -> potential_candidates + edge_watch + evidence_rows
   Layer 2  Feed/deepdive          card generation + feed selection + feed dedupe
-                                  + DeepSeek analysis + bounded Kimi deepdive
+                                  + Kimi scout/scoring + bounded Kimi deepdive
                                   -> daily_feed/cards + deepdive_reports
   Layer 3  Explore / QA chatbot   read-only deep-dive + propose rule/prompt changes
 
 provider interface
   one OpenAI-compatible provider abstraction, with task routing:
-    DeepSeek -> pipeline / deterministic-adjacent / structured analysis
-    Kimi     -> Chat / Explore agent / code or long-context understanding
+    DeepSeek -> Layer 1 source classifiers / deterministic-adjacent structured evidence
+    Kimi     -> Layer 2 feed scout/scoring/deepdive + Chat / Explore agent
 ```
 
 The whole decision layer is additive. It reads `items` and writes new tables. It
@@ -67,11 +67,12 @@ contracts.
 ```text
 LLM provider:   abstract OpenAI-compatible provider interface first. Primary V1
                 models are DeepSeek + Kimi/Moonshot, both swappable by config.
-                DeepSeek handles pipeline / deterministic-adjacent structured
-                work. Kimi handles chatbot / agent / code-understanding work.
+                DeepSeek handles Layer 1 pipeline classifiers and structured
+                evidence producers. Kimi handles Layer 2 feed scout/scoring/
+                deepdive and Layer 3 agent / code-understanding work.
                 Provider layer must run without model keys for Layer 0 Stage A
                 and the core deterministic Layer 1 rule evaluator. X source
-                classification, L2 analysis, and agents require model keys.
+                classification, L2 feed work, and agents require model keys.
 
 Entity grain:   automatic, emergent clusters. Deterministic join keys first,
                 LLM only for the moving orphan tail. No hand-written alias file.
@@ -824,7 +825,8 @@ ossinsight
 ## 5. LLM Harness and Providers
 
 Two tiers, because the jobs have different cost, latency, context, and tool-use
-profiles. V1 defaults to DeepSeek for pipeline work and Kimi/Moonshot for
+profiles. V1 defaults to DeepSeek for Layer 1 pipeline classifiers and
+Kimi/Moonshot for Layer 2 feed scout/scoring/deepdive plus Layer 3
 agentic/chat/code-understanding work. Both are behind the same OpenAI-compatible
 provider abstraction so we can swap models without rewriting the pipeline.
 
@@ -835,7 +837,6 @@ Tier 1  Pipeline provider (single-shot, cost-sensitive, high-volume)
     Default: DeepSeekProvider.
     Used for:
       - X source classifier (x_tier evidence rows)
-      - Layer 2 per-candidate feed analysis
       - deterministic-adjacent semantic judgments
       - structured summaries / JSON outputs
       - cheap batch classification where tools are not central
@@ -848,12 +849,12 @@ Tier 2  Agentic harness (tool-using, model-swappable). ONE shared architecture,
   pipeline/agent_harness.py + a shared tool registry.
 
   2a  Pipeline judgment agent (constrained, mostly deterministic context)
-      Used by Layer 0 Stage B merges and Layer 2 de-dup. These stages are
+      Used by Layer 0 Stage B merges and Layer 2 de-dup/scout/scoring. These stages are
       deterministic-first and pipeline-like; the agent only runs the LAST step:
       go look at the actual repo/source, decide the merge, and fill structured
       fields. Bounded tool set, structured output, low autonomy.
-      Default model: DeepSeek unless the task needs long-context repo/code
-      understanding, in which case route to Kimi.
+      Default model: DeepSeek for Layer 0/Layer 1 deterministic-adjacent work;
+      Kimi for Layer 2 Feed work.
 
   2b  Bounded deepdive agent (candidate-scoped, limited)
       Backs Layer 2 deepdive. It can web search, inspect selected repo files, read
@@ -861,8 +862,8 @@ Tier 2  Agentic harness (tool-using, model-swappable). ONE shared architecture,
       product/workflow shift. Hard budgets on pages/files/time/context. It writes
       analysis, caveats, next_questions, and proposals; it never changes levels or
       production rules directly.
-      Default model: Kimi/Moonshot for repo/code/web understanding; DeepSeek for
-      compact fixed-schema summaries when context is already assembled.
+      Default model: Kimi/Moonshot for repo/code/web understanding and final
+      synthesis.
 
   2c  Explore agent (flexible)
       Backs Layer 3. Broad tool set over ALL collected data, multi-step,
@@ -875,7 +876,7 @@ Tier 2  Agentic harness (tool-using, model-swappable). ONE shared architecture,
   All profiles share the harness and tool registry; they differ in tool scope,
   autonomy, budgets, write permissions, and output contract. Model is swappable
   (DeepSeek / Kimi / Claude / others), but V1 routing defaults to DeepSeek for
-  pipeline and Kimi for agentic/code/web work.
+  Layer 1 pipeline classifiers and Kimi for Layer 2/Layer 3 work.
 
   Framework choice (recommendation): a thin self-written tool-loop over a provider
   abstraction (LiteLLM-style) for model-swap; NOT LangGraph, NOT the DeepSeek SDK
@@ -893,12 +894,11 @@ deterministic rules consume those rows as data. The rule evaluator never calls a
 LLM inline.
 ```
 
-### 5.1 Model selection per stage (V1, DeepSeek)
+### 5.1 Model selection per stage (V1, DeepSeek + Kimi)
 
-X processing and all pipeline LLM work use DeepSeek (user decision). Verified
-current 2026-05 from the DeepSeek API docs. Legacy names `deepseek-chat` /
-`deepseek-reasoner` retire 2026-07-24 (they map to deepseek-v4-flash non-thinking /
-thinking) -- use the V4 names directly.
+X processing and Layer 1 pipeline classifier work use DeepSeek. Layer 2 feed
+scout/scoring/deepdive uses Kimi/Moonshot. Keep model names in config rather than
+hardcoding them.
 
 ```text
 DeepSeek V4 models:
@@ -918,14 +918,14 @@ stage / job                                model              why
 X Stage 1  batched tweet triage/normalize  deepseek-v4-flash  high volume, batched, cheap; non-thinking
 X Stage 2  per-entity x_tier judgment      deepseek-v4-pro     project-level judgment -> best model
 Layer 0 Stage B  orphan merge judgment     deepseek-v4-pro     correctness-affecting, low volume
-Layer 2  per-candidate feed analysis       deepseek-v4-pro     user-facing judgment (flash if cost-bound)
-Layer 2  candidate de-dup                  deepseek-v4-flash   bounded structured judgment
+Layer 2  edge_watch scout                  kimi-k2.5           semantic scout before scoring
+Layer 2  per-candidate feed scoring        kimi-k2.5           user-facing judgment, bounded JSON
+Layer 2  candidate presentation de-dup     kimi-k2.5           only when deterministic grouping is insufficient
+Layer 2  bounded deepdive                  kimi-k2.6           repo/web/source understanding
 ```
 
-Keep model names in config / rules, not hardcoded, so they can be swapped (V4 ->
-next version, or to Kimi/Claude) without code changes. Tier 2 agentic/code/web
-(2b/2c) default to Kimi/Moonshot per section 5; confirm current Moonshot model
-names at their platform docs.
+Keep model names in config / rules, not hardcoded, so they can be swapped without
+code changes. Confirm current Moonshot model names at their platform docs.
 
 References (hand these to the implementing engineer):
 
@@ -1120,9 +1120,10 @@ effects forbidden
 Model routing:
 
 ```text
-DeepSeek   compact fixed-schema analysis over already-assembled evidence.
+Kimi       compact fixed-schema Layer 2 scout/scoring over assembled evidence.
 Kimi       deeper repo/code/web/source inspection when long context or code
            understanding matters.
+DeepSeek   Layer 1 source classifiers and deterministic-adjacent evidence work.
 ```
 
 ## 7. Explore / QA Agent (Layer 3)
@@ -1316,7 +1317,7 @@ P-d  L0 imperfection is visible and correctable in the UI; corrections feed the
    internal tabs:
      Daily Feed
        Layer 2 selected cards only. `today_focus` renders as rich cards with
-       DeepSeek/Kimi analysis + key evidence inline. `secondary` renders as a
+       Kimi analysis + key evidence inline. `secondary` renders as a
        compact ranked list. `backlog` is available behind filter; `suppress` is
        hidden by default. Ranked by LLM Priority within buckets.
      Candidate Pool
@@ -1330,7 +1331,7 @@ P-d  L0 imperfection is visible and correctable in the UI; corrections feed the
    actions: open source, deep-dive in chat, mark noise, promote, watch
          -> write local human_status / feedback_events.
    -> Project Drawer  GET /api/entity/{id}: per-source LEVEL-VOTE table with raw
-      numbers + source links (the evidence), full DeepSeek analysis, velocity-over-
+      numbers + source links (the evidence), full Kimi analysis, velocity-over-
       time, alias pack + merge confidence (L0 visible), evidence_rows, "deep-dive
       with chatbot" (carries entity context).
 
@@ -1400,9 +1401,9 @@ Step 3  Precise backfill for the shortlist. GitHub stargazers/repo metadata,
         npm daily downloads, and similar source APIs run only on backfill_jobs.
         Backfill writes evidence_rows and reruns affected deterministic rules.
 
-Step 4  Layer 2 feed + bounded deepdive. Add Tier 2a feed dedupe agent,
+Step 4  Layer 2 feed + bounded deepdive. Add Tier 2a feed dedupe/scout/scoring,
         Tier 2b bounded deepdive agent, daily_feed_candidate_refs, card_json,
-        display_decision/buckets, lightweight Potential+ analysis, and bounded
+        display_decision/buckets, lightweight Kimi Potential+ analysis, and bounded
         Kimi deepdive for high_potential / top potential / selected edge_watch.
         Output decides which cards appear in today's Feed; Potential/high_potential
         are eligibility signals, not automatic visible placement.
@@ -1435,9 +1436,9 @@ Each step is independently shippable and verifiable.
 1. RESOLVED: Potential pool has NO hard cap in V1. Source-specific thresholds
    keep the pool sane; the UI may group/filter, but rules should not hide valid
    Potential candidates just because a daily quota is full.
-2. RESOLVED: Layer 2 / DeepSeek analysis runs for level >= potential for now.
-   No fixed Top 5 / 10 / 20 cap. Cost is controlled by thresholds,
-   dedupe-by-(entity, day), cache, and later a soft budget if needed.
+2. RESOLVED: Layer 2 Kimi scoring runs for Potential/High by default, while
+   Edge Watch enters through Kimi scout. Cost is controlled by grouping,
+   evidence-hash cache, and configured daily budgets.
 3. Stage B auto-approve: keep manual-only in v1, or auto-approve above a
    confidence threshold?
 5. Cross-source 48h windows: which clock — event_at (as_of_safe) only, or also
