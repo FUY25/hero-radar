@@ -21,10 +21,14 @@ from pipeline.decision.llm_evals import hn_eval_cases, x_eval_cases  # noqa: E40
 from pipeline.decision.llm_provider import DeepSeekProvider  # noqa: E402
 from pipeline.decision.smoke_llm import load_env_file, load_json_secrets  # noqa: E402
 from pipeline.decision.x_classifier import (  # noqa: E402
+    X_STAGE1_PROMPT_VERSION,
+    X_STAGE1_TASK,
     X_STAGE2_PROMPT_VERSION,
     X_STAGE2_TASK,
     accepted_x_tier,
+    build_x_stage1_prompt_payload,
     build_x_stage2_prompt_payload,
+    validate_x_stage1_output,
     validate_x_stage2_output,
 )
 
@@ -145,8 +149,8 @@ def x_aggregate_for_case(case: dict[str, Any], tweets: list[dict[str, Any]]) -> 
     }
 
 
-def x_actual(output: dict[str, Any]) -> dict[str, Any]:
-    accepted = accepted_x_tier(output)
+def x_actual(output: dict[str, Any], aggregate: dict[str, Any]) -> dict[str, Any]:
+    accepted = accepted_x_tier(output, aggregate=aggregate)
     return {
         "raw_x_tier": output["x_tier"],
         "accepted_x_tier": accepted,
@@ -202,12 +206,74 @@ def run_x_eval_cases(
             ),
         )
         output = validate_x_stage2_output(response)
-        actual = x_actual(output)
+        actual = x_actual(output, aggregate)
         failures = compare_x_expected(case["expected"], actual)
         results.append(
             {
                 "case": case["name"],
                 "kind": "x",
+                "passed": not failures,
+                "expected": case["expected"],
+                "actual": actual,
+                "failures": failures,
+            }
+        )
+    return results
+
+
+def stage1_actual(output: dict[str, Any]) -> dict[str, int]:
+    triage = output.get("triage") or []
+    return {
+        "total": len(triage),
+        "closer_look_count": sum(1 for item in triage if item.get("closer_look")),
+        "product_signal_count": sum(
+            1
+            for item in triage
+            if item.get("about_concrete_project")
+            and (item.get("product_names") or item.get("product_links") or item.get("project_refs"))
+        ),
+        "project_ref_count": sum(len(item.get("project_refs") or []) for item in triage),
+    }
+
+
+def compare_x_stage1_expected(
+    expected: dict[str, Any],
+    actual: dict[str, int],
+) -> list[str]:
+    failures: list[str] = []
+    if expected.get("noise") is True and actual["closer_look_count"] != 0:
+        failures.append("noise case should not request closer look")
+    if expected.get("noise") is False and actual["product_signal_count"] == 0:
+        failures.append("expected at least one product signal")
+    return failures
+
+
+def run_x_stage1_eval_cases(
+    provider: Any,
+    cases: list[dict[str, Any]],
+    *,
+    limit: int,
+) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    for case in cases[: max(0, limit)]:
+        tweets = normalized_x_tweets(case)
+        payload = build_x_stage1_prompt_payload(tweets)
+        response = provider.complete_json(
+            task=X_STAGE1_TASK,
+            prompt_version=X_STAGE1_PROMPT_VERSION,
+            input_payload=payload,
+            system_prompt=(
+                "Return strict JSON. Triage each tweet for concrete product "
+                "signals, product names, product links, and closer-look status."
+            ),
+        )
+        output = validate_x_stage1_output(response)
+        actual = stage1_actual(output)
+        failures = compare_x_stage1_expected(case["expected"], actual)
+        results.append(
+            {
+                "case": case["name"],
+                "kind": "x_stage1",
                 "passed": not failures,
                 "expected": case["expected"],
                 "actual": actual,

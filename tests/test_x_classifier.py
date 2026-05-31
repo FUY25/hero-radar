@@ -80,6 +80,8 @@ class XClassifierTest(unittest.TestCase):
                             "tweet_id": "t1",
                             "about_concrete_project": True,
                             "closer_look": True,
+                            "product_names": ["owner/repo"],
+                            "product_links": ["https://github.com/owner/repo"],
                             "project_refs": [
                                 {
                                     "entity_key": "github:owner/repo",
@@ -96,6 +98,8 @@ class XClassifierTest(unittest.TestCase):
                             "tweet_id": "t2",
                             "about_concrete_project": True,
                             "closer_look": True,
+                            "product_names": ["owner/repo"],
+                            "product_links": [],
                             "project_refs": [
                                 {
                                     "entity_key": "github:owner/repo",
@@ -112,6 +116,8 @@ class XClassifierTest(unittest.TestCase):
                             "tweet_id": "noise",
                             "about_concrete_project": False,
                             "closer_look": False,
+                            "product_names": [],
+                            "product_links": [],
                             "project_refs": [],
                             "expression_strength": "neutral",
                             "evidence_quote": "OpenAI Claude MCP",
@@ -210,6 +216,180 @@ class XClassifierTest(unittest.TestCase):
         self.assertEqual(tweets[0]["imported_at"], "2026-05-31T02:00:00Z")
         self.assertEqual(tweets[0]["deterministic_hints"][0]["entity_key"], "github:owner/repo")
 
+    def test_candidate_tweets_extract_stage0_hints_from_current_store_columns(self) -> None:
+        from pipeline.decision.x_classifier import candidate_tweets
+
+        conn = sqlite3.connect(":memory:")
+        self.addCleanup(conn.close)
+        conn.executescript(
+            """
+            create table x_tweets_store (
+                tweet_id text primary key,
+                author_username text not null,
+                author_name text,
+                text text not null,
+                url text,
+                created_at text not null,
+                metrics_json text not null,
+                mentioned_projects_json text not null,
+                hashtags_json text not null,
+                mentions_json text not null,
+                raw_json text not null,
+                first_seen_at text not null,
+                last_seen_at text not null,
+                last_import_run_id text
+            );
+            """
+        )
+        conn.execute(
+            """
+            insert into x_tweets_store(
+                tweet_id, author_username, author_name, text, url, created_at,
+                metrics_json, mentioned_projects_json, hashtags_json, mentions_json,
+                raw_json, first_seen_at, last_seen_at, last_import_run_id
+            )
+            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "t-stage0",
+                "credible1",
+                "Credible One",
+                "Clawdbot from @owner is useful #mcp https://github.com/Owner/Repo",
+                "https://x.com/credible1/status/t-stage0",
+                "2026-05-31T01:00:00Z",
+                "{}",
+                json.dumps(["Clawdbot"]),
+                json.dumps(["mcp"]),
+                json.dumps(["owner"]),
+                json.dumps({"expanded_urls": ["https://github.com/Owner/Repo"]}),
+                "2026-05-31T02:00:00Z",
+                "2026-05-31T03:00:00Z",
+                "run",
+            ),
+        )
+
+        tweet = candidate_tweets(conn, now="2026-05-31T04:00:00Z", limit=1)[0]
+
+        self.assertEqual(tweet["stage0_hints"]["mentioned_projects"], ["Clawdbot"])
+        self.assertEqual(tweet["stage0_hints"]["hashtags"], ["mcp"])
+        self.assertEqual(tweet["stage0_hints"]["mentions"], ["owner"])
+        self.assertIn(
+            {"entity_key": "github:owner/repo", "entity_confidence": "linked"},
+            tweet["deterministic_hints"],
+        )
+
+    def test_stage1_allows_product_signal_without_entity_key(self) -> None:
+        from pipeline.decision.x_classifier import validate_x_stage1_output
+
+        output = validate_x_stage1_output(
+            {
+                "triage": [
+                    {
+                        "tweet_id": "t1",
+                        "about_concrete_project": True,
+                        "closer_look": True,
+                        "product_names": ["Clawdbot"],
+                        "product_links": [],
+                        "project_refs": [],
+                        "expression_strength": "recommendation",
+                        "evidence_quote": "Clawdbot looks useful",
+                        "reason": "Concrete product name with recommendation.",
+                    }
+                ]
+            }
+        )
+
+        self.assertEqual(output["triage"][0]["product_names"], ["Clawdbot"])
+
+    def test_stage1_requires_product_signal_fields(self) -> None:
+        from pipeline.decision.x_classifier import validate_x_stage1_output
+
+        with self.assertRaises(ValueError):
+            validate_x_stage1_output(
+                {
+                    "triage": [
+                        {
+                            "tweet_id": "t1",
+                            "about_concrete_project": True,
+                            "closer_look": True,
+                            "project_refs": [],
+                            "expression_strength": "recommendation",
+                            "evidence_quote": "Clawdbot looks useful",
+                            "reason": "Missing product_names/product_links.",
+                        }
+                    ]
+                }
+            )
+
+    def test_stage1_creates_name_mentions_from_product_names_without_refs(self) -> None:
+        from pipeline.decision.entity_resolution import entity_id_for_key
+        from pipeline.decision.x_classifier import run_x_stage1
+
+        conn = self.make_conn()
+        provider = FakeLLMProvider(
+            [
+                {
+                    "triage": [
+                        {
+                            "tweet_id": "t1",
+                            "about_concrete_project": True,
+                            "closer_look": True,
+                            "product_names": ["Clawdbot"],
+                            "product_links": [],
+                            "project_refs": [],
+                            "expression_strength": "recommendation",
+                            "evidence_quote": "Clawdbot is useful",
+                            "reason": "Fuzzy but concrete product mention.",
+                        }
+                    ]
+                }
+            ]
+        )
+
+        summary = run_x_stage1(
+            conn,
+            run_id="decision_run",
+            provider=provider,
+            credible_handles={"credible1"},
+            now="2026-05-31T04:00:00Z",
+            limit=10,
+            batch_size=10,
+        )
+
+        self.assertEqual(summary["mentions"], 1)
+        entity_id = conn.execute(
+            "select entity_id from entity_mentions where window = '24h'"
+        ).fetchone()[0]
+        self.assertEqual(entity_id, entity_id_for_key("name:clawdbot"))
+
+    def test_stage2_gate_includes_single_credible_stage1_watch_candidate(self) -> None:
+        from pipeline.decision.x_classifier import candidate_entity_mentions
+
+        conn = self.make_conn()
+        conn.execute(
+            """
+            insert into entity_mentions(
+                entity_id, run_id, window, distinct_authors, credible_authors,
+                mention_count, mention_acceleration, source_refs_json
+            )
+            values (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "entity:watch",
+                "decision_run",
+                "24h",
+                1,
+                1,
+                1,
+                1.0,
+                json.dumps(["tweet:t1"]),
+            ),
+        )
+
+        mentions = candidate_entity_mentions(conn, run_id="decision_run", limit=5)
+
+        self.assertEqual([mention["entity_id"] for mention in mentions], ["entity:watch"])
+
     def test_stage2_writes_x_social_evidence(self) -> None:
         from pipeline.decision.x_classifier import run_x_stage2
 
@@ -299,6 +479,29 @@ class XClassifierTest(unittest.TestCase):
         self.assertEqual(accepted_x_tier(fuzzy), "watch")
         self.assertEqual(accepted_x_tier(uncited), "none")
 
+    def test_stage2_clamps_high_without_larger_credible_burst(self) -> None:
+        from pipeline.decision.x_classifier import accepted_x_tier, validate_x_stage2_output
+
+        output = validate_x_stage2_output(
+            {
+                "entity_key": "github:owner/repo",
+                "x_tier": "high",
+                "entity_confidence": "linked",
+                "x_expression_strength": "strong_recommendation",
+                "cited_tweet_ids": ["t1", "t2"],
+                "rationale": "Two credible tweets, but not enough for high.",
+                "cross_source_notes": [],
+            }
+        )
+
+        self.assertEqual(
+            accepted_x_tier(
+                output,
+                aggregate={"credible_authors": 2, "distinct_authors": 2},
+            ),
+            "potential",
+        )
+
     def test_stage2_generic_known_terms_without_binding_are_none(self) -> None:
         from pipeline.decision.x_classifier import run_x_stage2
 
@@ -366,6 +569,8 @@ class XClassifierTest(unittest.TestCase):
                             "tweet_id": "t1",
                             "about_concrete_project": True,
                             "closer_look": True,
+                            "product_names": ["owner/repo"],
+                            "product_links": ["https://github.com/owner/repo"],
                             "project_refs": [
                                 {
                                     "entity_key": "github:owner/repo",
@@ -430,12 +635,12 @@ class XClassifierTest(unittest.TestCase):
             tweets,
         )
 
-        self.assertEqual(stage1["prompt_version"], "x-stage1-v1")
+        self.assertEqual(stage1["prompt_version"], "x-stage1-v2")
         self.assertIn("tweets", stage1)
-        self.assertEqual(stage2["prompt_version"], "x-stage2-v1")
+        self.assertEqual(stage2["prompt_version"], "x-stage2-v2")
         self.assertEqual(stage2["aggregate"]["credible_authors"], 2)
         self.assertIn("High tier requires", stage2["instructions"])
-        self.assertIn("two credible", stage2["instructions"])
+        self.assertIn("three credible", stage2["instructions"])
 
 
 if __name__ == "__main__":

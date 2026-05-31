@@ -26,12 +26,35 @@ class RunLlmEvalsTest(unittest.TestCase):
 
         provider = FakeLLMProvider([case["fake_stage2_response"] for case in x_eval_cases()])
 
-        results = run_x_eval_cases(provider, x_eval_cases(), limit=3)
+        results = run_x_eval_cases(provider, x_eval_cases(), limit=len(x_eval_cases()))
         summary = summarize_results(results)
 
-        self.assertEqual(summary, {"total": 3, "passed": 3, "failed": 0})
-        self.assertEqual(results[1]["actual"]["accepted_x_tier"], "none")
-        self.assertEqual(results[2]["actual"]["accepted_x_tier"], "none")
+        self.assertEqual(
+            summary,
+            {"total": len(x_eval_cases()), "passed": len(x_eval_cases()), "failed": 0},
+        )
+        by_case = {result["case"]: result for result in results}
+        self.assertEqual(
+            by_case["x_fuzzy_no_citations_not_potential"]["actual"]["accepted_x_tier"],
+            "none",
+        )
+        self.assertEqual(
+            by_case["x_generic_known_term_none"]["actual"]["accepted_x_tier"],
+            "none",
+        )
+
+    def test_x_stage1_eval_runner_checks_product_signal_shape(self) -> None:
+        from pipeline.decision.llm_evals import x_eval_cases
+        from pipeline.decision.run_llm_evals import run_x_stage1_eval_cases, summarize_results
+
+        cases = [case for case in x_eval_cases() if case.get("fake_stage1_response")]
+        provider = FakeLLMProvider([case["fake_stage1_response"] for case in cases])
+
+        results = run_x_stage1_eval_cases(provider, cases, limit=len(cases))
+        summary = summarize_results(results)
+
+        self.assertEqual(summary, {"total": len(cases), "passed": len(cases), "failed": 0})
+        self.assertTrue(all(result["actual"]["closer_look_count"] >= 0 for result in results))
 
     def test_eval_summary_records_failures_without_prompt_or_secret_values(self) -> None:
         from pipeline.decision.llm_evals import hn_eval_cases

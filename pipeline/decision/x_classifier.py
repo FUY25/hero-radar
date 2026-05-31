@@ -8,6 +8,7 @@ from typing import Any
 
 from pipeline.decision.entity_resolution import entity_id_for_key as stage_a_entity_id_for_key
 from pipeline.decision.entity_resolution import normalize_github_repo
+from pipeline.decision.entity_resolution import normalize_name_key
 from pipeline.decision.llm_cache import (
     cache_key_for,
     get_cached_response,
@@ -15,8 +16,8 @@ from pipeline.decision.llm_cache import (
 )
 
 
-X_STAGE1_PROMPT_VERSION = "x-stage1-v1"
-X_STAGE2_PROMPT_VERSION = "x-stage2-v1"
+X_STAGE1_PROMPT_VERSION = "x-stage1-v2"
+X_STAGE2_PROMPT_VERSION = "x-stage2-v2"
 X_STAGE1_TASK = "x_stage1"
 X_STAGE2_TASK = "x_stage2"
 ENTITY_CONFIDENCE_VALUES = {"linked", "exact_handle", "fuzzy_name"}
@@ -56,17 +57,38 @@ def _json_loads(value: str | None) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _json_list(value: str | None) -> list[str]:
+    if not value:
+        return []
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [str(item) for item in parsed if str(item).strip()]
+
+
 def entity_id_for_key(entity_key: str) -> str:
     return stage_a_entity_id_for_key(entity_key)
 
 
+def github_keys_from_text(text: str) -> list[str]:
+    keys: list[str] = []
+    seen: set[str] = set()
+    for match in GITHUB_RE.finditer(text or ""):
+        owner = match.group(1)
+        repo = match.group(2).removesuffix(".git").rstrip(".,;:!?)\"]}'")
+        key = normalize_github_repo(owner, repo)
+        if key not in seen:
+            seen.add(key)
+            keys.append(key)
+    return keys
+
+
 def github_key_from_text(text: str) -> str | None:
-    match = GITHUB_RE.search(text or "")
-    if not match:
-        return None
-    owner = match.group(1)
-    repo = match.group(2).removesuffix(".git").rstrip(".,;:!?)\"]}'")
-    return normalize_github_repo(owner, repo)
+    keys = github_keys_from_text(text)
+    return keys[0] if keys else None
 
 
 def _x_tweets_select_fields(conn: sqlite3.Connection) -> str:
@@ -74,9 +96,17 @@ def _x_tweets_select_fields(conn: sqlite3.Connection) -> str:
     imported_expr = "imported_at"
     if "imported_at" not in columns:
         imported_expr = "first_seen_at" if "first_seen_at" in columns else "created_at"
+    mentioned_projects_expr = (
+        "mentioned_projects_json" if "mentioned_projects_json" in columns else "'[]'"
+    )
+    hashtags_expr = "hashtags_json" if "hashtags_json" in columns else "'[]'"
+    mentions_expr = "mentions_json" if "mentions_json" in columns else "'[]'"
     return (
         "tweet_id, author_username, text, url, created_at, "
-        f"{imported_expr} as imported_at, raw_json"
+        f"{imported_expr} as imported_at, raw_json, "
+        f"{mentioned_projects_expr} as mentioned_projects_json, "
+        f"{hashtags_expr} as hashtags_json, "
+        f"{mentions_expr} as mentions_json"
     )
 
 
@@ -102,7 +132,12 @@ def candidate_tweets(
         if created_at < since_dt or created_at > now_dt:
             continue
         text = row[2] or ""
-        github_key = github_key_from_text(text)
+        raw = _json_loads(row[6])
+        expanded_urls = raw.get("expanded_urls")
+        if not isinstance(expanded_urls, list):
+            expanded_urls = []
+        link_text = " ".join([text, *(str(url) for url in expanded_urls)])
+        github_keys = github_keys_from_text(link_text)
         tweets.append(
             {
                 "tweet_id": row[0],
@@ -111,12 +146,17 @@ def candidate_tweets(
                 "url": row[3],
                 "created_at": row[4],
                 "imported_at": row[5],
-                "raw": _json_loads(row[6]),
-                "deterministic_hints": (
-                    [{"entity_key": github_key, "entity_confidence": "linked"}]
-                    if github_key
-                    else []
-                ),
+                "raw": raw,
+                "stage0_hints": {
+                    "mentioned_projects": _json_list(row[7]),
+                    "hashtags": _json_list(row[8]),
+                    "mentions": _json_list(row[9]),
+                    "expanded_urls": [str(url) for url in expanded_urls],
+                },
+                "deterministic_hints": [
+                    {"entity_key": key, "entity_confidence": "linked"}
+                    for key in github_keys
+                ],
             }
         )
         if len(tweets) >= limit:
@@ -143,6 +183,7 @@ def build_x_stage1_prompt_payload(tweets: list[dict[str, Any]]) -> dict[str, Any
                 "url": tweet.get("url"),
                 "created_at": tweet["created_at"],
                 "deterministic_hints": tweet.get("deterministic_hints", []),
+                "stage0_hints": tweet.get("stage0_hints", {}),
             }
             for tweet in tweets
         ],
@@ -152,6 +193,8 @@ def build_x_stage1_prompt_payload(tweets: list[dict[str, Any]]) -> dict[str, Any
                     "tweet_id": "string",
                     "about_concrete_project": "boolean",
                     "closer_look": "boolean",
+                    "product_names": ["concrete product/project/tool/package names"],
+                    "product_links": ["urls explicitly attached to the product mention"],
                     "project_refs": [
                         {
                             "entity_key": "github:owner/repo|domain:example.com|npm:pkg|name:project",
@@ -181,9 +224,9 @@ def build_x_stage2_prompt_payload(
             "Do not let engagement counts drive the tier. Cite tweet ids. Generic "
             "terms without concrete repo/domain/package/product binding are none. "
             "Two credible authors citing or trying the same linked project is "
-            "potential, not high. High tier requires exceptional adoption, multiple "
-            "independent strong recommendations, or unusually strong cross-source "
-            "confirmation beyond two credible tweets."
+            "potential, not high. High tier requires three credible authors or "
+            "exceptional adoption, multiple independent strong recommendations, "
+            "or unusually strong cross-source confirmation beyond two credible tweets."
         ),
         "allowed_x_tier": ["none", "watch", "potential", "high"],
         "allowed_entity_confidence": sorted(ENTITY_CONFIDENCE_VALUES),
@@ -251,6 +294,8 @@ def validate_x_stage1_output(payload: dict[str, Any]) -> dict[str, Any]:
         "tweet_id",
         "about_concrete_project",
         "closer_look",
+        "product_names",
+        "product_links",
         "project_refs",
         "expression_strength",
         "evidence_quote",
@@ -266,6 +311,14 @@ def validate_x_stage1_output(payload: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("about_concrete_project must be boolean")
         if not isinstance(item["closer_look"], bool):
             raise ValueError("closer_look must be boolean")
+        if not isinstance(item["product_names"], list) or not all(
+            isinstance(name, str) for name in item["product_names"]
+        ):
+            raise ValueError("product_names must be a list of strings")
+        if not isinstance(item["product_links"], list) or not all(
+            isinstance(link, str) for link in item["product_links"]
+        ):
+            raise ValueError("product_links must be a list of strings")
         if not isinstance(item["project_refs"], list):
             raise ValueError("project_refs must be a list")
         if item["expression_strength"] not in EXPRESSION_STRENGTH_VALUES:
@@ -324,7 +377,11 @@ def validate_x_stage2_output(
     return payload
 
 
-def accepted_x_tier(output: dict[str, Any]) -> str:
+def accepted_x_tier(
+    output: dict[str, Any],
+    *,
+    aggregate: dict[str, Any] | None = None,
+) -> str:
     tier = output["x_tier"]
     entity_key = output["entity_key"]
     confidence = output["entity_confidence"]
@@ -339,6 +396,16 @@ def accepted_x_tier(output: dict[str, Any]) -> str:
             return "none"
     if confidence == "fuzzy_name" and tier in {"potential", "high"}:
         return "watch"
+    if tier == "high":
+        aggregate = aggregate or {}
+        credible_authors = int(aggregate.get("credible_authors") or 0)
+        distinct_authors = int(aggregate.get("distinct_authors") or 0)
+        verified_context = any(
+            "verified" in str(note).lower()
+            for note in output.get("cross_source_notes", [])
+        )
+        if credible_authors < 3 and distinct_authors < 3 and not verified_context:
+            return "potential"
     return tier
 
 
@@ -503,6 +570,21 @@ def run_x_stage1(
                         "expression_strength": item["expression_strength"],
                     }
                 )
+            if not item["project_refs"]:
+                for product_name in item["product_names"]:
+                    entity_key = normalize_name_key(product_name)
+                    if not entity_key:
+                        continue
+                    entity_id = entity_id_for_key(entity_key)
+                    mentions.setdefault(entity_id, []).append(
+                        {
+                            "tweet": tweet,
+                            "entity_key": entity_key,
+                            "entity_name": product_name,
+                            "entity_confidence": "fuzzy_name",
+                            "expression_strength": item["expression_strength"],
+                        }
+                    )
     now_dt = _parse_time(now)
     total_mentions = 0
     for entity_id, refs in mentions.items():
@@ -592,7 +674,7 @@ def candidate_entity_mentions(
                mention_acceleration, source_refs_json
         from entity_mentions
         where run_id = ? and window = '24h'
-          and (credible_authors >= 2 or mention_count >= 3 or mention_acceleration >= 2)
+          and (credible_authors >= 1 or mention_count >= 3 or mention_acceleration >= 2)
         order by credible_authors desc, mention_count desc, entity_id
         limit ?
         """,
@@ -629,7 +711,7 @@ def _insert_x_evidence(
     output: dict[str, Any],
 ) -> None:
     entity_key = output["entity_key"]
-    accepted_tier = accepted_x_tier(output)
+    accepted_tier = accepted_x_tier(output, aggregate=aggregate)
     raw_refs = ",".join(output["cited_tweet_ids"])
     raw_url_or_ref = ",".join(f"tweet:{tweet_id}" for tweet_id in output["cited_tweet_ids"])
     if not raw_url_or_ref:

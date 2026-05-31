@@ -489,11 +489,13 @@ class DecisionRunnerTest(unittest.TestCase):
                 [
                     {
                         "triage": [
-                            {
-                                "tweet_id": "t1",
-                                "about_concrete_project": True,
-                                "closer_look": True,
-                                "project_refs": [
+                                {
+                                    "tweet_id": "t1",
+                                    "about_concrete_project": True,
+                                    "closer_look": True,
+                                    "product_names": ["owner/repo"],
+                                    "product_links": ["https://github.com/owner/repo"],
+                                    "project_refs": [
                                     {
                                         "entity_key": "github:owner/repo",
                                         "entity_name": "owner/repo",
@@ -505,11 +507,13 @@ class DecisionRunnerTest(unittest.TestCase):
                                 "evidence_quote": "New repo",
                                 "reason": "Links a concrete repo.",
                             },
-                            {
-                                "tweet_id": "t2",
-                                "about_concrete_project": True,
-                                "closer_look": True,
-                                "project_refs": [
+                                {
+                                    "tweet_id": "t2",
+                                    "about_concrete_project": True,
+                                    "closer_look": True,
+                                    "product_names": ["owner/repo"],
+                                    "product_links": [],
+                                    "project_refs": [
                                     {
                                         "entity_key": "github:owner/repo",
                                         "entity_name": "owner/repo",

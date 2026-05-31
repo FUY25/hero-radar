@@ -115,6 +115,8 @@ def x_eval_cases() -> list[dict[str, Any]]:
                         "tweet_id": "t1",
                         "about_concrete_project": True,
                         "closer_look": True,
+                        "product_names": ["owner/repo"],
+                        "product_links": ["https://github.com/owner/repo"],
                         "project_refs": [
                             {
                                 "entity_key": "github:owner/repo",
@@ -136,6 +138,80 @@ def x_eval_cases() -> list[dict[str, Any]]:
                 "x_expression_strength": "recommendation",
                 "cited_tweet_ids": ["t1", "t2"],
                 "rationale": "Two credible authors cite the same repo.",
+                "cross_source_notes": [],
+            },
+        },
+        {
+            "name": "x_single_credible_fuzzy_product_watch",
+            "input": {
+                "tweets": [
+                    {
+                        "tweet_id": "t5",
+                        "author": "credible1",
+                        "text": "Clawdbot looks useful for coding-agent reviews",
+                    }
+                ],
+                "credible_authors": 1,
+            },
+            "expected": {
+                "max_tier": "watch",
+                "requires_citations": True,
+                "noise": False,
+            },
+            "fake_stage1_response": {
+                "triage": [
+                    {
+                        "tweet_id": "t5",
+                        "about_concrete_project": True,
+                        "closer_look": True,
+                        "product_names": ["Clawdbot"],
+                        "product_links": [],
+                        "project_refs": [],
+                        "expression_strength": "recommendation",
+                        "evidence_quote": "Clawdbot looks useful",
+                        "reason": "Concrete product name with recommendation.",
+                    }
+                ]
+            },
+            "fake_stage2_response": {
+                "entity_key": "name:clawdbot",
+                "x_tier": "potential",
+                "entity_confidence": "fuzzy_name",
+                "x_expression_strength": "recommendation",
+                "cited_tweet_ids": ["t5"],
+                "rationale": "One credible fuzzy product mention.",
+                "cross_source_notes": [],
+            },
+        },
+        {
+            "name": "x_two_credible_high_clamps_to_potential",
+            "input": {
+                "tweets": [
+                    {
+                        "tweet_id": "t6",
+                        "author": "credible1",
+                        "text": "New repo https://github.com/owner/repo is excellent",
+                    },
+                    {
+                        "tweet_id": "t7",
+                        "author": "credible2",
+                        "text": "Trying owner/repo and it works well",
+                    },
+                ],
+                "credible_authors": 2,
+            },
+            "expected": {
+                "max_tier": "potential",
+                "requires_citations": True,
+                "noise": False,
+            },
+            "fake_stage2_response": {
+                "entity_key": "github:owner/repo",
+                "x_tier": "high",
+                "entity_confidence": "linked",
+                "x_expression_strength": "strong_recommendation",
+                "cited_tweet_ids": ["t6", "t7"],
+                "rationale": "Two credible authors, not enough for high.",
                 "cross_source_notes": [],
             },
         },
