@@ -730,6 +730,78 @@ class XClassifierTest(unittest.TestCase):
         self.assertEqual(tier[:4], ("x_tweets", "x_social", "x_tier", "potential"))
         self.assertEqual(tier[4], "tweet:t1,tweet:t2")
 
+    def test_stage2_writes_evidence_to_canonical_output_entity_id(self) -> None:
+        from pipeline.decision.entity_resolution import entity_id_for_key
+        from pipeline.decision.x_classifier import run_x_stage2
+
+        conn = self.make_conn()
+        conn.executemany(
+            """
+            insert into entity_mentions(
+                entity_id, run_id, window, distinct_authors, credible_authors,
+                mention_count, mention_acceleration, source_refs_json
+            )
+            values (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    "entity:raw-a",
+                    "decision_run",
+                    "7d",
+                    1,
+                    1,
+                    1,
+                    1.0,
+                    json.dumps(["tweet:t1"]),
+                ),
+                (
+                    "entity:raw-b",
+                    "decision_run",
+                    "7d",
+                    1,
+                    1,
+                    1,
+                    1.0,
+                    json.dumps(["tweet:t2"]),
+                ),
+            ],
+        )
+        provider = FakeLLMProvider(
+            [
+                {
+                    "entity_key": "name:Claude Opus 4.8",
+                    "x_tier": "watch",
+                    "entity_confidence": "fuzzy_name",
+                    "x_expression_strength": "recommendation",
+                    "cited_tweet_ids": ["t1"],
+                    "rationale": "Same product.",
+                    "cross_source_notes": [],
+                },
+                {
+                    "entity_key": "name:claude-opus-4-8",
+                    "x_tier": "watch",
+                    "entity_confidence": "fuzzy_name",
+                    "x_expression_strength": "adoption_or_usage",
+                    "cited_tweet_ids": ["t2"],
+                    "rationale": "Same product.",
+                    "cross_source_notes": [],
+                },
+            ]
+        )
+
+        run_x_stage2(
+            conn,
+            run_id="decision_run",
+            provider=provider,
+            now="2026-05-31T04:00:00Z",
+            limit=5,
+        )
+
+        rows = conn.execute(
+            "select distinct entity_id from evidence_rows where source = 'x_tweets'"
+        ).fetchall()
+        self.assertEqual(rows, [(entity_id_for_key("name:claude-opus-4-8"),)])
+
     def test_stage2_downgrades_fuzzy_or_uncited_potential_to_watch_or_none(self) -> None:
         from pipeline.decision.x_classifier import accepted_x_tier, validate_x_stage2_output
 

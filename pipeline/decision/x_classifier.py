@@ -862,7 +862,7 @@ def _insert_x_evidence(
     if not raw_url_or_ref:
         raw_url_or_ref = ",".join(aggregate.get("source_refs", []))
     common = {
-        "entity_id": aggregate["entity_id"],
+        "entity_id": entity_id_for_key(entity_key),
         "canonical_entity": entity_key,
         "alias": entity_key,
         "source": "x_tweets",
