@@ -32,6 +32,29 @@ def load_env_file(path: Path = ROOT / ".env") -> None:
             os.environ[key] = value
 
 
+def load_json_secrets(path: Path = ROOT / "pipeline" / "secrets.local.json") -> None:
+    if not path.exists():
+        return
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if not isinstance(payload, dict):
+        return
+    deepseek = payload.get("deepseek")
+    if not isinstance(deepseek, dict):
+        return
+    env_map = {
+        "api_key": "DEEPSEEK_API_KEY",
+        "model": "DEEPSEEK_MODEL",
+        "base_url": "DEEPSEEK_BASE_URL",
+    }
+    for source_key, env_key in env_map.items():
+        value = deepseek.get(source_key)
+        if isinstance(value, str) and value and env_key not in os.environ:
+            os.environ[env_key] = value
+
+
 def smoke_payload() -> dict[str, Any]:
     return {
         "text": (
@@ -84,6 +107,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     load_env_file()
+    load_json_secrets()
     provider = DeepSeekProvider(model=args.model, timeout=args.timeout)
     if not provider.api_key:
         print(
