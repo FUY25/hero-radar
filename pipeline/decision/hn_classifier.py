@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import urllib.parse
 from typing import Any
 
-from pipeline.decision.entity_resolution import entity_id_for_key, normalize_github_repo
+from pipeline.decision.entity_resolution import (
+    SHARED_DOMAIN_BLOCKLIST,
+    entity_id_for_key,
+    normalize_github_repo,
+)
 from pipeline.decision.llm_cache import (
     cache_key_for,
     get_cached_response,
@@ -56,6 +61,18 @@ def _score(row: dict[str, Any]) -> float:
     return 0.0
 
 
+def _comments(row: dict[str, Any]) -> float:
+    metadata = row.get("metadata") or {}
+    for key in ("comments", "num_comments"):
+        if metadata.get(key) is None:
+            continue
+        try:
+            return float(metadata.get(key))
+        except (TypeError, ValueError):
+            continue
+    return 0.0
+
+
 def candidate_hn_rows(conn: sqlite3.Connection, limit: int) -> list[dict[str, Any]]:
     rows = conn.execute(
         """
@@ -86,6 +103,135 @@ def candidate_hn_rows(conn: sqlite3.Connection, limit: int) -> list[dict[str, An
     return candidates[: max(0, limit)]
 
 
+def _normalized_title_key(title: str) -> str:
+    lowered = title.strip().lower()
+    lowered = re.sub(r"[^a-z0-9]+", "-", lowered).strip("-")
+    lowered = re.sub(r"-+", "-", lowered)
+    return f"title:{lowered or 'untitled'}"
+
+
+def _normalized_external_url(url: str | None) -> str | None:
+    if not url:
+        return None
+    parsed = urllib.parse.urlparse(url)
+    host = (parsed.hostname or "").lower().strip(".")
+    if host.startswith("www."):
+        host = host[4:]
+    if not host:
+        return None
+    path = parsed.path.rstrip("/")
+    if host == "github.com":
+        parts = [part for part in path.strip("/").split("/") if part]
+        if len(parts) >= 2:
+            path = f"/{parts[0].lower()}/{parts[1].lower().removesuffix('.git')}"
+        else:
+            return None
+    elif host in {"npmjs.com"} and path.startswith("/package/"):
+        pass
+    elif host in SHARED_DOMAIN_BLOCKLIST:
+        return None
+    return urllib.parse.urlunparse(("https", host, path, "", "", ""))
+
+
+def hn_unit_key(row: dict[str, Any]) -> str:
+    external_url = _normalized_external_url(row.get("url"))
+    if external_url:
+        return f"url:{external_url}"
+    return _normalized_title_key(str(row.get("title") or ""))
+
+
+def _candidate_impact_item_ids(conn: sqlite3.Connection, table: str) -> set[int]:
+    try:
+        rows = conn.execute(
+            f"""
+            select e.source_item_ids_json
+            from entities e
+            join {table} c on c.entity_id = e.entity_id
+            """
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return set()
+    item_ids: set[int] = set()
+    for row in rows:
+        try:
+            parsed = json.loads(row[0] or "[]")
+        except json.JSONDecodeError:
+            parsed = []
+        if not isinstance(parsed, list):
+            continue
+        for item in parsed:
+            try:
+                item_ids.add(int(item))
+            except (TypeError, ValueError):
+                continue
+    return item_ids
+
+
+def _product_likeness(unit: dict[str, Any]) -> int:
+    title = str(unit.get("title") or "").lower()
+    url = str(unit.get("url") or "")
+    score = 0
+    if title.startswith(("show hn:", "launch hn:", "launch:")):
+        score += 20
+    if "github.com/" in url:
+        score += 12
+    if "npmjs.com/package/" in url:
+        score += 10
+    if _normalized_external_url(url):
+        score += 4
+    return score
+
+
+def candidate_hn_units(conn: sqlite3.Connection, limit: int) -> list[dict[str, Any]]:
+    rows = candidate_hn_rows(conn, limit=1_000_000)
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        grouped.setdefault(hn_unit_key(row), []).append(row)
+
+    potential_item_ids = _candidate_impact_item_ids(conn, "potential_candidates")
+    edge_item_ids = _candidate_impact_item_ids(conn, "edge_watch_candidates")
+    units: list[dict[str, Any]] = []
+    for unit_key, unit_rows in grouped.items():
+        representative = min(unit_rows, key=lambda row: int(row["item_id"]))
+        item_ids = sorted(int(row["item_id"]) for row in unit_rows)
+        candidate_impact = 0
+        if any(item_id in potential_item_ids for item_id in item_ids):
+            candidate_impact = 2
+        elif any(item_id in edge_item_ids for item_id in item_ids):
+            candidate_impact = 1
+        unit = {
+            "unit_key": unit_key,
+            "item_id": representative["item_id"],
+            "item_ids": item_ids,
+            "rows": sorted(unit_rows, key=lambda row: int(row["item_id"])),
+            "source": representative["source"],
+            "sources": sorted({str(row["source"]) for row in unit_rows}),
+            "external_id": representative["external_id"],
+            "title": representative["title"],
+            "url": representative["url"],
+            "fetched_at": representative["fetched_at"],
+            "description": representative.get("description", ""),
+            "metadata": representative.get("metadata", {}),
+            "best_score": max(_score(row) for row in unit_rows),
+            "best_comments": max(_comments(row) for row in unit_rows),
+            "row_count": len(unit_rows),
+            "candidate_impact": candidate_impact,
+        }
+        unit["product_likeness"] = _product_likeness(unit)
+        units.append(unit)
+    units.sort(
+        key=lambda unit: (
+            unit["candidate_impact"],
+            unit["product_likeness"],
+            unit["best_score"],
+            unit["row_count"],
+            unit["unit_key"],
+        ),
+        reverse=True,
+    )
+    return units[: max(0, limit)]
+
+
 def build_hn_prompt_payload(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "task": TASK,
@@ -100,12 +246,13 @@ def build_hn_prompt_payload(row: dict[str, Any]) -> dict[str, Any]:
         "allowed_link_types": sorted(LINK_TYPES),
         "item": {
             "item_id": row["item_id"],
+            "unit_key": row.get("unit_key"),
             "source": row["source"],
             "external_id": row["external_id"],
             "title": row["title"],
             "url": row["url"],
             "description": row.get("description", ""),
-            "metadata": row.get("metadata", {}),
+            "metadata": {} if row.get("unit_key") else row.get("metadata", {}),
         },
         "output_schema": {
             "item_id": "integer",
@@ -378,10 +525,11 @@ def run_hn_classifier(
         "Do not promote news articles, topic discussions, or generic terms as projects."
     )
     classified = 0
+    classified_items = 0
     aliases = 0
     proposals = 0
-    for row in candidate_hn_rows(conn, limit):
-        input_payload = build_hn_prompt_payload(row)
+    for unit in candidate_hn_units(conn, limit):
+        input_payload = build_hn_prompt_payload(unit)
         output = _complete_with_cache(
             conn,
             provider=provider,
@@ -389,22 +537,26 @@ def run_hn_classifier(
             system_prompt=system_prompt,
         )
         deterministic_links = output["deterministic_links"]
-        entity_key = deterministic_links[0]["key"] if deterministic_links else f"hn:{row['item_id']}"
-        entity_id = entity_id_for_link(entity_key)
-        _insert_evidence(
-            conn,
-            row=row,
-            output=output,
-            entity_id=entity_id,
-            run_id=run_id,
-            now=now,
-        )
+        for row in unit["rows"]:
+            entity_key = deterministic_links[0]["key"] if deterministic_links else f"hn:{row['item_id']}"
+            entity_id = entity_id_for_link(entity_key)
+            _insert_evidence(
+                conn,
+                row=row,
+                output=output,
+                entity_id=entity_id,
+                run_id=run_id,
+                now=now,
+            )
+            classified_items += 1
         before_aliases = conn.total_changes
         _insert_aliases_and_proposals(
             conn,
-            row=row,
+            row=unit,
             output=output,
-            entity_id=entity_id,
+            entity_id=entity_id_for_link(
+                deterministic_links[0]["key"] if deterministic_links else f"hn:{unit['item_id']}"
+            ),
             run_id=run_id,
             now=now,
         )
@@ -412,4 +564,9 @@ def run_hn_classifier(
         proposals += len(output["proposed_links"])
         classified += 1
     conn.commit()
-    return {"classified": classified, "aliases": aliases, "proposals": proposals}
+    return {
+        "classified": classified,
+        "classified_items": classified_items,
+        "aliases": aliases,
+        "proposals": proposals,
+    }
