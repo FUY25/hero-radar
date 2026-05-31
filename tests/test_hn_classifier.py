@@ -728,6 +728,53 @@ class HnClassifierTest(unittest.TestCase):
 
         self.assertEqual(output["deterministic_links"][0]["key"], "github:owner/repo")
 
+    def test_run_hn_classifier_discards_malformed_provider_links_without_aborting(self) -> None:
+        from pipeline.decision.hn_classifier import run_hn_classifier
+
+        conn = self.make_conn()
+        provider = FakeLLMProvider(
+            [
+                {
+                    "item_id": 1,
+                    "projectness": "project",
+                    "confidence": 0.9,
+                    "canonical_name": "Superpowers",
+                    "deterministic_links": [
+                        {
+                            "type": "domain",
+                            "key": "obra:superpowers",
+                            "url": "",
+                        }
+                    ],
+                    "proposed_links": [
+                        {
+                            "type": "domain",
+                            "key": "also-bad",
+                            "url": "",
+                            "confidence": 0.4,
+                        }
+                    ],
+                    "summary": "A project mention with malformed link fields.",
+                }
+            ]
+        )
+
+        summary = run_hn_classifier(
+            conn,
+            run_id="decision_run",
+            provider=provider,
+            limit=1,
+            now="2026-05-31T00:00:00Z",
+        )
+
+        self.assertEqual(summary["classified"], 1)
+        self.assertEqual(summary["aliases"], 0)
+        self.assertEqual(summary["proposals"], 0)
+        evidence = conn.execute(
+            "select metric_value, canonical_entity from evidence_rows"
+        ).fetchone()
+        self.assertEqual(evidence, ("project", "Superpowers"))
+
     def test_build_hn_prompt_payload_is_reviewable_without_api_call(self) -> None:
         from pipeline.decision.hn_classifier import build_hn_prompt_payload, candidate_hn_rows
 

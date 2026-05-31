@@ -362,6 +362,47 @@ def validate_hn_output(payload: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def _sanitize_provider_link(link: Any, *, proposed: bool) -> dict[str, Any] | None:
+    if not isinstance(link, dict):
+        return None
+    candidate = dict(link)
+    try:
+        _validate_link(candidate, proposed=proposed)
+        return candidate
+    except ValueError:
+        if not isinstance(candidate.get("url"), str) or not candidate.get("url"):
+            return None
+        candidate["key"] = None
+        try:
+            _validate_link(candidate, proposed=proposed)
+        except ValueError:
+            return None
+        return candidate
+
+
+def _sanitize_provider_output(payload: dict[str, Any]) -> dict[str, Any]:
+    sanitized = dict(payload)
+    if isinstance(sanitized.get("deterministic_links"), list):
+        sanitized["deterministic_links"] = [
+            link
+            for link in (
+                _sanitize_provider_link(link, proposed=False)
+                for link in sanitized["deterministic_links"]
+            )
+            if link is not None
+        ]
+    if isinstance(sanitized.get("proposed_links"), list):
+        sanitized["proposed_links"] = [
+            link
+            for link in (
+                _sanitize_provider_link(link, proposed=True)
+                for link in sanitized["proposed_links"]
+            )
+            if link is not None
+        ]
+    return sanitized
+
+
 def _insert_evidence(
     conn: sqlite3.Connection,
     *,
@@ -493,7 +534,7 @@ def _get_cached_output(
     )
     if not cached or cached["status"] != "ok":
         return None
-    response = dict(cached["response_json"])
+    response = _sanitize_provider_output(dict(cached["response_json"]))
     validate_hn_output(response)
     return response
 
@@ -534,6 +575,7 @@ def _call_provider(
         input_payload=input_payload,
         system_prompt=system_prompt,
     )
+    response = _sanitize_provider_output(response)
     validate_hn_output(response)
     return response
 
