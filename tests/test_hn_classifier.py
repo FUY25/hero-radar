@@ -265,6 +265,37 @@ class HnClassifierTest(unittest.TestCase):
 
         self.assertEqual(units[0]["url"], "https://candidate.dev")
 
+    def test_candidate_hn_units_uses_explicit_current_run_impact_before_discovery(self) -> None:
+        from pipeline.decision.hn_classifier import candidate_hn_units
+
+        conn = self.make_conn(title="Seed")
+        conn.execute("delete from items")
+        candidate = self.insert_hn_item(
+            conn,
+            source="hn_firebase",
+            external_id="candidate",
+            title="Low score candidate",
+            url="https://candidate.dev",
+            score=20,
+        )
+        self.insert_hn_item(
+            conn,
+            source="hn_firebase",
+            external_id="hot",
+            title="Very hot discovery",
+            url="https://hot.example",
+            score=500,
+        )
+
+        units = candidate_hn_units(
+            conn,
+            limit=1,
+            potential_item_ids={candidate},
+            edge_item_ids=set(),
+        )
+
+        self.assertEqual([unit["item_ids"] for unit in units], [[candidate]])
+
     def test_run_hn_classifier_classifies_deduped_unit_once_and_maps_all_items(self) -> None:
         from pipeline.decision.hn_classifier import run_hn_classifier
 
@@ -316,6 +347,59 @@ class HnClassifierTest(unittest.TestCase):
             "select raw_url_or_ref from evidence_rows order by raw_url_or_ref"
         ).fetchall()
         self.assertEqual(len(refs), 2)
+
+    def test_run_hn_classifier_spends_limit_on_explicit_candidate_impact_first(self) -> None:
+        from pipeline.decision.hn_classifier import run_hn_classifier
+
+        conn = self.make_conn(title="Seed")
+        conn.execute("delete from items")
+        candidate = self.insert_hn_item(
+            conn,
+            source="hn_firebase",
+            external_id="candidate",
+            title="Low score candidate",
+            url="https://candidate.dev",
+            score=20,
+        )
+        hot = self.insert_hn_item(
+            conn,
+            source="hn_firebase",
+            external_id="hot",
+            title="Very hot discovery",
+            url="https://hot.example",
+            score=500,
+        )
+        provider = FakeLLMProvider(
+            [
+                {
+                    "item_id": candidate,
+                    "projectness": "news_article",
+                    "confidence": 0.9,
+                    "canonical_name": "",
+                    "deterministic_links": [],
+                    "proposed_links": [],
+                    "summary": "Candidate-impact unit is classified first.",
+                }
+            ]
+        )
+
+        summary = run_hn_classifier(
+            conn,
+            run_id="decision_run",
+            provider=provider,
+            limit=1,
+            now="2026-05-31T00:00:00Z",
+            potential_item_ids={candidate},
+            edge_item_ids=set(),
+        )
+
+        self.assertEqual(summary["classified"], 1)
+        self.assertEqual(len(provider.calls), 1)
+        self.assertEqual(
+            conn.execute("select raw_url_or_ref from evidence_rows").fetchone()[0],
+            f"item:{candidate}",
+        )
+        self.assertNotEqual(candidate, hot)
 
     def test_hn_unit_cache_reuses_result_when_duplicate_rows_arrive_later(self) -> None:
         from pipeline.decision.hn_classifier import run_hn_classifier

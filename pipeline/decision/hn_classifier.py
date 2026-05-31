@@ -183,22 +183,36 @@ def _product_likeness(unit: dict[str, Any]) -> int:
     return score
 
 
-def candidate_hn_units(conn: sqlite3.Connection, limit: int) -> list[dict[str, Any]]:
+def candidate_hn_units(
+    conn: sqlite3.Connection,
+    limit: int,
+    *,
+    potential_item_ids: set[int] | None = None,
+    edge_item_ids: set[int] | None = None,
+) -> list[dict[str, Any]]:
     rows = candidate_hn_rows(conn, limit=1_000_000)
     grouped: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
         grouped.setdefault(hn_unit_key(row), []).append(row)
 
-    potential_item_ids = _candidate_impact_item_ids(conn, "potential_candidates")
-    edge_item_ids = _candidate_impact_item_ids(conn, "edge_watch_candidates")
+    potential_ids = (
+        {int(item_id) for item_id in potential_item_ids}
+        if potential_item_ids is not None
+        else _candidate_impact_item_ids(conn, "potential_candidates")
+    )
+    edge_ids = (
+        {int(item_id) for item_id in edge_item_ids}
+        if edge_item_ids is not None
+        else _candidate_impact_item_ids(conn, "edge_watch_candidates")
+    )
     units: list[dict[str, Any]] = []
     for unit_key, unit_rows in grouped.items():
         representative = min(unit_rows, key=lambda row: int(row["item_id"]))
         item_ids = sorted(int(row["item_id"]) for row in unit_rows)
         candidate_impact = 0
-        if any(item_id in potential_item_ids for item_id in item_ids):
+        if any(item_id in potential_ids for item_id in item_ids):
             candidate_impact = 2
-        elif any(item_id in edge_item_ids for item_id in item_ids):
+        elif any(item_id in edge_ids for item_id in item_ids):
             candidate_impact = 1
         unit = {
             "unit_key": unit_key,
@@ -570,6 +584,8 @@ def run_hn_classifier(
     limit: int,
     now: str,
     llm_concurrency: int = 1,
+    potential_item_ids: set[int] | None = None,
+    edge_item_ids: set[int] | None = None,
 ) -> dict[str, Any]:
     if llm_concurrency <= 0:
         raise ValueError("llm_concurrency must be positive")
@@ -577,7 +593,12 @@ def run_hn_classifier(
         "You are a bounded Hacker News source classifier. Return only JSON. "
         "Do not promote news articles, topic discussions, or generic terms as projects."
     )
-    units = candidate_hn_units(conn, limit)
+    units = candidate_hn_units(
+        conn,
+        limit,
+        potential_item_ids=potential_item_ids,
+        edge_item_ids=edge_item_ids,
+    )
     outputs_by_unit_key: dict[str, dict[str, Any]] = {}
     uncached_jobs: list[dict[str, Any]] = []
     cache_hits = 0

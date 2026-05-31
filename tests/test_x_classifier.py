@@ -362,6 +362,71 @@ class XClassifierTest(unittest.TestCase):
         ).fetchone()[0]
         self.assertEqual(entity_id, entity_id_for_key("name:clawdbot"))
 
+    def test_stage1_merges_name_only_mentions_to_linked_project_in_same_batch(self) -> None:
+        from pipeline.decision.entity_resolution import entity_id_for_key
+        from pipeline.decision.x_classifier import run_x_stage1
+
+        conn = self.make_conn()
+        provider = FakeLLMProvider(
+            [
+                {
+                    "triage": [
+                        {
+                            "tweet_id": "t1",
+                            "about_concrete_project": True,
+                            "closer_look": True,
+                            "product_names": ["Clawdbot"],
+                            "product_links": ["https://github.com/owner/repo"],
+                            "project_refs": [
+                                {
+                                    "entity_key": "github:owner/repo",
+                                    "entity_name": "Clawdbot",
+                                    "entity_confidence": "linked",
+                                    "confidence": 0.95,
+                                }
+                            ],
+                            "expression_strength": "recommendation",
+                            "evidence_quote": "New repo",
+                            "reason": "Links Clawdbot to the repo.",
+                        },
+                        {
+                            "tweet_id": "t2",
+                            "about_concrete_project": True,
+                            "closer_look": True,
+                            "product_names": ["Clawdbot"],
+                            "product_links": [],
+                            "project_refs": [],
+                            "expression_strength": "adoption_or_usage",
+                            "evidence_quote": "Trying Clawdbot",
+                            "reason": "Name-only mention of the same product.",
+                        },
+                    ]
+                }
+            ]
+        )
+
+        run_x_stage1(
+            conn,
+            run_id="decision_run",
+            provider=provider,
+            credible_handles={"credible1", "credible2"},
+            now="2026-05-31T04:00:00Z",
+            limit=10,
+            batch_size=10,
+        )
+
+        rows = conn.execute(
+            """
+            select entity_id, mention_count, source_refs_json
+            from entity_mentions
+            where window = '24h'
+            """
+        ).fetchall()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][0], entity_id_for_key("github:owner/repo"))
+        self.assertEqual(rows[0][1], 2)
+        self.assertEqual(json.loads(rows[0][2]), ["tweet:t1", "tweet:t2"])
+
     def test_stage1_reuses_per_tweet_cache_when_batch_shape_changes(self) -> None:
         from pipeline.decision.x_classifier import run_x_stage1
 

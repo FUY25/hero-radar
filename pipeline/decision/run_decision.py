@@ -169,6 +169,23 @@ def referenced_entity_ids(result) -> set[str]:
     return entity_ids
 
 
+def candidate_impact_item_ids(
+    result,
+    resolution: ResolutionResult,
+) -> tuple[set[int], set[int]]:
+    source_item_ids_by_entity = {
+        entity.entity_id: {ref.item_id for ref in entity.source_refs}
+        for entity in resolution.entities
+    }
+    potential_item_ids: set[int] = set()
+    for candidate in result.potential_candidates:
+        potential_item_ids.update(source_item_ids_by_entity.get(candidate.entity_id, set()))
+    edge_item_ids: set[int] = set()
+    for candidate in result.edge_watch_candidates:
+        edge_item_ids.update(source_item_ids_by_entity.get(candidate.entity_id, set()))
+    return potential_item_ids, edge_item_ids
+
+
 def write_entities(
     conn: sqlite3.Connection,
     resolution: ResolutionResult,
@@ -520,6 +537,7 @@ def run_decision(
         if hn_llm_provider is not None and hn_classifier_limit > 0:
             from pipeline.decision.hn_classifier import run_hn_classifier
 
+            potential_item_ids, edge_item_ids = candidate_impact_item_ids(pass1, resolution)
             hn_summary = run_hn_classifier(
                 conn,
                 run_id=run_id,
@@ -527,6 +545,8 @@ def run_decision(
                 limit=hn_classifier_limit,
                 now=now,
                 llm_concurrency=llm_concurrency,
+                potential_item_ids=potential_item_ids,
+                edge_item_ids=edge_item_ids,
             )
 
         x_stage1_summary: dict[str, Any] = {"mentions": 0}

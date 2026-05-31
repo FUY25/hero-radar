@@ -641,6 +641,20 @@ def run_x_stage1(
 
     for item in stage1_items:
         triaged += 1
+
+    linked_refs_by_name: dict[str, dict[str, Any]] = {}
+    for item in stage1_items:
+        if not item["closer_look"]:
+            continue
+        for ref in item["project_refs"]:
+            if ref["entity_confidence"] not in {"linked", "exact_handle"}:
+                continue
+            for name in [*item["product_names"], ref["entity_name"]]:
+                name_key = normalize_name_key(name)
+                if name_key and name_key not in linked_refs_by_name:
+                    linked_refs_by_name[name_key] = ref
+
+    for item in stage1_items:
         if not item["closer_look"]:
             continue
         tweet = tweet_by_id.get(item["tweet_id"])
@@ -662,13 +676,18 @@ def run_x_stage1(
                 entity_key = normalize_name_key(product_name)
                 if not entity_key:
                     continue
+                ref = linked_refs_by_name.get(entity_key)
+                if ref is not None:
+                    entity_key = ref["entity_key"]
                 entity_id = entity_id_for_key(entity_key)
                 mentions.setdefault(entity_id, []).append(
                     {
                         "tweet": tweet,
                         "entity_key": entity_key,
-                        "entity_name": product_name,
-                        "entity_confidence": "fuzzy_name",
+                        "entity_name": ref["entity_name"] if ref is not None else product_name,
+                        "entity_confidence": (
+                            ref["entity_confidence"] if ref is not None else "fuzzy_name"
+                        ),
                         "expression_strength": item["expression_strength"],
                     }
                 )

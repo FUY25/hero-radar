@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from argparse import Namespace
 from pathlib import Path
+from unittest.mock import patch
 
 from pipeline.decision.llm_provider import FakeLLMProvider
 from pipeline.decision.run_decision import run_decision
@@ -480,6 +481,30 @@ class DecisionRunnerTest(unittest.TestCase):
             ).fetchone()
             conn.close()
             self.assertEqual(noise, ("news_article", "noise"))
+
+    def test_runner_passes_current_pass_candidate_impacts_to_hn_classifier(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "hero.sqlite"
+            export_path = Path(tmpdir) / "candidates.json"
+            conn = sqlite3.connect(db_path)
+            seed_hn_source_tables(conn)
+            init_decision_db(conn)
+            conn.close()
+
+            with patch("pipeline.decision.hn_classifier.run_hn_classifier") as classifier:
+                classifier.return_value = {"classified": 0}
+                run_decision(
+                    db_path=db_path,
+                    run_id="decision-run-hn-impact",
+                    export_json_path=export_path,
+                    now="2026-05-31T00:00:00Z",
+                    hn_llm_provider=object(),
+                    hn_classifier_limit=1,
+                )
+
+            kwargs = classifier.call_args.kwargs
+            self.assertEqual(kwargs["potential_item_ids"], {1})
+            self.assertEqual(kwargs["edge_item_ids"], set())
 
     def test_runner_invokes_x_classifier_before_final_rules(self):
         with tempfile.TemporaryDirectory() as tmpdir:
