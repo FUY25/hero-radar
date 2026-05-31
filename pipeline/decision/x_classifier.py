@@ -766,14 +766,11 @@ def candidate_entity_mentions(
         select entity_id, window, distinct_authors, credible_authors, mention_count,
                mention_acceleration, source_refs_json
         from entity_mentions
-        where run_id = ? and window = '24h'
-          and (credible_authors >= 1 or mention_count >= 3 or mention_acceleration >= 2)
-        order by credible_authors desc, mention_count desc, entity_id
-        limit ?
+        where run_id = ? and window in ('7d', '24h')
         """,
-        (run_id, limit),
+        (run_id,),
     ).fetchall()
-    return [
+    mentions = [
         {
             "entity_id": row[0],
             "window": row[1],
@@ -785,6 +782,27 @@ def candidate_entity_mentions(
         }
         for row in rows
     ]
+    by_entity: dict[str, dict[str, Any]] = {}
+    for mention in mentions:
+        existing = by_entity.get(mention["entity_id"])
+        if existing is None or (
+            mention["window"] == "7d" and existing["window"] != "7d"
+        ):
+            by_entity[mention["entity_id"]] = mention
+
+    selected = list(by_entity.values())
+    selected.sort(
+        key=lambda mention: (
+            int(mention["credible_authors"]),
+            int(mention["mention_count"]),
+            int(mention["distinct_authors"]),
+            float(mention.get("mention_acceleration") or 0),
+            1 if mention["window"] == "24h" else 0,
+            mention["entity_id"],
+        ),
+        reverse=True,
+    )
+    return selected[: max(0, limit)]
 
 
 def _signal_label(tier: str) -> str:

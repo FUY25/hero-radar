@@ -475,6 +475,71 @@ class XClassifierTest(unittest.TestCase):
 
         self.assertEqual([mention["entity_id"] for mention in mentions], ["entity:watch"])
 
+    def test_stage2_gate_includes_single_credible_7d_project_candidate(self) -> None:
+        from pipeline.decision.x_classifier import candidate_entity_mentions
+
+        conn = self.make_conn()
+        conn.execute(
+            """
+            insert into entity_mentions(
+                entity_id, run_id, window, distinct_authors, credible_authors,
+                mention_count, mention_acceleration, source_refs_json
+            )
+            values (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "entity:seven-day",
+                "decision_run",
+                "7d",
+                1,
+                1,
+                1,
+                1.0,
+                json.dumps(["tweet:t1"]),
+            ),
+        )
+
+        mentions = candidate_entity_mentions(conn, run_id="decision_run", limit=5)
+
+        self.assertEqual(
+            [(mention["entity_id"], mention["window"]) for mention in mentions],
+            [("entity:seven-day", "7d")],
+        )
+
+    def test_stage2_gate_prefers_7d_aggregate_over_duplicate_24h_window(self) -> None:
+        from pipeline.decision.x_classifier import candidate_entity_mentions
+
+        conn = self.make_conn()
+        for window, refs in (
+            ("24h", ["tweet:t1"]),
+            ("7d", ["tweet:t1", "tweet:t2"]),
+        ):
+            conn.execute(
+                """
+                insert into entity_mentions(
+                    entity_id, run_id, window, distinct_authors, credible_authors,
+                    mention_count, mention_acceleration, source_refs_json
+                )
+                values (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "entity:duplicate",
+                    "decision_run",
+                    window,
+                    len(refs),
+                    len(refs),
+                    len(refs),
+                    float(len(refs)),
+                    json.dumps(refs),
+                ),
+            )
+
+        mentions = candidate_entity_mentions(conn, run_id="decision_run", limit=5)
+
+        self.assertEqual(len(mentions), 1)
+        self.assertEqual(mentions[0]["window"], "7d")
+        self.assertEqual(mentions[0]["source_refs"], ["tweet:t1", "tweet:t2"])
+
     def test_stage2_writes_x_social_evidence(self) -> None:
         from pipeline.decision.x_classifier import run_x_stage2
 
