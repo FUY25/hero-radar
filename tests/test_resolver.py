@@ -121,6 +121,38 @@ class ResolverTest(unittest.TestCase):
         self.assertEqual(result["resolved_links"][0]["key"], "github:owner/clawdbot")
         self.assertEqual(search_client.calls, [])
 
+    def test_resolver_filters_internal_rows_to_exact_name_repo_match(self) -> None:
+        from pipeline.decision.resolver import resolve_candidate_links
+
+        conn = self.make_conn()
+        self.insert_item(
+            conn,
+            name="firecrawl/firecrawl",
+            url="https://github.com/firecrawl/firecrawl",
+        )
+        self.insert_item(
+            conn,
+            name="firecrawl/pdf-inspector",
+            url="https://github.com/firecrawl/pdf-inspector",
+        )
+        self.insert_item(
+            conn,
+            name="open-deep-research Firecrawl integration",
+            url="https://github.com/nickscamara/open-deep-research",
+        )
+
+        result = resolve_candidate_links(
+            conn,
+            "name:firecrawl",
+            search_client=None,
+            max_searches=0,
+        )
+
+        self.assertEqual(
+            [link["key"] for link in result["resolved_links"]],
+            ["github:firecrawl/firecrawl"],
+        )
+
     def test_resolver_is_bounded_and_cached_for_unresolved_name(self) -> None:
         from pipeline.decision.resolver import resolve_candidate_links
 
@@ -291,6 +323,85 @@ class ResolverTest(unittest.TestCase):
             alias,
             ("entity:clawdbot", "github:owner/clawdbot", "deterministic", "resolver", 1),
         )
+
+    def test_enrich_classifier_candidates_replaces_stale_resolver_aliases_for_name(self) -> None:
+        from pipeline.decision.resolver import enrich_classifier_candidates
+
+        conn = self.make_conn()
+        conn.execute(
+            """
+            insert into evidence_rows(
+                entity_id, canonical_entity, alias, source, event_at,
+                relative_to_reference, metric_name, metric_value, family, rule_id,
+                rule_version, signal_label, historical_safety, note, raw_url_or_ref,
+                run_id
+            )
+            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "entity:firecrawl",
+                "name:firecrawl",
+                "name:firecrawl",
+                "x_tweets",
+                "2026-05-31T00:00:00Z",
+                None,
+                "x_tier",
+                "watch",
+                "x_social",
+                "x_social_x_tier",
+                "x-stage2-v2",
+                "watch",
+                "llm_source_classifier",
+                "accepted watch candidate",
+                "tweet:t1",
+                "run-1",
+            ),
+        )
+        conn.execute(
+            """
+            insert into alias_links(entity_id, source, external_id, alias, confidence, origin, approved, created_at)
+            values (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "entity:firecrawl",
+                "resolver",
+                "name:firecrawl",
+                "github:nickscamara/open-deep-research",
+                "deterministic",
+                "resolver",
+                1,
+                "2026-05-30T00:00:00Z",
+            ),
+        )
+        conn.commit()
+        search_client = FakeSearchClient(
+            [
+                {
+                    "type": "github",
+                    "key": "github:firecrawl/firecrawl",
+                    "url": "https://github.com/firecrawl/firecrawl",
+                    "confidence": 0.9,
+                }
+            ]
+        )
+
+        enrich_classifier_candidates(
+            conn,
+            run_id="run-1",
+            search_client=search_client,
+            max_searches_per_candidate=1,
+            now="2026-05-31T00:00:00Z",
+        )
+
+        aliases = conn.execute(
+            """
+            select alias from alias_links
+            where entity_id = ? and external_id = ? and origin = ?
+            order by alias
+            """,
+            ("entity:firecrawl", "name:firecrawl", "resolver"),
+        ).fetchall()
+        self.assertEqual(aliases, [("github:firecrawl/firecrawl",)])
 
     def test_enrich_classifier_candidates_counts_agentic_research_aliases(self) -> None:
         from pipeline.decision.resolver import enrich_classifier_candidates

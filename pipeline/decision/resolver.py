@@ -151,6 +151,34 @@ def _links_from_internal_rows(
     return links
 
 
+def _slug_for_name_key(entity_key: str) -> str:
+    return _entity_label(entity_key).lower().replace(" ", "-")
+
+
+def _is_exact_name_link(entity_key: str, link: dict[str, Any]) -> bool:
+    if not entity_key.startswith("name:"):
+        return True
+    slug = _slug_for_name_key(entity_key)
+    key = str(link.get("key") or "").lower()
+    if key.startswith("github:"):
+        repo = key.split(":", 1)[1].split("/", 1)[-1]
+        return repo == slug
+    if key.startswith("domain:"):
+        host = key.split(":", 1)[1]
+        return host.split(".", 1)[0] == slug
+    if key.startswith("npm:"):
+        package = key.split(":", 1)[1].split("/")[-1]
+        return package == slug
+    return False
+
+
+def _select_internal_links(entity_key: str, links: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not entity_key.startswith("name:") or len(links) <= 1:
+        return links
+    exact = [link for link in links if _is_exact_name_link(entity_key, link)]
+    return exact
+
+
 def _normalize_search_result(result: dict[str, Any]) -> dict[str, Any] | None:
     link_type = str(result.get("type") or "").strip()
     key = str(result.get("key") or "").strip()
@@ -205,7 +233,7 @@ def resolve_candidate_links(
     research_context: dict[str, Any] | None = None,
     max_research_rounds: int = 0,
 ) -> dict[str, Any]:
-    internal_links = _links_from_internal_rows(conn, entity_key)
+    internal_links = _select_internal_links(entity_key, _links_from_internal_rows(conn, entity_key))
     if internal_links:
         return {
             "entity_key": entity_key,
@@ -276,7 +304,11 @@ def _ensure_entity(
             aliases_json, source_item_ids_json
         )
         values (?, ?, ?, ?, ?, ?, ?)
-        on conflict(entity_id) do nothing
+        on conflict(entity_id) do update set
+            canonical_entity = excluded.canonical_entity,
+            canonical_key = excluded.canonical_key,
+            key_type = excluded.key_type,
+            aliases_json = excluded.aliases_json
         """,
         (
             entity_id,
@@ -301,6 +333,23 @@ def _write_resolved_links(
 ) -> tuple[int, int]:
     aliases = 0
     proposals = 0
+    selected_aliases = {
+        str(link.get("key") or "")
+        for link in links
+        if str(link.get("key") or "") and float(link.get("confidence") or 0) >= 0.8
+    }
+    if entity_key.startswith("name:") and selected_aliases:
+        placeholders = ",".join("?" for _ in selected_aliases)
+        conn.execute(
+            f"""
+            delete from alias_links
+            where entity_id = ?
+              and external_id = ?
+              and origin = ?
+              and alias not in ({placeholders})
+            """,
+            (entity_id, entity_key, RESOLVER_SOURCE, *sorted(selected_aliases)),
+        )
     for link in links:
         key = str(link.get("key") or "")
         confidence = float(link.get("confidence") or 0)

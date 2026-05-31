@@ -43,6 +43,16 @@ class FakeNpmClient:
         return {"downloads": downloads_by_period[period], "package": package}
 
 
+class FakeSearchClient:
+    def __init__(self, results):
+        self.results = results
+        self.calls = []
+
+    def search(self, query, *, limit):
+        self.calls.append({"query": query, "limit": limit})
+        return self.results[:limit]
+
+
 def seed_source_tables(conn: sqlite3.Connection) -> None:
     conn.executescript(
         """
@@ -646,6 +656,49 @@ class DecisionRunnerTest(unittest.TestCase):
 
         self.assertEqual(reconciled, {new_entity_id: new_entity_id})
 
+    def test_reconcile_entity_ids_does_not_reuse_stale_structured_alias(self):
+        from pipeline.decision.entity_resolution import Entity, ResolutionResult, entity_id_for_key
+        from pipeline.decision.run_decision import reconcile_entity_ids
+
+        conn = sqlite3.connect(":memory:")
+        init_decision_db(conn)
+        stale_name_entity_id = entity_id_for_key("name:firecrawl")
+        repo_key = "github:nickscamara/open-deep-research"
+        conn.execute(
+            """
+            insert into alias_links(entity_id, source, external_id, alias, confidence, origin, approved, created_at)
+            values (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                stale_name_entity_id,
+                "decision",
+                repo_key,
+                repo_key,
+                "deterministic",
+                "stage_a",
+                1,
+                "2026-05-30T00:00:00Z",
+            ),
+        )
+        repo_entity_id = entity_id_for_key(repo_key)
+        resolution = ResolutionResult(
+            entities=[
+                Entity(
+                    entity_id=repo_entity_id,
+                    canonical_entity="nickscamara/open-deep-research",
+                    canonical_key=repo_key,
+                    key_type="github",
+                    aliases=("nickscamara/open-deep-research",),
+                    source_refs=(),
+                )
+            ],
+            item_to_entity={1: repo_entity_id},
+        )
+
+        reconciled = reconcile_entity_ids(conn, resolution)
+
+        self.assertEqual(reconciled, {repo_entity_id: repo_entity_id})
+
     def test_runner_does_not_reset_completed_backfill_jobs_to_pending(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "hero.sqlite"
@@ -819,6 +872,162 @@ class DecisionRunnerTest(unittest.TestCase):
             ).fetchone()
             conn.close()
             self.assertEqual(resolver_alias, ("github:owner/repo",))
+
+    def test_runner_promotes_name_only_x_candidate_with_resolver_link(self):
+        from pipeline.decision.candidate_context import context_bundle_for_entity
+        from pipeline.decision.entity_resolution import entity_id_for_key
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "hero.sqlite"
+            export_path = Path(tmpdir) / "candidates.json"
+            conn = sqlite3.connect(db_path)
+            conn.executescript(
+                """
+                create table snapshots (
+                    id integer primary key autoincrement,
+                    run_id text not null,
+                    source text not null,
+                    fetched_at text not null,
+                    status text not null,
+                    item_count integer not null,
+                    error text
+                );
+                create table items (
+                    id integer primary key autoincrement,
+                    run_id text not null,
+                    snapshot_id integer not null,
+                    source text not null,
+                    external_id text not null,
+                    name text not null,
+                    url text,
+                    fetched_at text not null,
+                    heat real,
+                    velocity real,
+                    acceleration real,
+                    source_rank integer,
+                    description text,
+                    metadata_json text not null,
+                    raw_json text not null
+                );
+                create table x_tweets_store (
+                    tweet_id text primary key,
+                    author_username text not null,
+                    text text not null,
+                    url text,
+                    created_at text not null,
+                    imported_at text not null,
+                    raw_json text not null
+                );
+                """
+            )
+            conn.execute(
+                "insert into snapshots(run_id, source, fetched_at, status, item_count, error) values (?, ?, ?, ?, ?, ?)",
+                ("source-run-x", "x_tweets", "2026-05-31T00:00:00Z", "ok", 1, None),
+            )
+            snapshot_id = conn.execute("select id from snapshots").fetchone()[0]
+            conn.execute(
+                """
+                insert into items(run_id, snapshot_id, source, external_id, name, url, fetched_at, description, metadata_json, raw_json)
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "source-run-x",
+                    snapshot_id,
+                    "x_tweets",
+                    "t-fire",
+                    "Firecrawl launched /monitor for agents",
+                    "https://x.com/credible1/status/t-fire",
+                    "2026-05-31T01:00:00Z",
+                    "Firecrawl launched /monitor for agents",
+                    json.dumps({"author": "credible1", "created_at": "2026-05-31T01:00:00Z"}),
+                    "{}",
+                ),
+            )
+            conn.execute(
+                """
+                insert into x_tweets_store(tweet_id, author_username, text, url, created_at, imported_at, raw_json)
+                values (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "t-fire",
+                    "credible1",
+                    "Firecrawl launched /monitor for agents.",
+                    "https://x.com/credible1/status/t-fire",
+                    "2026-05-31T01:00:00Z",
+                    "2026-05-31T02:00:00Z",
+                    "{}",
+                ),
+            )
+            init_decision_db(conn)
+            conn.close()
+            provider = FakeLLMProvider(
+                [
+                    {
+                        "triage": [
+                            {
+                                "tweet_id": "t-fire",
+                                "about_concrete_project": True,
+                                "closer_look": True,
+                                "product_names": ["Firecrawl"],
+                                "product_links": [],
+                                "project_refs": [
+                                    {
+                                        "entity_key": "name:firecrawl",
+                                        "entity_name": "Firecrawl",
+                                        "entity_confidence": "fuzzy_name",
+                                        "confidence": 0.8,
+                                    }
+                                ],
+                                "expression_strength": "adoption_or_usage",
+                                "evidence_quote": "Firecrawl launched /monitor",
+                                "reason": "Concrete product feature launch.",
+                            }
+                        ]
+                    },
+                    {
+                        "entity_key": "name:firecrawl",
+                        "x_tier": "potential",
+                        "entity_confidence": "fuzzy_name",
+                        "x_expression_strength": "adoption_or_usage",
+                        "cited_tweet_ids": ["t-fire"],
+                        "rationale": "One credible author describes using Firecrawl /monitor.",
+                        "cross_source_notes": [],
+                    },
+                ]
+            )
+            search_client = FakeSearchClient(
+                [
+                    {
+                        "type": "domain",
+                        "key": "domain:firecrawl.dev",
+                        "url": "https://firecrawl.dev",
+                        "confidence": 0.9,
+                    }
+                ]
+            )
+
+            summary = run_decision(
+                db_path=db_path,
+                run_id="decision-run-x-name",
+                export_json_path=export_path,
+                now="2026-05-31T04:00:00Z",
+                x_llm_provider=provider,
+                x_classifier_limit=10,
+                x_credible_handles={"credible1"},
+                resolver_search_client=search_client,
+                resolver_search_limit=1,
+            )
+
+            self.assertEqual(summary["edge_watch_candidates"], 1)
+            entity_id = entity_id_for_key("name:firecrawl")
+            payload = json.loads(export_path.read_text())
+            self.assertEqual(payload["edge_watch"][0]["entity_id"], entity_id)
+            self.assertEqual(payload["edge_watch"][0]["canonical_key"], "name:firecrawl")
+            conn = sqlite3.connect(db_path)
+            bundle = context_bundle_for_entity(conn, entity_id=entity_id, run_id="decision-run-x-name")
+            conn.close()
+            self.assertEqual(bundle["canonical_link"], "https://firecrawl.dev")
+            self.assertEqual(bundle["binding_confidence"], "resolved")
 
     def test_runner_invokes_npm_backfill_before_final_rules(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -30,7 +30,7 @@ def context_bundle_for_entity(
     entity = _entity_row(conn, entity_id)
     evidence = _evidence_rows(conn, entity_id, run_id)
     canonical_key = str(entity.get("canonical_key") or "")
-    alias_key = _best_alias_key(conn, entity_id)
+    alias_key = _best_alias_key(conn, entity_id, canonical_key)
 
     canonical_link = key_to_url(canonical_key)
     binding = "verified" if canonical_link else "none"
@@ -132,7 +132,11 @@ def _evidence_rows(
     ]
 
 
-def _best_alias_key(conn: sqlite3.Connection, entity_id: str) -> str | None:
+def _best_alias_key(
+    conn: sqlite3.Connection,
+    entity_id: str,
+    canonical_key: str | None = None,
+) -> str | None:
     rows = conn.execute(
         """
         select alias
@@ -140,14 +144,16 @@ def _best_alias_key(conn: sqlite3.Connection, entity_id: str) -> str | None:
         where entity_id = ? and approved = 1
         order by
             case
-                when alias like 'github:%' then 0
-                when alias like 'domain:%' then 1
-                when alias like 'npm:%' then 2
-                else 3
+                when origin = 'resolver' and external_id = ? then 0
+                when origin = 'resolver' then 1
+                when alias like 'github:%' then 2
+                when alias like 'domain:%' then 3
+                when alias like 'npm:%' then 4
+                else 5
             end,
             id
         """,
-        (entity_id,),
+        (entity_id, canonical_key or ""),
     ).fetchall()
     for row in rows:
         alias = str(row[0] or "")

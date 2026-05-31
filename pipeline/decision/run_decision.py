@@ -10,7 +10,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from pipeline.decision.entity_resolution import Entity, ResolutionResult, resolve_entities
+from pipeline.decision.entity_resolution import Entity, ResolutionResult, normalize_name_key, resolve_entities
 from pipeline.decision.rules import (
     BackfillJob,
     EdgeWatchCandidate,
@@ -40,7 +40,6 @@ RUN_SCOPED_TABLES = [
     "evidence_rows",
 ]
 CLASSIFIER_EVIDENCE_SOURCES = {"hn_llm_classifier", "x_tweets", "npm_registry"}
-STRUCTURED_ENTITY_KEY_PREFIXES = ("github:", "domain:", "npm:")
 
 
 def read_latest_items(conn: sqlite3.Connection) -> list[dict[str, Any]]:
@@ -125,29 +124,8 @@ def reconcile_entity_ids(
     conn: sqlite3.Connection,
     resolution: ResolutionResult,
 ) -> dict[str, str]:
-    reconciled: dict[str, str] = {}
-    for entity in resolution.entities:
-        lookup_values = {
-            entity.canonical_key,
-            *(alias for alias in entity.aliases if str(alias).startswith(STRUCTURED_ENTITY_KEY_PREFIXES)),
-        }
-        placeholders = ",".join("?" for _ in lookup_values)
-        prior_id: str | None = None
-        if lookup_values:
-            row = conn.execute(
-                f"""
-                select entity_id
-                from alias_links
-                where alias in ({placeholders})
-                order by approved desc, id asc
-                limit 1
-                """,
-                tuple(sorted(lookup_values)),
-            ).fetchone()
-            if row:
-                prior_id = row[0]
-        reconciled[entity.entity_id] = prior_id or entity.entity_id
-    return reconciled
+    _ = conn
+    return {entity.entity_id: entity.entity_id for entity in resolution.entities}
 
 
 def remap_resolution_ids(
@@ -402,6 +380,73 @@ def read_classifier_evidence(conn: sqlite3.Connection, run_id: str) -> list[dict
     ]
 
 
+def _key_label(key: str) -> str:
+    if ":" not in key:
+        return key
+    return key.split(":", 1)[1].replace("-", " ").strip()
+
+
+def _classifier_entity_from_evidence(
+    conn: sqlite3.Connection,
+    entity_id: str,
+    rows: list[dict[str, Any]],
+) -> Entity | None:
+    row = conn.execute(
+        """
+        select canonical_entity, canonical_key, key_type, aliases_json, source_item_ids_json
+        from entities
+        where entity_id = ?
+        """,
+        (entity_id,),
+    ).fetchone()
+    if row:
+        return Entity(
+            entity_id=entity_id,
+            canonical_entity=str(row[0] or row[1] or entity_id),
+            canonical_key=str(row[1] or entity_id),
+            key_type=str(row[2] or "name"),
+            aliases=tuple(safe_json(row[3], default=[])),
+            source_refs=(),
+        )
+
+    first = rows[0] if rows else {}
+    raw_key = str(first.get("canonical_entity") or first.get("alias") or "")
+    canonical_key = raw_key if ":" in raw_key else normalize_name_key(raw_key)
+    if not canonical_key:
+        return None
+    return Entity(
+        entity_id=entity_id,
+        canonical_entity=_key_label(canonical_key),
+        canonical_key=canonical_key,
+        key_type=canonical_key.split(":", 1)[0],
+        aliases=(canonical_key,),
+        source_refs=(),
+    )
+
+
+def add_classifier_entities_to_resolution(
+    conn: sqlite3.Connection,
+    resolution: ResolutionResult,
+    classifier_evidence: list[dict[str, Any]],
+) -> ResolutionResult:
+    existing = {entity.entity_id for entity in resolution.entities}
+    by_entity: dict[str, list[dict[str, Any]]] = {}
+    for row in classifier_evidence:
+        entity_id = str(row.get("entity_id") or "")
+        if entity_id and entity_id not in existing:
+            by_entity.setdefault(entity_id, []).append(row)
+    if not by_entity:
+        return resolution
+
+    entities = list(resolution.entities)
+    for entity_id in sorted(by_entity):
+        entity = _classifier_entity_from_evidence(conn, entity_id, by_entity[entity_id])
+        if entity is not None:
+            entities.append(entity)
+    entities.sort(key=lambda entity: entity.entity_id)
+    return ResolutionResult(entities=entities, item_to_entity=dict(resolution.item_to_entity))
+
+
 def export_candidates(conn: sqlite3.Connection, run_id: str, path: Path) -> None:
     candidates = [
         {
@@ -622,6 +667,7 @@ def run_decision(
             )
 
         classifier_evidence = read_classifier_evidence(conn, run_id)
+        resolution = add_classifier_entities_to_resolution(conn, resolution, classifier_evidence)
         final_result = (
             evaluate_entities(
                 rows,

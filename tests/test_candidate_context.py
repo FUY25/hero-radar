@@ -204,6 +204,53 @@ class CandidateContextTest(unittest.TestCase):
         self.assertEqual(bundle["canonical_link"], "https://github.com/owner/clawdbot")
         self.assertEqual(bundle["binding_confidence"], "resolved")
 
+    def test_context_prefers_resolver_alias_over_stale_stage_a_alias_for_name(self):
+        from pipeline.decision.candidate_context import context_bundle_for_entity
+
+        conn = sqlite3.connect(":memory:")
+        init_decision_db(conn)
+        conn.execute(
+            """
+            insert into entities(entity_id, canonical_entity, canonical_key, key_type, first_seen, aliases_json, source_item_ids_json)
+            values (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "entity:firecrawl",
+                "firecrawl",
+                "name:firecrawl",
+                "name",
+                "2026-05-31T00:00:00Z",
+                "[]",
+                "[]",
+            ),
+        )
+        rows = [
+            ("github:nickscamara/open-deep-research", "stage_a", "github:nickscamara/open-deep-research"),
+            ("github:firecrawl/firecrawl", "resolver", "name:firecrawl"),
+        ]
+        for alias, origin, external_id in rows:
+            conn.execute(
+                """
+                insert into alias_links(entity_id, source, external_id, alias, confidence, origin, approved, created_at)
+                values (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "entity:firecrawl",
+                    "decision" if origin == "stage_a" else "resolver",
+                    external_id,
+                    alias,
+                    "deterministic",
+                    origin,
+                    1,
+                    "2026-05-31T00:00:00Z",
+                ),
+            )
+
+        bundle = context_bundle_for_entity(conn, entity_id="entity:firecrawl", run_id="run-1")
+
+        self.assertEqual(bundle["canonical_link"], "https://github.com/firecrawl/firecrawl")
+        self.assertEqual(bundle["binding_confidence"], "resolved")
+
 
 if __name__ == "__main__":
     unittest.main()
