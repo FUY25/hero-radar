@@ -1081,6 +1081,30 @@ def build_backfill_jobs(
             priority=stars_per_day,
         )
 
-    return sorted(jobs.values(), key=lambda job: (-job.priority, job.entity_id))[
+    npm_thresholds = rules.get("npm_registry", {}).get("daily_downloads", {})
+    for row in rows:
+        if row.get("source") != "npm_search":
+            continue
+        entity_id = resolution.item_to_entity.get(int(row["id"]))
+        if not entity_id:
+            continue
+        package = str(row.get("name") or "").strip()
+        if not package:
+            continue
+        metadata = row.get("metadata") or {}
+        weekly_downloads = number(metadata.get("weekly_downloads"))
+        if weekly_downloads < number(npm_thresholds.get("watch")):
+            continue
+        jobs[(entity_id, f"npm_registry:{package}")] = BackfillJob(
+            entity_id=entity_id,
+            run_id=run_id,
+            source="npm_registry",
+            reason=f"package_downloads:{package}",
+            status="pending",
+            requested_at=now,
+            priority=500_000 + weekly_downloads,
+        )
+
+    return sorted(jobs.values(), key=lambda job: (-job.priority, job.entity_id, job.reason))[
         : int(rules.get("backfill_max_jobs", 40))
     ]

@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from pipeline.decision.llm_provider import FakeLLMProvider
 from pipeline.decision.run_decision import run_decision
 from pipeline.decision.schema import init_decision_db
 
@@ -17,6 +18,15 @@ class FakeGitHubClient:
             {"user": "a", "starred_at": "2026-05-30T12:00:00Z"},
             {"user": "b", "starred_at": "2026-05-30T13:00:00Z"},
         ]
+
+
+class FakeNpmClient:
+    def package_metadata(self, package):
+        return {"name": package, "repository": {"url": "git+https://github.com/owner/repo.git"}}
+
+    def downloads(self, package, period):
+        downloads_by_period = {"last-day": 12000, "last-week": 70000}
+        return {"downloads": downloads_by_period[period], "package": package}
 
 
 def seed_source_tables(conn: sqlite3.Connection) -> None:
@@ -82,6 +92,200 @@ def seed_source_tables(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def seed_hn_source_tables(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        create table snapshots (
+            id integer primary key autoincrement,
+            run_id text not null,
+            source text not null,
+            fetched_at text not null,
+            status text not null,
+            item_count integer not null,
+            error text
+        );
+        create table items (
+            id integer primary key autoincrement,
+            run_id text not null,
+            snapshot_id integer not null,
+            source text not null,
+            external_id text not null,
+            name text not null,
+            url text,
+            fetched_at text not null,
+            heat real,
+            velocity real,
+            acceleration real,
+            source_rank integer,
+            description text,
+            metadata_json text not null,
+            raw_json text not null
+        );
+        """
+    )
+    conn.execute(
+        "insert into snapshots(run_id, source, fetched_at, status, item_count, error) values (?, ?, ?, ?, ?, ?)",
+        ("source-run-hn", "hn_firebase", "2026-05-31T00:00:00Z", "ok", 1, None),
+    )
+    snapshot_id = conn.execute("select id from snapshots").fetchone()[0]
+    conn.execute(
+        """
+        insert into items(run_id, snapshot_id, source, external_id, name, url, fetched_at, metadata_json, raw_json)
+        values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "source-run-hn",
+            snapshot_id,
+            "hn_firebase",
+            "hn-news",
+            "AI lab announces policy news",
+            "https://github.com/owner/repo",
+            "2026-05-31T00:00:00Z",
+            json.dumps({"score": 180, "comments": 55, "list": "topstories"}),
+            "{}",
+        ),
+    )
+    conn.commit()
+
+
+def seed_x_source_tables(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        create table snapshots (
+            id integer primary key autoincrement,
+            run_id text not null,
+            source text not null,
+            fetched_at text not null,
+            status text not null,
+            item_count integer not null,
+            error text
+        );
+        create table items (
+            id integer primary key autoincrement,
+            run_id text not null,
+            snapshot_id integer not null,
+            source text not null,
+            external_id text not null,
+            name text not null,
+            url text,
+            fetched_at text not null,
+            heat real,
+            velocity real,
+            acceleration real,
+            source_rank integer,
+            description text,
+            metadata_json text not null,
+            raw_json text not null
+        );
+        create table x_tweets_store (
+            tweet_id text primary key,
+            author_username text not null,
+            text text not null,
+            url text,
+            created_at text not null,
+            imported_at text not null,
+            raw_json text not null
+        );
+        """
+    )
+    conn.execute(
+        "insert into snapshots(run_id, source, fetched_at, status, item_count, error) values (?, ?, ?, ?, ?, ?)",
+        ("source-run-x", "x_tweets", "2026-05-31T00:00:00Z", "ok", 1, None),
+    )
+    snapshot_id = conn.execute("select id from snapshots").fetchone()[0]
+    conn.execute(
+        """
+        insert into items(run_id, snapshot_id, source, external_id, name, url, fetched_at, description, metadata_json, raw_json)
+        values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "source-run-x",
+            snapshot_id,
+            "x_tweets",
+            "t1",
+            "New repo https://github.com/owner/repo is useful",
+            "https://x.com/credible1/status/t1",
+            "2026-05-31T01:00:00Z",
+            "New repo https://github.com/owner/repo is useful",
+            json.dumps({"window": "24h", "author": "credible1", "created_at": "2026-05-31T01:00:00Z"}),
+            "{}",
+        ),
+    )
+    conn.executemany(
+        """
+        insert into x_tweets_store(tweet_id, author_username, text, url, created_at, imported_at, raw_json)
+        values (?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            ("t1", "credible1", "New repo https://github.com/owner/repo is useful", "https://x.com/credible1/status/t1", "2026-05-31T01:00:00Z", "2026-05-31T02:00:00Z", "{}"),
+            ("t2", "credible2", "Trying owner/repo for agents", "https://x.com/credible2/status/t2", "2026-05-31T03:00:00Z", "2026-05-31T04:00:00Z", "{}"),
+        ],
+    )
+    conn.commit()
+
+
+def seed_npm_source_tables(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        create table snapshots (
+            id integer primary key autoincrement,
+            run_id text not null,
+            source text not null,
+            fetched_at text not null,
+            status text not null,
+            item_count integer not null,
+            error text
+        );
+        create table items (
+            id integer primary key autoincrement,
+            run_id text not null,
+            snapshot_id integer not null,
+            source text not null,
+            external_id text not null,
+            name text not null,
+            url text,
+            fetched_at text not null,
+            heat real,
+            velocity real,
+            acceleration real,
+            source_rank integer,
+            description text,
+            metadata_json text not null,
+            raw_json text not null
+        );
+        """
+    )
+    conn.execute(
+        "insert into snapshots(run_id, source, fetched_at, status, item_count, error) values (?, ?, ?, ?, ?, ?)",
+        ("source-run-npm", "npm_search", "2026-05-31T00:00:00Z", "ok", 1, None),
+    )
+    snapshot_id = conn.execute("select id from snapshots").fetchone()[0]
+    conn.execute(
+        """
+        insert into items(run_id, snapshot_id, source, external_id, name, url, fetched_at, metadata_json, raw_json)
+        values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "source-run-npm",
+            snapshot_id,
+            "npm_search",
+            "agent:demo-package",
+            "demo-package",
+            "https://www.npmjs.com/package/demo-package",
+            "2026-05-31T00:00:00Z",
+            json.dumps(
+                {
+                    "weekly_downloads": 6831,
+                    "monthly_downloads": 38818,
+                    "repository": "git+https://github.com/owner/repo.git",
+                }
+            ),
+            "{}",
+        ),
+    )
+    conn.commit()
+
+
 class DecisionRunnerTest(unittest.TestCase):
     def test_runner_writes_entities_candidates_and_export(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -130,6 +334,145 @@ class DecisionRunnerTest(unittest.TestCase):
             ).fetchall()
             conn.close()
             self.assertEqual(statuses, [("completed",)])
+
+    def test_runner_invokes_hn_classifier_before_final_rules(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "hero.sqlite"
+            export_path = Path(tmpdir) / "candidates.json"
+            conn = sqlite3.connect(db_path)
+            seed_hn_source_tables(conn)
+            init_decision_db(conn)
+            conn.close()
+            provider = FakeLLMProvider(
+                [
+                    {
+                        "item_id": 1,
+                        "projectness": "news_article",
+                        "confidence": 0.9,
+                        "canonical_name": "",
+                        "deterministic_links": [],
+                        "proposed_links": [],
+                        "summary": "News article, not a project launch.",
+                    }
+                ]
+            )
+
+            summary = run_decision(
+                db_path=db_path,
+                run_id="decision-run-hn",
+                export_json_path=export_path,
+                now="2026-05-31T00:00:00Z",
+                hn_llm_provider=provider,
+                hn_classifier_limit=1,
+            )
+
+            self.assertEqual(summary["hn_classified"], 1)
+            self.assertEqual(summary["potential_candidates"], 0)
+            conn = sqlite3.connect(db_path)
+            noise = conn.execute(
+                "select metric_value, signal_label from evidence_rows where source = 'hn_llm_classifier'"
+            ).fetchone()
+            conn.close()
+            self.assertEqual(noise, ("news_article", "noise"))
+
+    def test_runner_invokes_x_classifier_before_final_rules(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "hero.sqlite"
+            export_path = Path(tmpdir) / "candidates.json"
+            conn = sqlite3.connect(db_path)
+            seed_x_source_tables(conn)
+            init_decision_db(conn)
+            conn.close()
+            provider = FakeLLMProvider(
+                [
+                    {
+                        "triage": [
+                            {
+                                "tweet_id": "t1",
+                                "about_concrete_project": True,
+                                "closer_look": True,
+                                "project_refs": [
+                                    {
+                                        "entity_key": "github:owner/repo",
+                                        "entity_name": "owner/repo",
+                                        "entity_confidence": "linked",
+                                        "confidence": 0.9,
+                                    }
+                                ],
+                                "expression_strength": "recommendation",
+                                "evidence_quote": "New repo",
+                                "reason": "Links a concrete repo.",
+                            },
+                            {
+                                "tweet_id": "t2",
+                                "about_concrete_project": True,
+                                "closer_look": True,
+                                "project_refs": [
+                                    {
+                                        "entity_key": "github:owner/repo",
+                                        "entity_name": "owner/repo",
+                                        "entity_confidence": "exact_handle",
+                                        "confidence": 0.8,
+                                    }
+                                ],
+                                "expression_strength": "adoption_or_usage",
+                                "evidence_quote": "Trying owner/repo",
+                                "reason": "Mentions trying the same repo.",
+                            },
+                        ]
+                    },
+                    {
+                        "entity_key": "github:owner/repo",
+                        "x_tier": "potential",
+                        "entity_confidence": "linked",
+                        "x_expression_strength": "recommendation",
+                        "cited_tweet_ids": ["t1", "t2"],
+                        "rationale": "Two credible authors cited the same repo.",
+                        "cross_source_notes": [],
+                    },
+                ]
+            )
+
+            summary = run_decision(
+                db_path=db_path,
+                run_id="decision-run-x",
+                export_json_path=export_path,
+                now="2026-05-31T04:00:00Z",
+                x_llm_provider=provider,
+                x_classifier_limit=10,
+                x_credible_handles={"credible1", "credible2"},
+            )
+
+            self.assertEqual(summary["x_stage1_mentions"], 2)
+            self.assertEqual(summary["x_stage2_tiered"], 1)
+            self.assertEqual(summary["potential_candidates"], 1)
+            payload = json.loads(export_path.read_text())
+            self.assertEqual(payload["candidates"][0]["fired_families"], ["x_social"])
+
+    def test_runner_invokes_npm_backfill_before_final_rules(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "hero.sqlite"
+            export_path = Path(tmpdir) / "candidates.json"
+            conn = sqlite3.connect(db_path)
+            seed_npm_source_tables(conn)
+            init_decision_db(conn)
+            conn.close()
+
+            summary = run_decision(
+                db_path=db_path,
+                run_id="decision-run-npm",
+                export_json_path=export_path,
+                now="2026-05-31T00:00:00Z",
+                npm_client=FakeNpmClient(),
+                npm_backfill_limit=1,
+            )
+
+            self.assertEqual(summary["npm_backfill_completed"], 1)
+            self.assertEqual(summary["potential_candidates"], 1)
+            payload = json.loads(export_path.read_text())
+            self.assertEqual(payload["candidates"][0]["fired_families"], ["package_family"])
+            self.assertEqual(payload["backfill_jobs"][0]["source"], "npm_registry")
+            self.assertEqual(payload["backfill_jobs"][0]["status"], "completed")
 
 
 if __name__ == "__main__":

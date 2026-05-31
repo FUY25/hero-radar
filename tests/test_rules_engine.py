@@ -290,6 +290,37 @@ class RulesEngineTest(unittest.TestCase):
         self.assertEqual(result.potential_candidates, [])
         self.assertEqual(result.edge_watch_candidates, [])
 
+    def test_npm_search_row_enqueues_registry_backfill_job(self):
+        rows = [
+            {
+                "id": 60,
+                "source": "npm_search",
+                "external_id": "agent:demo-package",
+                "name": "demo-package",
+                "url": "https://www.npmjs.com/package/demo-package",
+                "description": "demo package",
+                "metadata": {
+                    "weekly_downloads": 6831,
+                    "monthly_downloads": 38818,
+                    "repository": "git+https://github.com/owner/repo.git",
+                },
+                "fetched_at": "2026-05-31T00:00:00Z",
+            }
+        ]
+        resolution = resolve_entities(rows, first_seen="2026-05-31T00:00:00Z")
+
+        result = evaluate_entities(
+            rows,
+            resolution,
+            run_id="run-npm",
+            rule_version="rules-v1",
+            now="2026-05-31T00:00:00Z",
+        )
+
+        self.assertEqual(len(result.backfill_jobs), 1)
+        self.assertEqual(result.backfill_jobs[0].source, "npm_registry")
+        self.assertEqual(result.backfill_jobs[0].reason, "package_downloads:demo-package")
+
     def test_two_huggingface_resources_48h_create_potential(self):
         rows = [
             {

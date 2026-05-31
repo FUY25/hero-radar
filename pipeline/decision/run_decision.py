@@ -39,6 +39,7 @@ RUN_SCOPED_TABLES = [
     "entity_mentions",
     "evidence_rows",
 ]
+CLASSIFIER_EVIDENCE_SOURCES = {"hn_llm_classifier", "x_tweets", "npm_registry"}
 
 
 def read_latest_items(conn: sqlite3.Connection) -> list[dict[str, Any]]:
@@ -343,6 +344,43 @@ def persist_pending_backfill_jobs(conn: sqlite3.Connection, jobs: list[BackfillJ
     )
 
 
+def read_classifier_evidence(conn: sqlite3.Connection, run_id: str) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """
+        select entity_id, canonical_entity, alias, source, event_at, relative_to_reference,
+               metric_name, metric_value, family, rule_id, rule_version, signal_label,
+               historical_safety, note, raw_url_or_ref, run_id
+        from evidence_rows
+        where run_id = ?
+        order by id
+        """,
+        (run_id,),
+    ).fetchall()
+    columns = [
+        "entity_id",
+        "canonical_entity",
+        "alias",
+        "source",
+        "event_at",
+        "relative_to_reference",
+        "metric_name",
+        "metric_value",
+        "family",
+        "rule_id",
+        "rule_version",
+        "signal_label",
+        "historical_safety",
+        "note",
+        "raw_url_or_ref",
+        "run_id",
+    ]
+    return [
+        dict(zip(columns, row, strict=True))
+        for row in rows
+        if row[3] in CLASSIFIER_EVIDENCE_SOURCES
+    ]
+
+
 def export_candidates(conn: sqlite3.Connection, run_id: str, path: Path) -> None:
     candidates = [
         {
@@ -424,6 +462,14 @@ def run_decision(
     export_json_path: Path,
     now: str,
     github_client: Any | None = None,
+    hn_llm_provider: Any | None = None,
+    hn_classifier_limit: int = 0,
+    x_llm_provider: Any | None = None,
+    x_classifier_limit: int = 0,
+    x_stage1_batch_size: int = 100,
+    x_credible_handles: set[str] | None = None,
+    npm_client: Any | None = None,
+    npm_backfill_limit: int = 0,
 ) -> dict[str, int | str]:
     rules = load_rules()
     conn = sqlite3.connect(db_path)
@@ -451,11 +497,13 @@ def run_decision(
             rules=rules,
         )
         extra_github_signals: dict[str, dict[str, float]] = {}
-        if github_client is not None and pass1.backfill_jobs:
+        if (github_client is not None or npm_client is not None) and pass1.backfill_jobs:
             # Persist the shortlist before the bounded external runner reads pending jobs.
             referenced = referenced_entity_ids(pass1)
             write_entities(conn, resolution, referenced, now)
             persist_pending_backfill_jobs(conn, pass1.backfill_jobs)
+
+        if github_client is not None and pass1.backfill_jobs:
             from pipeline.decision.backfill import run_backfill_jobs
 
             extra_github_signals = run_backfill_jobs(
@@ -465,6 +513,53 @@ def run_decision(
                 now=now,
             ).get("signals", {})
 
+        hn_summary: dict[str, Any] = {"classified": 0}
+        if hn_llm_provider is not None and hn_classifier_limit > 0:
+            from pipeline.decision.hn_classifier import run_hn_classifier
+
+            hn_summary = run_hn_classifier(
+                conn,
+                run_id=run_id,
+                provider=hn_llm_provider,
+                limit=hn_classifier_limit,
+                now=now,
+            )
+
+        x_stage1_summary: dict[str, Any] = {"mentions": 0}
+        x_stage2_summary: dict[str, Any] = {"tiered": 0}
+        if x_llm_provider is not None and x_classifier_limit > 0:
+            from pipeline.decision.x_classifier import run_x_stage1, run_x_stage2
+
+            x_stage1_summary = run_x_stage1(
+                conn,
+                run_id=run_id,
+                provider=x_llm_provider,
+                credible_handles=x_credible_handles or set(),
+                now=now,
+                limit=x_classifier_limit,
+                batch_size=x_stage1_batch_size,
+            )
+            x_stage2_summary = run_x_stage2(
+                conn,
+                run_id=run_id,
+                provider=x_llm_provider,
+                now=now,
+                limit=x_classifier_limit,
+            )
+
+        npm_summary: dict[str, Any] = {"completed": 0, "failed": 0}
+        if npm_client is not None and npm_backfill_limit > 0:
+            from pipeline.decision.npm_backfill import run_npm_backfill
+
+            npm_summary = run_npm_backfill(
+                conn,
+                run_id=run_id,
+                client=npm_client,
+                now=now,
+                limit=npm_backfill_limit,
+            )
+
+        classifier_evidence = read_classifier_evidence(conn, run_id)
         final_result = (
             evaluate_entities(
                 rows,
@@ -474,8 +569,9 @@ def run_decision(
                 now=now,
                 rules=rules,
                 extra_github_signals=extra_github_signals,
+                classifier_evidence=classifier_evidence,
             )
-            if extra_github_signals
+            if extra_github_signals or classifier_evidence
             else pass1
         )
 
@@ -496,6 +592,10 @@ def run_decision(
             "potential_candidates": len(final_result.potential_candidates),
             "edge_watch_candidates": len(final_result.edge_watch_candidates),
             "backfill_jobs": len(final_result.backfill_jobs),
+            "hn_classified": int(hn_summary.get("classified") or 0),
+            "x_stage1_mentions": int(x_stage1_summary.get("mentions") or 0),
+            "x_stage2_tiered": int(x_stage2_summary.get("tiered") or 0),
+            "npm_backfill_completed": int(npm_summary.get("completed") or 0),
             "export": str(export_json_path),
         }
         return summary
