@@ -3,12 +3,18 @@ import test from 'node:test';
 import {
   activeChannelList,
   candidateRowsForFeed,
+  columnWidthKey,
+  columnWidthStyle,
   dashboardApiUrl,
   detailRowsForItem,
   filterAndSortRows,
+  formatProjectList,
   initialDashboardState,
+  rowsForChannel,
+  sortOptionsForChannel,
   visibleWindowsForChannel,
   workspaceSections,
+  xAvatarForHandle,
 } from './dashboardModel.js';
 
 const payload = {
@@ -75,5 +81,105 @@ test('dashboardApiUrl defaults to same-origin api and respects explicit base', (
   assert.equal(
     dashboardApiUrl('/api/dashboard-data', 'http://127.0.0.1:8787/'),
     'http://127.0.0.1:8787/api/dashboard-data',
+  );
+});
+
+test('xAvatarForHandle resolves tweet author avatars for tweet and seed account rows', () => {
+  const items = [
+    {
+      item_id: 10,
+      channel: 'x_tweets',
+      name: 'Tweet',
+      metadata: { author: 'sama', author_avatar: 'https://cdn.example/sama.jpg' },
+      raw: {},
+    },
+    {
+      item_id: 11,
+      channel: 'x_tweets',
+      name: 'Tweet',
+      metadata: { author: 'karpathy' },
+      raw: { author: { userName: 'karpathy', profilePicture: 'https://cdn.example/ak.png' } },
+    },
+    {
+      item_id: 12,
+      channel: 'x_seed_accounts',
+      name: 'sama',
+      metadata: { username: 'sama' },
+      raw: {},
+    },
+  ];
+
+  assert.equal(xAvatarForHandle(items, '@sama'), 'https://cdn.example/sama.jpg');
+  assert.equal(xAvatarForHandle(items, 'karpathy'), 'https://cdn.example/ak.png');
+  assert.equal(xAvatarForHandle(items, 'missing'), '');
+});
+
+test('rowsForChannel recomputes RepoFOMO native rank for the selected metric range', () => {
+  const items = [
+    {
+      item_id: 1,
+      channel: 'github_movers_repofomo',
+      name: 'slow/repo',
+      description: '',
+      channel_rank: 1,
+      metadata: { stars_7d: 2, stars_30d: 40, stars_60d: 100 },
+      raw: {},
+    },
+    {
+      item_id: 2,
+      channel: 'github_movers_repofomo',
+      name: 'fast/repo',
+      description: '',
+      channel_rank: 2,
+      metadata: { stars_7d: 20, stars_30d: 10, stars_60d: 60 },
+      raw: {},
+    },
+  ];
+
+  const rows = rowsForChannel(items, 'github_movers_repofomo', {
+    activeWindow: '7d',
+    query: '',
+    sort: 'native',
+    sortDir: 'asc',
+  });
+
+  assert.deepEqual(rows.map((row) => row.name), ['fast/repo', 'slow/repo']);
+  assert.deepEqual(rows.map((row) => row.__display_rank), [1, 2]);
+});
+
+test('sortOptionsForChannel preserves old dashboard source-specific sort choices', () => {
+  assert.deepEqual(
+    sortOptionsForChannel('github_movers_trending_repos').map((option) => option[0]),
+    ['native', 'source_score', 'stars_velocity', 'forks_velocity', 'freshness', 'stars_count'],
+  );
+  assert.deepEqual(
+    sortOptionsForChannel('product_hunt').map((option) => option[0]),
+    ['native', 'votes', 'comments', 'daily_rank', 'weekly_rank'],
+  );
+  assert.deepEqual(
+    sortOptionsForChannel('huggingface_models').map((option) => option[0]),
+    ['native', 'trendingScore', 'downloads', 'likes'],
+  );
+  assert.deepEqual(
+    sortOptionsForChannel('x_seed_accounts').map((option) => option[0]),
+    ['native', 'followers', 'following', 'keyword'],
+  );
+});
+
+test('column width helpers use the old per-channel localStorage contract', () => {
+  assert.equal(columnWidthKey('x_tweets'), 'heroRadarColumnWidths:x_tweets');
+  assert.deepEqual(columnWidthStyle({ 2: 144 }, 2), { width: '144px', minWidth: '144px' });
+  assert.deepEqual(columnWidthStyle({ 2: 144 }, 1), undefined);
+});
+
+test('formatProjectList renders extracted X project objects as names instead of object strings', () => {
+  assert.equal(
+    formatProjectList([
+      { name: 'OpenAI', key: 'openai' },
+      { key: 'anthropic' },
+      'Claude Code',
+      {},
+    ]),
+    'OpenAI，anthropic，Claude Code',
   );
 });

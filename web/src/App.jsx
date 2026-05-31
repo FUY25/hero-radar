@@ -1,16 +1,43 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   activeChannelList,
+  availableRanges as modelAvailableRanges,
   candidateRowsForFeed,
+  columnWidthKey,
+  columnWidthStyle,
   dashboardApiUrl,
+  defaultRangeId as modelDefaultRangeId,
   detailRowsForItem,
+  formatProjectList,
   initialDashboardState,
-  visibleWindowsForChannel,
+  nativeRank as modelNativeRank,
+  rowsForChannel as modelRowsForChannel,
+  sortOptionsForChannel as modelSortOptionsForChannel,
+  valueAt as modelValueAt,
   workspaceSections,
+  xAvatarForHandle,
 } from './dashboardModel.js';
 
 const API_BASE = import.meta.env.VITE_API_BASE || '';
 const PAGE_SIZES = [50, 100, 200, 500];
+
+function readColumnWidths(channel) {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(columnWidthKey(channel)) || '{}');
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch (_) {
+    return {};
+  }
+}
+
+function writeColumnWidths(channel, widths) {
+  localStorage.setItem(columnWidthKey(channel), JSON.stringify(widths || {}));
+}
+
+function storedPageSize() {
+  const value = Number(localStorage.getItem('heroRadarDefaultPageSize') || 100);
+  return PAGE_SIZES.includes(value) ? value : 100;
+}
 
 function column(label, help, path, cls = '', kind = 'text') {
   return { label, help, path, cls, kind };
@@ -32,6 +59,23 @@ function detail() {
   return column('详情', '展开后看该 source 的保留字段、facts、样例和 raw/metadata 调试字段。', '$detail', 'wide', 'detail');
 }
 
+function hfColumns(label) {
+  return [
+    rank('HF 排名', 'Hugging Face trending API 的原始返回顺序。'),
+    name(label),
+    desc(),
+    column('HF 趋势分', 'Hugging Face API 原生 trendingScore。', 'r.trendingScore', 'num', 'num'),
+    column('点赞', 'Hugging Face likes。', 'm.likes', 'num', 'num'),
+    column('下载量', 'Hugging Face downloads。', 'm.downloads', 'num', 'num'),
+    column('任务/类型', 'Hugging Face pipeline_tag。', 'm.pipeline_tag'),
+    column('库/SDK', 'Hugging Face library_name 或 Spaces sdk。', 'r.library_name'),
+    column('创建时间', 'Hugging Face createdAt。', 'm.created_at', '', 'date'),
+    column('修改时间', 'Hugging Face lastModified。', 'm.last_modified', '', 'date'),
+    column('标签', 'Hugging Face tags。', 'm.tags', '', 'list'),
+    detail(),
+  ];
+}
+
 const COLUMNS_BY_CHANNEL = {
   github_trending: [
     rank('GitHub 排名', 'GitHub Trending 页面在当前时间范围里的原始顺序。'),
@@ -50,6 +94,9 @@ const COLUMNS_BY_CHANNEL = {
     column('总 star', 'Trending Repos 原生 starsCount。', 'm.stars_count', 'num', 'num'),
     column('总 fork', 'Trending Repos 原生 forksCount。', 'm.forks_count', 'num', 'num'),
     column('TR 动量分', 'Trending Repos 原生 score。', 'm.source_score', 'num', 'num'),
+    column('star 动量', 'Trending Repos 原生 scoreComponents.starsVelocity。', 'm.stars_velocity', 'num', 'num'),
+    column('fork 动量', 'Trending Repos 原生 scoreComponents.forksVelocity。', 'm.forks_velocity', 'num', 'num'),
+    column('新项目加成', 'Trending Repos 原生 scoreComponents.freshnessBonus。', 'm.freshness_bonus', 'num', 'num'),
     column('主题', 'Trending Repos 返回的 GitHub topics。', 'm.topics', '', 'list'),
     detail(),
   ],
@@ -62,7 +109,11 @@ const COLUMNS_BY_CHANNEL = {
     column('7d 新增 star', 'RepoFOMO 原生 7d_new。', 'm.stars_7d', 'num', 'num'),
     column('30d 新增 star', 'RepoFOMO 原生 30d_new。', 'm.stars_30d', 'num', 'num'),
     column('60d 新增 star', 'RepoFOMO 原生 60d_new。', 'm.stars_60d', 'num', 'num'),
+    column('7d 增长率', 'RepoFOMO 原生 7d% 增长率。', 'm.growth_7d_percent', 'num', 'num'),
+    column('30d 增长率', 'RepoFOMO 原生 30d% 增长率。', 'm.growth_30d_percent', 'num', 'num'),
     column('总 fork', 'RepoFOMO 原生 forks。', 'm.forks', 'num', 'num'),
+    column('新增 fork', 'RepoFOMO 原生 new_forks。', 'm.new_forks', 'num', 'num'),
+    column('repo 年龄(天)', 'RepoFOMO 原生 star_age。', 'm.star_age_days', 'num', 'num'),
     detail(),
   ],
   github_search: [
@@ -72,9 +123,11 @@ const COLUMNS_BY_CHANNEL = {
     column('搜索词', '命中这行的 GitHub Search 配置 query。', 'm.query_label'),
     column('总 star', 'GitHub REST API stargazers_count。', 'm.stars', 'num', 'num'),
     column('总 fork', 'GitHub REST API forks_count。', 'm.forks', 'num', 'num'),
+    column('watchers(≈star)', 'GitHub API watchers_count。', 'r.watchers_count', 'num', 'num'),
     column('open issues', 'GitHub API open_issues_count。', 'r.open_issues_count', 'num', 'num'),
     column('license', 'GitHub API license 字段。', 'r.license'),
     column('创建时间', 'GitHub created_at。', 'm.created_at', '', 'date'),
+    column('更新时间', 'GitHub updated_at。', 'r.updated_at', '', 'date'),
     column('最近 push', 'GitHub pushed_at。', 'm.pushed_at', '', 'date'),
     column('主题', 'GitHub topics。', 'm.topics', '', 'list'),
     detail(),
@@ -112,9 +165,13 @@ const COLUMNS_BY_CHANNEL = {
     column('日榜排名', 'Product Hunt dailyRank。', 'm.daily_rank', 'num', 'num'),
     column('周榜排名', 'Product Hunt weeklyRank。', 'm.weekly_rank', 'num', 'num'),
     column('创建时间', 'Product Hunt createdAt。', 'm.created_at', '', 'date'),
+    column('Featured 时间', 'Product Hunt featuredAt。', 'm.featured_at', '', 'date'),
     column('官网', 'Product Hunt 返回的产品官网链接。', 'm.website', '', 'url'),
     detail(),
   ],
+  huggingface_models: hfColumns('Model'),
+  huggingface_datasets: hfColumns('Dataset'),
+  huggingface_spaces: hfColumns('Space'),
   npm_search: [
     rank('搜索排名', 'npm registry search API 在当前 query 里的返回顺序。'),
     name('Package'),
@@ -125,6 +182,9 @@ const COLUMNS_BY_CHANNEL = {
     column('月下载', 'npm search API downloads.monthly。', 'm.monthly_downloads', 'num', 'num'),
     column('被依赖数', 'npm search API dependents。', 'm.dependents', 'num', 'num'),
     column('npm 搜索分', 'npm search API score.final。', 'm.score_final', 'num', 'num'),
+    column('质量分', 'npm search API score.detail.quality。', 'm.score_quality', 'num', 'num'),
+    column('流行度分', 'npm search API score.detail.popularity。', 'm.score_popularity', 'num', 'num'),
+    column('维护分', 'npm search API score.detail.maintenance。', 'm.score_maintenance', 'num', 'num'),
     column('license', 'npm package.license。', 'm.license'),
     column('关键词', 'npm package.keywords。', 'm.keywords', '', 'list'),
     column('更新时间', 'npm package.date。', 'm.package_date', '', 'date'),
@@ -136,9 +196,13 @@ const COLUMNS_BY_CHANNEL = {
     desc(),
     column('feed 类型', 'PyPI RSS feed 来源。', 'm.feed'),
     column('版本', 'RSS title 里解析出的 release version。', 'm.version'),
+    column('最新版本', 'PyPI JSON API info.version。', 'm.latest_version'),
     column('发布时间', 'PyPI RSS pubDate。', 'm.pub_date', '', 'date'),
     column('Python 版本', 'PyPI JSON info.requires_python。', 'm.requires_python'),
     column('license', 'PyPI JSON info.license。', 'm.license'),
+    column('关键词', 'PyPI JSON info.keywords。', 'm.keywords'),
+    column('分类', 'PyPI JSON classifiers。', 'm.classifiers', 'desc', 'list'),
+    column('项目链接', 'PyPI JSON project_urls。', 'm.project_urls', 'desc', 'object'),
     detail(),
   ],
   pypi_updates: [
@@ -147,9 +211,13 @@ const COLUMNS_BY_CHANNEL = {
     desc(),
     column('feed 类型', 'PyPI RSS feed 来源。', 'm.feed'),
     column('版本', 'RSS title 里解析出的 release version。', 'm.version'),
+    column('最新版本', 'PyPI JSON API info.version。', 'm.latest_version'),
     column('发布时间', 'PyPI RSS pubDate。', 'm.pub_date', '', 'date'),
     column('Python 版本', 'PyPI JSON info.requires_python。', 'm.requires_python'),
     column('license', 'PyPI JSON info.license。', 'm.license'),
+    column('关键词', 'PyPI JSON info.keywords。', 'm.keywords'),
+    column('分类', 'PyPI JSON classifiers。', 'm.classifiers', 'desc', 'list'),
+    column('项目链接', 'PyPI JSON project_urls。', 'm.project_urls', 'desc', 'object'),
     detail(),
   ],
   x_seed_accounts: [
@@ -193,79 +261,6 @@ const COLUMNS_BY_CHANNEL = {
   ],
 };
 
-const SORT_OPTIONS_BY_CHANNEL = {
-  github_trending: [
-    ['native', '原生顺序', '$rank', 'asc'],
-    ['period_stars', '窗口新增 star', 'm.period_stars', 'desc'],
-    ['total_stars', '总 star', 'm.stars_total', 'desc'],
-    ['name', '名称', '$name', 'asc'],
-  ],
-  github_movers_trending_repos: [
-    ['native', '原生顺序', '$rank', 'asc'],
-    ['source_score', 'TR 动量分', 'm.source_score', 'desc'],
-    ['stars_count', '总 star', 'm.stars_count', 'desc'],
-  ],
-  github_movers_repofomo: [
-    ['native', '范围排名', '$rank', 'asc'],
-    ['stars_7d', '7d 新增', 'm.stars_7d', 'desc'],
-    ['stars_30d', '30d 新增', 'm.stars_30d', 'desc'],
-    ['stars_60d', '60d 新增', 'm.stars_60d', 'desc'],
-  ],
-  github_search: [
-    ['native', '搜索顺序', '$rank', 'asc'],
-    ['stars', '总 star', 'm.stars', 'desc'],
-    ['forks', '总 fork', 'm.forks', 'desc'],
-    ['updated', '更新时间', 'r.updated_at', 'desc'],
-  ],
-  hn_search: [
-    ['native', '搜索顺序', '$rank', 'asc'],
-    ['points', 'HN 分数', 'm.points', 'desc'],
-    ['comments', '评论数', 'm.comments', 'desc'],
-    ['created', '发布时间', 'm.created_at', 'desc'],
-  ],
-  hn_top: [
-    ['native', '榜单顺序', '$rank', 'asc'],
-    ['score', 'HN 分数', 'm.score', 'desc'],
-    ['comments', '评论数', 'm.comments', 'desc'],
-    ['created', '发布时间', 'm.created_at_unix', 'desc'],
-  ],
-  product_hunt: [
-    ['native', 'PH 顺序', '$rank', 'asc'],
-    ['votes', '票数', 'm.votes', 'desc'],
-    ['comments', '评论数', 'm.comments', 'desc'],
-  ],
-  npm_search: [
-    ['native', '搜索顺序', '$rank', 'asc'],
-    ['weekly', '周下载', 'm.weekly_downloads', 'desc'],
-    ['monthly', '月下载', 'm.monthly_downloads', 'desc'],
-    ['score', 'npm 搜索分', 'm.score_final', 'desc'],
-  ],
-  x_seed_accounts: [
-    ['native', '粉丝顺序', '$rank', 'asc'],
-    ['followers', '粉丝', 'm.followers_count', 'desc'],
-    ['keyword', 'AI 关键词分', 'm.keyword_score', 'desc'],
-  ],
-  x_tweets: [
-    ['native', 'tweet 顺序', '$rank', 'asc'],
-    ['created', '发布时间', 'm.created_at', 'desc'],
-  ],
-  settings_source_health: [
-    ['native', '配置顺序', '$rank', 'asc'],
-    ['status', '状态', 'm.status', 'asc'],
-  ],
-  settings_search_terms: [
-    ['native', '配置顺序', '$rank', 'asc'],
-    ['group', '组', 'm.group', 'asc'],
-    ['name', '名称', '$name', 'asc'],
-  ],
-};
-
-const REPOMOFO_RANGES = [
-  { id: '7d', label: '7d', kind: 'metric', path: 'm.stars_7d', dir: 'desc', onlyPositive: true },
-  { id: '30d', label: '30d', kind: 'metric', path: 'm.stars_30d', dir: 'desc', onlyPositive: true },
-  { id: '60d', label: '60d', kind: 'metric', path: 'm.stars_60d', dir: 'desc', onlyPositive: true },
-];
-
 function columnsForChannel(channel) {
   return COLUMNS_BY_CHANNEL[channel] || [
     rank(),
@@ -279,35 +274,15 @@ function columnsForChannel(channel) {
 }
 
 function sortOptionsForChannel(channel) {
-  return SORT_OPTIONS_BY_CHANNEL[channel] || [
-    ['native', '原生顺序', '$rank', 'asc'],
-    ['name', '名称', '$name', 'asc'],
-    ['metric', '原生指标', 'native_metric.value', 'desc'],
-  ];
+  return modelSortOptionsForChannel(channel);
 }
 
 function valueAt(item, path, rowRank = null) {
-  if (!item || !path) return undefined;
-  if (path === '$rank') return rowRank ?? item.window_rank ?? item.channel_rank ?? item.source_rank;
-  if (path === '$window') return item.window || 'current';
-  if (path === '$source') return item.source;
-  if (path === '$name') return item.name;
-  if (path === '$description') return item.description;
-  if (path === '$detail') return item;
-  if (path.startsWith('m.')) return getNested(item.metadata, path.slice(2));
-  if (path.startsWith('r.')) return getNested(item.raw, path.slice(2));
-  return getNested(item, path);
-}
-
-function getNested(value, path) {
-  return String(path)
-    .split('.')
-    .filter(Boolean)
-    .reduce((current, part) => (current == null ? undefined : current[part]), value);
+  return modelValueAt(item, path, rowRank);
 }
 
 function nativeRank(item) {
-  return item.window_rank ?? item.channel_rank ?? item.source_rank ?? 999999;
+  return modelNativeRank(item);
 }
 
 function formatNumber(value) {
@@ -332,61 +307,16 @@ function formatPlain(value) {
   return String(value);
 }
 
-function searchText(row) {
-  const metadata = row.metadata && typeof row.metadata === 'object' ? Object.values(row.metadata) : [];
-  return [row.name, row.description, row.external_id, row.source, ...(row.facts || []), ...metadata].join(' ').toLowerCase();
-}
-
-function sortableValue(item, path, rankValue) {
-  const value = valueAt(item, path, rankValue);
-  if (path === '$name') return String(value || '').toLowerCase();
-  if (path.includes('_at') || path.includes('date') || path.includes('created') || path.includes('updated')) {
-    const parsed = Date.parse(value || '');
-    return Number.isNaN(parsed) ? 0 : parsed;
-  }
-  if (path.includes('_unix')) return Number(value || 0);
-  const num = Number(value);
-  return Number.isFinite(num) ? num : String(value || '').toLowerCase();
-}
-
 function availableRanges(items, channel) {
-  if (channel === 'github_movers_repofomo') return REPOMOFO_RANGES;
-  return visibleWindowsForChannel(items, channel).map((value) => ({ id: value, label: value, kind: 'window', value }));
+  return modelAvailableRanges(items, channel);
 }
 
 function defaultRangeId(items, channel) {
-  return availableRanges(items, channel)[0]?.id || '';
+  return modelDefaultRangeId(items, channel);
 }
 
 function rowsForChannel(items, channel, state) {
-  const ranges = availableRanges(items, channel);
-  const selectedRange = ranges.find((range) => range.id === state.activeWindow) || ranges[0] || null;
-  const range = selectedRange || null;
-  const query = (state.query || '').trim().toLowerCase();
-  const sortOptions = sortOptionsForChannel(channel);
-  const sortOption = sortOptions.find((row) => row[0] === state.sort) || sortOptions[0];
-  const sortDir = state.sortDir || sortOption?.[3] || 'asc';
-
-  const rows = (items || []).filter((item) => {
-    if (item.channel !== channel) return false;
-    if (range?.kind === 'window' && (item.window || 'current') !== range.id) return false;
-    if (range?.kind === 'metric') {
-      const value = Number(valueAt(item, range.path));
-      if (range.onlyPositive && !(value > 0)) return false;
-    }
-    return !query || searchText(item).includes(query);
-  });
-
-  rows.sort((a, b) => {
-    const av = sortableValue(a, sortOption[2], nativeRank(a));
-    const bv = sortableValue(b, sortOption[2], nativeRank(b));
-    let diff = 0;
-    if (typeof av === 'string' || typeof bv === 'string') diff = String(av).localeCompare(String(bv));
-    else diff = av - bv;
-    if (sortDir === 'desc') diff *= -1;
-    return diff || nativeRank(a) - nativeRank(b) || String(a.name || '').localeCompare(String(b.name || ''));
-  });
-  return rows;
+  return modelRowsForChannel(items, channel, state);
 }
 
 function levelLabel(level) {
@@ -429,12 +359,17 @@ function Sparkline({ values }) {
   );
 }
 
-function Handle({ value }) {
+function Handle({ value, item, items }) {
   const handle = String(value || '').replace(/^@/, '');
   if (!handle) return null;
+  const avatarUrl = item?.metadata?.author_avatar || xAvatarForHandle(items, handle);
   return (
     <span className="x-person">
-      <span className="x-avatar x-avatar-fallback" aria-hidden="true">{(handle.slice(0, 2) || '?').toUpperCase()}</span>
+      {avatarUrl ? (
+        <img className="x-avatar" src={avatarUrl} alt={`@${handle}`} loading="lazy" referrerPolicy="no-referrer" />
+      ) : (
+        <span className="x-avatar x-avatar-fallback" aria-hidden="true">{(handle.slice(0, 2) || '?').toUpperCase()}</span>
+      )}
       <span className="x-person-name">@{handle}</span>
     </span>
   );
@@ -467,7 +402,7 @@ function DetailBlock({ item }) {
   );
 }
 
-function Cell({ item, column: col, rowRank }) {
+function Cell({ item, column: col, rowRank, items }) {
   const value = valueAt(item, col.path, rowRank);
   if (col.kind === 'num') return formatNumber(value);
   if (col.kind === 'date') return formatDate(value);
@@ -479,8 +414,9 @@ function Cell({ item, column: col, rowRank }) {
   if (col.kind === 'link') {
     return item.url ? <a href={item.url} target="_blank" rel="noreferrer">{formatPlain(value)}</a> : formatPlain(value);
   }
-  if (col.kind === 'list' || col.kind === 'object' || col.kind === 'projects') return formatPlain(value);
-  if (col.kind === 'handle') return <Handle value={value} />;
+  if (col.kind === 'projects') return formatProjectList(value);
+  if (col.kind === 'list' || col.kind === 'object') return formatPlain(value);
+  if (col.kind === 'handle') return <Handle value={value} item={item} items={items} />;
   if (col.kind === 'detail') {
     return (
       <details>
@@ -497,6 +433,7 @@ function SourceTable({ payload, channel, state, onStateChange, titlePrefix = '' 
   const ranges = availableRanges(items, channel);
   const columns = columnsForChannel(channel);
   const sortOptions = sortOptionsForChannel(channel);
+  const [columnWidths, setColumnWidths] = useState(() => readColumnWidths(channel));
   const effectiveState = {
     ...state,
     activeWindow: ranges.some((range) => range.id === state.activeWindow) ? state.activeWindow : ranges[0]?.id || '',
@@ -512,6 +449,10 @@ function SourceTable({ payload, channel, state, onStateChange, titlePrefix = '' 
     onStateChange({ ...next, page: next.page ?? 1 });
   }
 
+  useEffect(() => {
+    setColumnWidths(readColumnWidths(channel));
+  }, [channel]);
+
   function sortBy(option) {
     if (!option) return;
     if (state.sort === option[0]) {
@@ -519,6 +460,32 @@ function SourceTable({ payload, channel, state, onStateChange, titlePrefix = '' 
     } else {
       onStateChange({ sort: option[0], sortDir: option[3], page: 1 });
     }
+  }
+
+  function startColumnResize(event, index) {
+    event.preventDefault();
+    event.stopPropagation();
+    const th = event.currentTarget.closest('th');
+    if (!th) return;
+    const startX = event.clientX;
+    const startWidth = th.getBoundingClientRect().width;
+    th.classList.add('is-resizing');
+    document.body.classList.add('resizing-columns');
+    const onMove = (moveEvent) => {
+      const nextWidth = Math.max(56, Math.round(startWidth + moveEvent.clientX - startX));
+      setColumnWidths((current) => {
+        const next = { ...(current || {}), [index]: nextWidth };
+        writeColumnWidths(channel, next);
+        return next;
+      });
+    };
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove);
+      th.classList.remove('is-resizing');
+      document.body.classList.remove('resizing-columns');
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp, { once: true });
   }
 
   const from = rows.length ? start + 1 : 0;
@@ -579,13 +546,29 @@ function SourceTable({ payload, channel, state, onStateChange, titlePrefix = '' 
                   <th
                     key={`${col.path}:${index}`}
                     className={`${col.cls || ''}${sortOption ? ' sortable' : ''}${isActiveSort ? ' sort-active' : ''}`}
-                    onClick={() => sortBy(sortOption)}
+                    data-col-index={index}
+                    style={columnWidthStyle(columnWidths, index)}
+                    onClick={(event) => {
+                      if (event.target.closest('.col-resizer') || event.target.closest('.hint')) return;
+                      sortBy(sortOption);
+                    }}
                   >
                     <span className="th-inner">
                       <span className="th-label">{col.label}</span>
                       {sortOption ? <span className="sort-indicator">{isActiveSort ? sortArrow : '↕'}</span> : null}
                       <span className="hint" data-tip={col.help}>?</span>
                     </span>
+                    <span
+                      className="col-resizer"
+                      data-col-index={index}
+                      title="拖动调整列宽"
+                      aria-hidden="true"
+                      onPointerDown={(event) => startColumnResize(event, index)}
+                      onClick={(event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                      }}
+                    />
                   </th>
                 );
               })}
@@ -595,8 +578,12 @@ function SourceTable({ payload, channel, state, onStateChange, titlePrefix = '' 
             {pagedRows.length ? pagedRows.map((item) => (
               <tr key={`${item.channel}:${item.item_id}:${item.external_id || item.name}`}>
                 {columns.map((col, index) => (
-                  <td className={col.cls || ''} key={`${item.item_id}:${col.path}:${index}`}>
-                    <Cell item={item} column={col} rowRank={nativeRank(item)} />
+                  <td
+                    className={col.cls || ''}
+                    key={`${item.item_id}:${col.path}:${index}`}
+                    style={columnWidthStyle(columnWidths, index)}
+                  >
+                    <Cell item={item} column={col} rowRank={item.__display_rank ?? nativeRank(item)} items={items} />
                   </td>
                 ))}
               </tr>
@@ -613,7 +600,17 @@ function SourceTable({ payload, channel, state, onStateChange, titlePrefix = '' 
           <span className="pager-size">
             <span>每页</span>
             {PAGE_SIZES.map((size) => (
-              <button type="button" key={size} className={`control-button ${state.pageSize === size ? 'active' : ''}`} onClick={() => onStateChange({ pageSize: size, page: 1 })}>{size}/页</button>
+              <button
+                type="button"
+                key={size}
+                className={`control-button ${state.pageSize === size ? 'active' : ''}`}
+                onClick={() => {
+                  localStorage.setItem('heroRadarDefaultPageSize', String(size));
+                  onStateChange({ pageSize: size, page: 1 });
+                }}
+              >
+                {size}/页
+              </button>
             ))}
           </span>
         </div>
@@ -641,7 +638,10 @@ function SourcesView({ payload, state, onStateChange }) {
             key={channel.id}
             className={channel.id === activeChannel ? 'active' : ''}
             data-tip={channel.description || ''}
-            onClick={() => onStateChange({ activeChannel: channel.id, activeWindow: defaultRangeId(payload.items || [], channel.id), sort: 'native', sortDir: 'asc', page: 1 })}
+            onClick={() => {
+              localStorage.setItem('heroRadarSourceTab', channel.id);
+              onStateChange({ activeChannel: channel.id, activeWindow: defaultRangeId(payload.items || [], channel.id), sort: 'native', sortDir: 'asc', page: 1 });
+            }}
           >
             {channel.label}
             <span className="tab-count">{formatNumber(channel.count)}</span>
@@ -793,8 +793,26 @@ function App() {
       })
       .then((data) => {
         const initial = initialDashboardState(data);
+        const storedSection = localStorage.getItem('heroRadarSection');
+        const section = storedSection === 'source' ? 'sources' : storedSection === 'setting' ? 'settings' : storedSection;
+        const activeChannel = (data.channels || []).some((channel) => channel.id === localStorage.getItem('heroRadarSourceTab'))
+          ? localStorage.getItem('heroRadarSourceTab')
+          : initial.activeChannel;
+        const activeSettings = (data.settings_channels || []).some((channel) => channel.id === localStorage.getItem('heroRadarSettingsTab'))
+          ? localStorage.getItem('heroRadarSettingsTab')
+          : initial.activeSettings;
+        const activeRangeChannel = section === 'settings' ? activeSettings : activeChannel;
         setPayload(data);
-        setState({ ...initial, page: 1, pageSize: 100, activeWindow: defaultRangeId(data.items || [], initial.activeChannel), sortDir: 'asc' });
+        setState({
+          ...initial,
+          section: workspaceSections().some((row) => row.id === section && row.enabled) ? section : initial.section,
+          activeChannel,
+          activeSettings,
+          page: 1,
+          pageSize: storedPageSize(),
+          activeWindow: defaultRangeId(data.items || [], activeRangeChannel),
+          sortDir: 'asc',
+        });
       })
       .catch((err) => setError(String(err.message || err)));
   }, []);
@@ -840,7 +858,11 @@ function App() {
                 className={activeSection === section.id ? 'active' : ''}
                 disabled={!section.enabled}
                 title={section.enabled ? section.label : 'Layer 3, not in this slice'}
-                onClick={() => section.enabled && patchState({ section: section.id, page: 1 })}
+                onClick={() => {
+                  if (!section.enabled) return;
+                  localStorage.setItem('heroRadarSection', section.id);
+                  patchState({ section: section.id, page: 1 });
+                }}
               >
                 <span className="nav-icon" aria-hidden="true">{section.label.slice(0, 1)}</span>
                 <span className="full">{section.label}</span>
@@ -853,7 +875,10 @@ function App() {
           <SettingsSubrail
             channels={settingsChannels}
             activeSettings={activeSettings}
-            onSelect={(id) => patchState({ activeSettings: id, activeWindow: defaultRangeId(payload.items || [], id), sort: 'native', sortDir: 'asc', page: 1 })}
+            onSelect={(id) => {
+              localStorage.setItem('heroRadarSettingsTab', id);
+              patchState({ activeSettings: id, activeWindow: defaultRangeId(payload.items || [], id), sort: 'native', sortDir: 'asc', page: 1 });
+            }}
           />
         ) : null}
 
