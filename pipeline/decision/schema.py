@@ -145,11 +145,108 @@ create table if not exists llm_cache (
     error text
 );
 
+create table if not exists l2_feed_runs (
+    feed_run_id text primary key,
+    decision_run_id text not null,
+    started_at text not null,
+    completed_at text,
+    status text not null,
+    config_hash text not null,
+    model_profile_json text not null,
+    note text
+);
+
+create table if not exists l2_candidate_groups (
+    group_id text primary key,
+    feed_run_id text not null,
+    canonical_entity_id text not null,
+    canonical_name text not null,
+    canonical_key text not null,
+    canonical_link text,
+    member_entity_ids_json text not null,
+    level text not null,
+    source_families_json text not null,
+    evidence_hash text not null,
+    grouping_reason_json text not null,
+    context_json text not null
+);
+
+create table if not exists l2_scout_results (
+    id integer primary key autoincrement,
+    feed_run_id text not null,
+    group_id text not null,
+    included_in_scoring integer not null,
+    scout_score real not null,
+    reason text not null,
+    needed_context_json text not null,
+    risk text not null,
+    confidence real not null,
+    provider text not null,
+    model text not null,
+    prompt_version text not null,
+    cache_key text not null,
+    unique(feed_run_id, group_id)
+);
+
+create table if not exists l2_scores (
+    id integer primary key autoincrement,
+    feed_run_id text not null,
+    group_id text not null,
+    l2_score real not null,
+    axes_json text not null,
+    primary_reason text not null,
+    topic_tags_json text not null,
+    rationale_short text not null,
+    caveats_json text not null,
+    provider text not null,
+    model text not null,
+    prompt_version text not null,
+    cache_key text not null,
+    unique(feed_run_id, group_id)
+);
+
+create table if not exists deepdive_reports (
+    id integer primary key autoincrement,
+    feed_run_id text not null,
+    group_id text not null,
+    status text not null,
+    summary_json text not null,
+    tool_trace_json text not null,
+    provider text not null,
+    model text not null,
+    prompt_version text not null,
+    cache_key text not null,
+    created_at text not null,
+    unique(feed_run_id, group_id)
+);
+
+create table if not exists l2_feed_items (
+    id integer primary key autoincrement,
+    feed_run_id text not null,
+    group_id text not null,
+    section text not null,
+    rank integer not null,
+    deepdive_status text not null,
+    unique(feed_run_id, group_id, section)
+);
+
+create table if not exists feed_feedback (
+    id integer primary key autoincrement,
+    feed_run_id text not null,
+    group_id text not null,
+    vote text not null,
+    created_at text not null,
+    unique(feed_run_id, group_id)
+);
+
 create index if not exists idx_entities_key on entities(key_type, canonical_key);
 create index if not exists idx_evidence_run_entity on evidence_rows(run_id, entity_id);
 create index if not exists idx_candidates_run_level on potential_candidates(run_id, level);
 create index if not exists idx_edge_watch_run on edge_watch_candidates(run_id);
 create index if not exists idx_backfill_run_status on backfill_jobs(run_id, status);
+create index if not exists idx_l2_groups_run on l2_candidate_groups(feed_run_id);
+create index if not exists idx_l2_scores_run_score on l2_scores(feed_run_id, l2_score);
+create index if not exists idx_l2_feed_items_run_section on l2_feed_items(feed_run_id, section, rank);
 """
 
 
@@ -214,14 +311,20 @@ def reset_decision_stage(
     tables: Sequence[str],
 ) -> None:
     allowed = {
-        "potential_candidates",
-        "edge_watch_candidates",
-        "backfill_jobs",
-        "entity_mentions",
-        "evidence_rows",
+        "potential_candidates": "run_id",
+        "edge_watch_candidates": "run_id",
+        "backfill_jobs": "run_id",
+        "entity_mentions": "run_id",
+        "evidence_rows": "run_id",
+        "l2_candidate_groups": "feed_run_id",
+        "l2_scout_results": "feed_run_id",
+        "l2_scores": "feed_run_id",
+        "deepdive_reports": "feed_run_id",
+        "l2_feed_items": "feed_run_id",
+        "feed_feedback": "feed_run_id",
     }
     for table in tables:
         if table not in allowed:
             raise ValueError(f"refusing to reset unknown run-scoped table: {table}")
-        conn.execute(f"delete from {table} where run_id = ?", (run_id,))
+        conn.execute(f"delete from {table} where {allowed[table]} = ?", (run_id,))
     conn.commit()

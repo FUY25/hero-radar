@@ -102,6 +102,73 @@ class DecisionSchemaTest(unittest.TestCase):
             0,
         )
 
+    def test_init_creates_layer2_feed_tables(self):
+        conn = sqlite3.connect(":memory:")
+        init_decision_db(conn)
+
+        names = {
+            row[0]
+            for row in conn.execute(
+                "select name from sqlite_master where type = 'table'"
+            ).fetchall()
+        }
+
+        self.assertIn("l2_feed_runs", names)
+        self.assertIn("l2_candidate_groups", names)
+        self.assertIn("l2_scout_results", names)
+        self.assertIn("l2_scores", names)
+        self.assertIn("deepdive_reports", names)
+        self.assertIn("l2_feed_items", names)
+        self.assertIn("feed_feedback", names)
+
+    def test_reset_stage_allows_layer2_run_scoped_tables(self):
+        conn = sqlite3.connect(":memory:")
+        init_decision_db(conn)
+        conn.execute(
+            """
+            insert into l2_feed_runs(feed_run_id, decision_run_id, started_at, status, config_hash, model_profile_json, note)
+            values (?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("l2-run", "decision-run", "2026-05-31T00:00:00Z", "ok", "hash", "{}", ""),
+        )
+        conn.execute(
+            """
+            insert into l2_candidate_groups(group_id, feed_run_id, canonical_entity_id, canonical_name, canonical_key, canonical_link, member_entity_ids_json, level, source_families_json, evidence_hash, grouping_reason_json, context_json)
+            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "group:one",
+                "l2-run",
+                "entity:one",
+                "One",
+                "github:owner/repo",
+                "https://github.com/owner/repo",
+                '["entity:one"]',
+                "potential",
+                '["github"]',
+                "evidence-hash",
+                "{}",
+                "{}",
+            ),
+        )
+        conn.execute(
+            """
+            insert into l2_scores(feed_run_id, group_id, l2_score, axes_json, primary_reason, topic_tags_json, rationale_short, caveats_json, provider, model, prompt_version, cache_key)
+            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("l2-run", "group:one", 80, "{}", "Workflow Shift", "[]", "Good", "[]", "kimi", "kimi-k2.5", "v1", "cache"),
+        )
+
+        reset_decision_stage(
+            conn,
+            run_id="l2-run",
+            tables=["l2_candidate_groups", "l2_scores"],
+        )
+
+        self.assertEqual(conn.execute("select count(*) from l2_candidate_groups").fetchone()[0], 0)
+        self.assertEqual(conn.execute("select count(*) from l2_scores").fetchone()[0], 0)
+        self.assertEqual(conn.execute("select count(*) from l2_feed_runs").fetchone()[0], 1)
+
 
 if __name__ == "__main__":
     unittest.main()
