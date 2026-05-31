@@ -25,6 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from pipeline.dashboard_data import build_dashboard_data
 from pipeline.decision.schema import init_decision_db
 
 CONFIG_PATH = ROOT / "pipeline" / "config.json"
@@ -197,6 +198,18 @@ def query_candidates(conn: sqlite3.Connection, run_id: str) -> dict[str, Any]:
         ).fetchall()
     ]
     return {"run_id": run_id, "candidates": candidates, "edge_watch": edge_watch}
+
+
+def query_dashboard_data_payload() -> dict[str, Any]:
+    payload = build_dashboard_data(db_path=DB_PATH, config=read_json(CONFIG_PATH))
+    with connect_decision_db() as conn:
+        run_id = query_latest_decision_run(conn) or ""
+        payload["candidates"] = (
+            query_candidates(conn, run_id)
+            if run_id
+            else {"run_id": "", "candidates": [], "edge_watch": []}
+        )
+    return payload
 
 
 def resolve_entity_lookup(conn: sqlite3.Connection, entity_or_key: str) -> str:
@@ -379,6 +392,9 @@ class HeroRadarHandler(BaseHTTPRequestHandler):
             self.send_response(204)
             self.send_header("Cache-Control", "max-age=86400")
             self.end_headers()
+            return
+        if path == "/api/dashboard-data":
+            json_response(self, query_dashboard_data_payload(), cors=True)
             return
         if path == "/api/candidates":
             with connect_decision_db() as conn:
