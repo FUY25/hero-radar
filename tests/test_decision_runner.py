@@ -604,6 +604,48 @@ class DecisionRunnerTest(unittest.TestCase):
             self.assertEqual(payload["run_id"], "decision-run-1")
             self.assertEqual(payload["candidates"][0]["level"], "potential")
 
+    def test_reconcile_entity_ids_does_not_revive_stale_title_alias_merge(self):
+        from pipeline.decision.entity_resolution import Entity, ResolutionResult, entity_id_for_key
+        from pipeline.decision.run_decision import reconcile_entity_ids
+
+        conn = sqlite3.connect(":memory:")
+        init_decision_db(conn)
+        stale_title = "Show HN: Continue? Y/N: A 60-second game about AI agent permission fatigue"
+        conn.execute(
+            """
+            insert into alias_links(entity_id, source, external_id, alias, confidence, origin, approved, created_at)
+            values (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                entity_id_for_key("domain:scalex.dev"),
+                "decision",
+                "domain:scalex.dev",
+                stale_title,
+                "deterministic",
+                "stage_a",
+                1,
+                "2026-05-30T00:00:00Z",
+            ),
+        )
+        new_entity_id = entity_id_for_key("domain:llmgame.scalex.dev")
+        resolution = ResolutionResult(
+            entities=[
+                Entity(
+                    entity_id=new_entity_id,
+                    canonical_entity=stale_title,
+                    canonical_key="domain:llmgame.scalex.dev",
+                    key_type="domain",
+                    aliases=(stale_title,),
+                    source_refs=(),
+                )
+            ],
+            item_to_entity={1: new_entity_id},
+        )
+
+        reconciled = reconcile_entity_ids(conn, resolution)
+
+        self.assertEqual(reconciled, {new_entity_id: new_entity_id})
+
     def test_runner_does_not_reset_completed_backfill_jobs_to_pending(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "hero.sqlite"

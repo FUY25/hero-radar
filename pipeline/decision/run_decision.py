@@ -40,6 +40,7 @@ RUN_SCOPED_TABLES = [
     "evidence_rows",
 ]
 CLASSIFIER_EVIDENCE_SOURCES = {"hn_llm_classifier", "x_tweets", "npm_registry"}
+STRUCTURED_ENTITY_KEY_PREFIXES = ("github:", "domain:", "npm:")
 
 
 def read_latest_items(conn: sqlite3.Connection) -> list[dict[str, Any]]:
@@ -126,7 +127,10 @@ def reconcile_entity_ids(
 ) -> dict[str, str]:
     reconciled: dict[str, str] = {}
     for entity in resolution.entities:
-        lookup_values = {entity.canonical_key, *entity.aliases}
+        lookup_values = {
+            entity.canonical_key,
+            *(alias for alias in entity.aliases if str(alias).startswith(STRUCTURED_ENTITY_KEY_PREFIXES)),
+        }
         placeholders = ",".join("?" for _ in lookup_values)
         prior_id: str | None = None
         if lookup_values:
