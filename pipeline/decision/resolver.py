@@ -12,6 +12,7 @@ from pipeline.decision.entity_resolution import (
     extract_github_keys,
     normalize_name_key,
 )
+from pipeline.decision.x_classifier import canonicalize_entity_key
 
 
 RESOLVER_SOURCE = "resolver"
@@ -433,7 +434,7 @@ def _accepted_classifier_candidates(
         if row[3] == "hn_llm_classifier" and metric_value not in PROJECTNESS_VALUES:
             continue
         raw_key = str(row[1] or row[2] or "")
-        entity_key = raw_key if ":" in raw_key else normalize_name_key(raw_key)
+        entity_key = canonicalize_entity_key(raw_key) if ":" in raw_key else normalize_name_key(raw_key)
         if not entity_key:
             continue
         item = {"entity_id": str(row[0]), "entity_key": entity_key}

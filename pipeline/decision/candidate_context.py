@@ -282,7 +282,6 @@ def _dedupe_bullets(bullets: list[dict[str, Any]]) -> list[dict[str, Any]]:
             bullet.get("family"),
             bullet.get("origin_type"),
             bullet.get("provenance_badge"),
-            bullet.get("strength"),
         )
         if key not in merged:
             merged[key] = {**bullet, "source_refs": []}

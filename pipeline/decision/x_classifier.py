@@ -71,7 +71,19 @@ def _json_list(value: str | None) -> list[str]:
 
 
 def entity_id_for_key(entity_key: str) -> str:
-    return stage_a_entity_id_for_key(entity_key)
+    return stage_a_entity_id_for_key(canonicalize_entity_key(entity_key))
+
+
+def canonicalize_entity_key(entity_key: str) -> str:
+    value = str(entity_key or "").strip()
+    if value.lower().startswith("name:"):
+        label = value.split(":", 1)[1]
+        return normalize_name_key(label) or value
+    if value.lower().startswith("term:"):
+        label = value.split(":", 1)[1]
+        normalized = normalize_name_key(label)
+        return f"term:{normalized.split(':', 1)[1]}" if normalized else value
+    return value
 
 
 def github_keys_from_text(text: str) -> list[str]:
@@ -647,12 +659,13 @@ def run_x_stage1(
         if not item["closer_look"]:
             continue
         for ref in item["project_refs"]:
+            entity_key = canonicalize_entity_key(ref["entity_key"])
             if ref["entity_confidence"] not in {"linked", "exact_handle"}:
                 continue
             for name in [*item["product_names"], ref["entity_name"]]:
                 name_key = normalize_name_key(name)
                 if name_key and name_key not in linked_refs_by_name:
-                    linked_refs_by_name[name_key] = ref
+                    linked_refs_by_name[name_key] = {**ref, "entity_key": entity_key}
 
     for item in stage1_items:
         if not item["closer_look"]:
@@ -661,11 +674,12 @@ def run_x_stage1(
         if tweet is None:
             continue
         for ref in item["project_refs"]:
-            entity_id = entity_id_for_key(ref["entity_key"])
+            entity_key = canonicalize_entity_key(ref["entity_key"])
+            entity_id = entity_id_for_key(entity_key)
             mentions.setdefault(entity_id, []).append(
                 {
                     "tweet": tweet,
-                    "entity_key": ref["entity_key"],
+                    "entity_key": entity_key,
                     "entity_name": ref["entity_name"],
                     "entity_confidence": ref["entity_confidence"],
                     "expression_strength": item["expression_strength"],
@@ -840,7 +854,8 @@ def _insert_x_evidence(
     aggregate: dict[str, Any],
     output: dict[str, Any],
 ) -> None:
-    entity_key = output["entity_key"]
+    entity_key = canonicalize_entity_key(output["entity_key"])
+    output = {**output, "entity_key": entity_key}
     accepted_tier = accepted_x_tier(output, aggregate=aggregate)
     raw_refs = ",".join(output["cited_tweet_ids"])
     raw_url_or_ref = ",".join(f"tweet:{tweet_id}" for tweet_id in output["cited_tweet_ids"])

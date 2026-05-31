@@ -162,6 +162,45 @@ class CandidateContextTest(unittest.TestCase):
         self.assertEqual(classifier_bullets[0]["source_refs"], ["item:10", "item:11"])
         self.assertEqual(bundle["evidence_count"], len(bundle["evidence_bullets"]))
 
+    def test_context_dedupes_same_label_even_when_signal_strength_differs(self):
+        from pipeline.decision.candidate_context import context_bundle_for_entity
+
+        conn = self.make_conn()
+        rows = [
+            ("x_tweets", "x_tier", "potential", "x_social", "x_social_x_tier", "potential", "tweet:t1"),
+            ("x_tweets", "x_tier", "potential", "x_social", "x_social_tier_potential", "early_trigger", "tweet:t1"),
+        ]
+        for source, metric_name, metric_value, family, rule_id, signal_label, raw_ref in rows:
+            conn.execute(
+                """
+                insert into evidence_rows(entity_id, canonical_entity, alias, source, event_at, metric_name, metric_value, family, rule_id, rule_version, signal_label, historical_safety, note, raw_url_or_ref, run_id)
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "entity:repo",
+                    "owner/repo",
+                    "owner/repo",
+                    source,
+                    "2026-05-31T00:00:00Z",
+                    metric_name,
+                    metric_value,
+                    family,
+                    rule_id,
+                    "rules-v1",
+                    signal_label,
+                    "snapshot_only",
+                    "note",
+                    raw_ref,
+                    "run-1",
+                ),
+            )
+        conn.commit()
+
+        bundle = context_bundle_for_entity(conn, entity_id="entity:repo", run_id="run-1")
+
+        labels = [bullet["label"] for bullet in bundle["evidence_bullets"]]
+        self.assertEqual(labels.count("X potential"), 1)
+
     def test_context_prefers_resolver_alias_when_canonical_key_is_name(self):
         from pipeline.decision.candidate_context import context_bundle_for_entity
 

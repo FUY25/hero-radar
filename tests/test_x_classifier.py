@@ -362,6 +362,71 @@ class XClassifierTest(unittest.TestCase):
         ).fetchone()[0]
         self.assertEqual(entity_id, entity_id_for_key("name:clawdbot"))
 
+    def test_stage1_normalizes_name_ref_entity_keys_before_grouping(self) -> None:
+        from pipeline.decision.entity_resolution import entity_id_for_key
+        from pipeline.decision.x_classifier import run_x_stage1
+
+        conn = self.make_conn()
+        provider = FakeLLMProvider(
+            [
+                {
+                    "triage": [
+                        {
+                            "tweet_id": "t1",
+                            "about_concrete_project": True,
+                            "closer_look": True,
+                            "product_names": ["Claude Opus 4.8"],
+                            "product_links": [],
+                            "project_refs": [
+                                {
+                                    "entity_key": "name:Claude Opus 4.8",
+                                    "entity_name": "Claude Opus 4.8",
+                                    "entity_confidence": "fuzzy_name",
+                                    "confidence": 0.8,
+                                }
+                            ],
+                            "expression_strength": "recommendation",
+                            "evidence_quote": "Claude Opus 4.8",
+                            "reason": "Concrete model version.",
+                        },
+                        {
+                            "tweet_id": "t2",
+                            "about_concrete_project": True,
+                            "closer_look": True,
+                            "product_names": ["claude-opus-4-8"],
+                            "product_links": [],
+                            "project_refs": [
+                                {
+                                    "entity_key": "name:claude-opus-4-8",
+                                    "entity_name": "claude-opus-4-8",
+                                    "entity_confidence": "fuzzy_name",
+                                    "confidence": 0.8,
+                                }
+                            ],
+                            "expression_strength": "adoption_or_usage",
+                            "evidence_quote": "claude-opus-4-8",
+                            "reason": "Same concrete model version with normalized spelling.",
+                        },
+                    ]
+                }
+            ]
+        )
+
+        run_x_stage1(
+            conn,
+            run_id="decision_run",
+            provider=provider,
+            credible_handles={"credible1", "credible2"},
+            now="2026-05-31T04:00:00Z",
+            limit=10,
+            batch_size=10,
+        )
+
+        rows = conn.execute(
+            "select distinct entity_id from entity_mentions where window = '24h'"
+        ).fetchall()
+        self.assertEqual(rows, [(entity_id_for_key("name:claude-opus-4-8"),)])
+
     def test_stage1_merges_name_only_mentions_to_linked_project_in_same_batch(self) -> None:
         from pipeline.decision.entity_resolution import entity_id_for_key
         from pipeline.decision.x_classifier import run_x_stage1
