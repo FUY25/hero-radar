@@ -78,6 +78,66 @@ def decision_command(
     return cmd
 
 
+def layer2_command(
+    *,
+    python: str,
+    decision_run_id: str,
+    now: str,
+    scout_limit: int,
+    scoring_limit: int,
+    deepdive_limit: int,
+    deepdive_min_l2_score: float | None = None,
+    scout_model: str | None = None,
+    scoring_model: str | None = None,
+    deepdive_model: str | None = None,
+    enable_kimi_web_search: bool = False,
+    max_tool_calls: int | None = None,
+    max_web_search_calls: int | None = None,
+    max_repo_files: int | None = None,
+    max_pages: int | None = None,
+    max_hn_thread_fetches: int | None = None,
+    max_x_context_fetches: int | None = None,
+) -> list[str]:
+    cmd = [
+        python,
+        "-m",
+        "pipeline.decision.run_layer2_feed",
+        "--decision-run-id",
+        decision_run_id,
+        "--now",
+        now,
+        "--edge-scout-limit",
+        str(scout_limit),
+        "--scoring-limit",
+        str(scoring_limit),
+        "--deepdive-limit",
+        str(deepdive_limit),
+    ]
+    if deepdive_min_l2_score is not None:
+        cmd.extend(["--deepdive-min-l2-score", str(deepdive_min_l2_score)])
+    if scout_model:
+        cmd.extend(["--scout-model", scout_model])
+    if scoring_model:
+        cmd.extend(["--scoring-model", scoring_model])
+    if deepdive_model:
+        cmd.extend(["--deepdive-model", deepdive_model])
+    if enable_kimi_web_search:
+        cmd.append("--enable-kimi-web-search")
+    if max_tool_calls is not None:
+        cmd.extend(["--max-tool-calls-per-candidate", str(max_tool_calls)])
+    if max_web_search_calls is not None:
+        cmd.extend(["--max-web-search-calls-per-candidate", str(max_web_search_calls)])
+    if max_repo_files is not None:
+        cmd.extend(["--max-repo-files-per-candidate", str(max_repo_files)])
+    if max_pages is not None:
+        cmd.extend(["--max-pages-per-candidate", str(max_pages)])
+    if max_hn_thread_fetches is not None:
+        cmd.extend(["--max-hn-thread-fetches-per-candidate", str(max_hn_thread_fetches)])
+    if max_x_context_fetches is not None:
+        cmd.extend(["--max-x-context-fetches-per-candidate", str(max_x_context_fetches)])
+    return cmd
+
+
 def _run_stage(
     *,
     runner: Callable[..., subprocess.CompletedProcess[str]],
@@ -118,6 +178,21 @@ def run_daily(
     resolver_research_limit: int = 50,
     resolver_research_rounds: int = 3,
     enrich_readme_limit: int = 100,
+    run_layer2: bool = False,
+    layer2_scout_limit: int = 50,
+    layer2_scoring_limit: int = 150,
+    layer2_deepdive_limit: int = 10,
+    layer2_deepdive_min_l2_score: float | None = None,
+    layer2_scout_model: str | None = None,
+    layer2_scoring_model: str | None = None,
+    layer2_deepdive_model: str | None = None,
+    layer2_enable_kimi_web_search: bool = False,
+    layer2_max_tool_calls: int | None = None,
+    layer2_max_web_search_calls: int | None = None,
+    layer2_max_repo_files: int | None = None,
+    layer2_max_pages: int | None = None,
+    layer2_max_hn_thread_fetches: int | None = None,
+    layer2_max_x_context_fetches: int | None = None,
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
 ) -> dict[str, Any]:
@@ -173,6 +248,39 @@ def run_daily(
             if stages[-1]["returncode"] != 0:
                 return {"ok": False, "returncode": stages[-1]["returncode"], "run_id": active_run_id, "stages": stages}
 
+        if run_layer2:
+            stages.append(
+                {
+                    "name": "layer2",
+                    **_run_stage(
+                        runner=runner,
+                        cmd=layer2_command(
+                            python=python,
+                            decision_run_id=active_run_id,
+                            now=active_now,
+                            scout_limit=layer2_scout_limit,
+                            scoring_limit=layer2_scoring_limit,
+                            deepdive_limit=layer2_deepdive_limit,
+                            deepdive_min_l2_score=layer2_deepdive_min_l2_score,
+                            scout_model=layer2_scout_model,
+                            scoring_model=layer2_scoring_model,
+                            deepdive_model=layer2_deepdive_model,
+                            enable_kimi_web_search=layer2_enable_kimi_web_search,
+                            max_tool_calls=layer2_max_tool_calls,
+                            max_web_search_calls=layer2_max_web_search_calls,
+                            max_repo_files=layer2_max_repo_files,
+                            max_pages=layer2_max_pages,
+                            max_hn_thread_fetches=layer2_max_hn_thread_fetches,
+                            max_x_context_fetches=layer2_max_x_context_fetches,
+                        ),
+                        cwd=active_root,
+                        timeout=timeout,
+                    ),
+                }
+            )
+            if stages[-1]["returncode"] != 0:
+                return {"ok": False, "returncode": stages[-1]["returncode"], "run_id": active_run_id, "stages": stages}
+
         return {"ok": True, "returncode": 0, "run_id": active_run_id, "stages": stages}
     finally:
         try:
@@ -206,6 +314,21 @@ def main() -> int:
     parser.add_argument("--resolver-research-limit", type=int, default=50)
     parser.add_argument("--resolver-research-rounds", type=int, default=3)
     parser.add_argument("--enrich-readme-limit", type=int, default=100)
+    parser.add_argument("--run-layer2", action="store_true")
+    parser.add_argument("--layer2-scout-limit", type=int, default=50)
+    parser.add_argument("--layer2-scoring-limit", type=int, default=150)
+    parser.add_argument("--layer2-deepdive-limit", type=int, default=10)
+    parser.add_argument("--layer2-deepdive-min-l2-score", type=float, default=None)
+    parser.add_argument("--layer2-scout-model", default=None)
+    parser.add_argument("--layer2-scoring-model", default=None)
+    parser.add_argument("--layer2-deepdive-model", default=None)
+    parser.add_argument("--layer2-enable-kimi-web-search", action="store_true")
+    parser.add_argument("--layer2-max-tool-calls", type=int, default=None)
+    parser.add_argument("--layer2-max-web-search-calls", type=int, default=None)
+    parser.add_argument("--layer2-max-repo-files", type=int, default=None)
+    parser.add_argument("--layer2-max-pages", type=int, default=None)
+    parser.add_argument("--layer2-max-hn-thread-fetches", type=int, default=None)
+    parser.add_argument("--layer2-max-x-context-fetches", type=int, default=None)
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_SECONDS)
     args = parser.parse_args()
 
@@ -223,6 +346,21 @@ def main() -> int:
         resolver_research_limit=args.resolver_research_limit,
         resolver_research_rounds=args.resolver_research_rounds,
         enrich_readme_limit=args.enrich_readme_limit,
+        run_layer2=args.run_layer2,
+        layer2_scout_limit=args.layer2_scout_limit,
+        layer2_scoring_limit=args.layer2_scoring_limit,
+        layer2_deepdive_limit=args.layer2_deepdive_limit,
+        layer2_deepdive_min_l2_score=args.layer2_deepdive_min_l2_score,
+        layer2_scout_model=args.layer2_scout_model,
+        layer2_scoring_model=args.layer2_scoring_model,
+        layer2_deepdive_model=args.layer2_deepdive_model,
+        layer2_enable_kimi_web_search=args.layer2_enable_kimi_web_search,
+        layer2_max_tool_calls=args.layer2_max_tool_calls,
+        layer2_max_web_search_calls=args.layer2_max_web_search_calls,
+        layer2_max_repo_files=args.layer2_max_repo_files,
+        layer2_max_pages=args.layer2_max_pages,
+        layer2_max_hn_thread_fetches=args.layer2_max_hn_thread_fetches,
+        layer2_max_x_context_fetches=args.layer2_max_x_context_fetches,
         timeout=args.timeout,
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2))

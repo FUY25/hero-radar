@@ -130,6 +130,78 @@ class DailyPipelineTest(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 run_daily(root=root, python="py", runner=FakeRunner())
 
+    def test_daily_pipeline_can_run_layer2_after_decision(self):
+        from pipeline.run_daily import run_daily
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            runner = FakeRunner()
+
+            summary = run_daily(
+                root=root,
+                python="py",
+                run_id="decision_daily_test",
+                now="2026-05-31T12:00:00Z",
+                run_layer2=True,
+                layer2_scout_limit=10,
+                layer2_scoring_limit=20,
+                layer2_deepdive_limit=2,
+                runner=runner,
+            )
+
+        self.assertTrue(summary["ok"])
+        self.assertEqual(len(runner.calls), 3)
+        self.assertEqual(
+            runner.calls[2]["cmd"],
+            [
+                "py",
+                "-m",
+                "pipeline.decision.run_layer2_feed",
+                "--decision-run-id",
+                "decision_daily_test",
+                "--now",
+                "2026-05-31T12:00:00Z",
+                "--edge-scout-limit",
+                "10",
+                "--scoring-limit",
+                "20",
+                "--deepdive-limit",
+                "2",
+            ],
+        )
+
+    def test_daily_pipeline_passes_layer2_web_search_and_tool_budgets(self):
+        from pipeline.run_daily import run_daily
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            runner = FakeRunner()
+
+            run_daily(
+                root=root,
+                python="py",
+                run_id="decision_daily_test",
+                now="2026-05-31T12:00:00Z",
+                run_layer2=True,
+                layer2_enable_kimi_web_search=True,
+                layer2_max_tool_calls=20,
+                layer2_max_web_search_calls=3,
+                layer2_max_repo_files=8,
+                layer2_max_pages=6,
+                runner=runner,
+            )
+
+        cmd = runner.calls[2]["cmd"]
+        self.assertIn("--enable-kimi-web-search", cmd)
+        self.assertIn("--max-tool-calls-per-candidate", cmd)
+        self.assertIn("20", cmd)
+        self.assertIn("--max-web-search-calls-per-candidate", cmd)
+        self.assertIn("3", cmd)
+        self.assertIn("--max-repo-files-per-candidate", cmd)
+        self.assertIn("8", cmd)
+        self.assertIn("--max-pages-per-candidate", cmd)
+        self.assertIn("6", cmd)
+
 
 if __name__ == "__main__":
     unittest.main()
