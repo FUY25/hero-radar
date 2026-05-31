@@ -260,6 +260,7 @@ def resolve_candidate_links(
                 link = _normalize_search_result(result)
                 if link:
                     links.append(link)
+            links = _select_internal_links(entity_key, links)
 
         response = {
             "entity_key": entity_key,

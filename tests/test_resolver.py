@@ -229,6 +229,29 @@ class ResolverTest(unittest.TestCase):
         self.assertEqual(result["source"], "search")
         self.assertEqual(result["resolved_links"][0]["key"], "github:owner/clawdbot")
 
+    def test_resolver_rejects_mismatched_search_result_for_name(self) -> None:
+        from pipeline.decision.resolver import resolve_candidate_links
+
+        conn = self.make_conn()
+        search_client = FakeSearchClient(
+            [
+                {
+                    "title": "RPCS-1",
+                    "url": "https://rpcs1.dev",
+                    "description": "Configure AI agents.",
+                }
+            ]
+        )
+
+        result = resolve_candidate_links(
+            conn,
+            "name:figure-ai",
+            search_client=search_client,
+            max_searches=1,
+        )
+
+        self.assertEqual(result["resolved_links"], [])
+
     def test_resolver_uses_agentic_research_after_direct_lookup_fails(self) -> None:
         from pipeline.decision.resolver import resolve_candidate_links
 
