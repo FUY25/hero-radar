@@ -79,6 +79,27 @@ test('candidateRowsForFeed merges potential and edge watch rows', () => {
   assert.deepEqual(candidateRowsForFeed(candidates).map((row) => row.level), ['potential', 'edge_watch']);
 });
 
+test('candidateRowsForFeed keeps evidence and canonical link fields', () => {
+  const candidates = {
+    candidates: [{
+      entity_id: 'entity:1',
+      canonical_entity: 'Repo',
+      level: 'potential',
+      evidence_bullets: [{ label: 'GH +321 stars / 24h', origin_type: 'deterministic_rule' }],
+      evidence_count: 4,
+      canonical_link: 'https://github.com/owner/repo',
+      context_preview: 'Repo description',
+      binding_confidence: 'verified',
+    }],
+    edge_watch: [],
+  };
+  const [row] = candidateRowsForFeed(candidates);
+  assert.equal(row.evidence_bullets[0].label, 'GH +321 stars / 24h');
+  assert.equal(row.evidence_extra_count, 1);
+  assert.equal(row.canonical_link, 'https://github.com/owner/repo');
+  assert.equal(row.binding_confidence, 'verified');
+});
+
 test('dashboardApiUrl defaults to same-origin api and respects explicit base', () => {
   assert.equal(dashboardApiUrl('/api/dashboard-data', ''), '/api/dashboard-data');
   assert.equal(

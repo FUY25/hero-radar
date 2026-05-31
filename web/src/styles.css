@@ -810,6 +810,41 @@ table {
   min-width: 820px;
 }
 
+.evidence-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  max-width: 420px;
+}
+
+.evidence-pill,
+.evidence-more {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 2px 7px;
+  font-size: 12px;
+  line-height: 1.4;
+  background: var(--panel2);
+}
+
+.evidence-pill small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.candidate-link {
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.candidate-context {
+  max-width: 360px;
+  color: var(--muted);
+}
+
 th,
 td {
   border-bottom: 1px solid var(--line);

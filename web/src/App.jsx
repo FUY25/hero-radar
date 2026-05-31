@@ -1181,11 +1181,11 @@ function FeedView({ payload }) {
             <table className="candidate-table">
               <thead>
                 <tr>
-                  <th>Entity</th>
+                  <th>Candidate</th>
                   <th>Level</th>
-                  <th>Signals</th>
-                  <th>First trigger</th>
-                  <th>Status</th>
+                  <th>Evidence</th>
+                  <th>Link</th>
+                  <th>Context</th>
                 </tr>
               </thead>
               <tbody>
@@ -1193,12 +1193,30 @@ function FeedView({ payload }) {
                   <tr key={`${row.pool_type}:${row.entity_id}`}>
                     <td>
                       <strong>{row.canonical_entity || row.entity_id}</strong>
-                      <code>{row.entity_id}</code>
+                      <code>{row.canonical_key || row.entity_id}</code>
                     </td>
                     <td><span className={`badge ${row.level}`}>{levelLabel(row.level)}</span></td>
-                    <td>{(row.fired_families || row.reasons || []).join(', ')}</td>
-                    <td>{row.first_trigger_at || ''}</td>
-                    <td>{row.status || row.human_status || ''}</td>
+                    <td>
+                      <div className="evidence-list">
+                        {(row.evidence_bullets || []).slice(0, 3).map((bullet) => (
+                          <span className="evidence-pill" key={`${row.entity_id}:${bullet.label}:${bullet.origin_type}`}>
+                            {bullet.label}
+                            {bullet.provenance_badge ? <small>{bullet.provenance_badge}</small> : null}
+                          </span>
+                        ))}
+                        {row.evidence_extra_count > 0 ? <span className="evidence-more">+{row.evidence_extra_count}</span> : null}
+                      </div>
+                    </td>
+                    <td>
+                      {row.canonical_link ? (
+                        <a className="candidate-link" href={row.canonical_link} target="_blank" rel="noreferrer">
+                          Open
+                        </a>
+                      ) : (
+                        <span className="muted">{row.binding_confidence === 'weak' ? 'Weak binding' : 'No link'}</span>
+                      )}
+                    </td>
+                    <td className="candidate-context">{row.context_preview || row.first_trigger_at || row.status || ''}</td>
                   </tr>
                 )) : (
                   <tr><td colSpan="5"><div className="empty">Candidate Pool 当前没有数据。</div></td></tr>

@@ -144,10 +144,24 @@ export function workspaceSections() {
   ];
 }
 
+function normalizeCandidateRow(row, poolType) {
+  const evidence = Array.isArray(row.evidence_bullets) ? row.evidence_bullets : [];
+  return {
+    ...row,
+    level: row.level || poolType,
+    pool_type: poolType,
+    evidence_bullets: evidence,
+    evidence_extra_count: Math.max(0, Number(row.evidence_count || evidence.length) - 3),
+    canonical_link: row.canonical_link || '',
+    context_preview: row.context_preview || '',
+    binding_confidence: row.binding_confidence || 'none',
+  };
+}
+
 export function candidateRowsForFeed(candidates) {
   return [
-    ...(candidates?.candidates || []).map((row) => ({ ...row, pool_type: row.level })),
-    ...(candidates?.edge_watch || []).map((row) => ({ ...row, level: 'edge_watch', pool_type: 'edge_watch' })),
+    ...(candidates?.candidates || []).map((row) => normalizeCandidateRow(row, row.level)),
+    ...(candidates?.edge_watch || []).map((row) => normalizeCandidateRow({ ...row, level: 'edge_watch' }, 'edge_watch')),
   ];
 }
 
