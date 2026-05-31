@@ -153,6 +153,26 @@ class ResolverTest(unittest.TestCase):
             ["github:firecrawl/firecrawl"],
         )
 
+    def test_resolver_rejects_single_mismatched_internal_link_for_name(self) -> None:
+        from pipeline.decision.resolver import resolve_candidate_links
+
+        conn = self.make_conn()
+        self.insert_item(
+            conn,
+            name="Figure AI signs a robotics deal",
+            url="https://x.com/source/status/1",
+            metadata={"website": "https://rpcs1.dev"},
+        )
+
+        result = resolve_candidate_links(
+            conn,
+            "name:figure-ai",
+            search_client=None,
+            max_searches=0,
+        )
+
+        self.assertEqual(result["resolved_links"], [])
+
     def test_resolver_is_bounded_and_cached_for_unresolved_name(self) -> None:
         from pipeline.decision.resolver import resolve_candidate_links
 

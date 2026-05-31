@@ -166,7 +166,10 @@ def _is_exact_name_link(entity_key: str, link: dict[str, Any]) -> bool:
         return repo == slug
     if key.startswith("domain:"):
         host = key.split(":", 1)[1]
-        return host.split(".", 1)[0] == slug
+        parts = host.split(".")
+        first = parts[0]
+        tld = parts[-1] if len(parts) > 1 else ""
+        return first == slug or (tld and f"{first}-{tld}" == slug)
     if key.startswith("npm:"):
         package = key.split(":", 1)[1].split("/")[-1]
         return package == slug
@@ -174,7 +177,7 @@ def _is_exact_name_link(entity_key: str, link: dict[str, Any]) -> bool:
 
 
 def _select_internal_links(entity_key: str, links: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    if not entity_key.startswith("name:") or len(links) <= 1:
+    if not entity_key.startswith("name:"):
         return links
     exact = [link for link in links if _is_exact_name_link(entity_key, link)]
     return exact
