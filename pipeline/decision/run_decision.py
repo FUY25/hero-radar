@@ -311,8 +311,13 @@ def write_candidates(
         insert into backfill_jobs(entity_id, run_id, source, reason, status, requested_at)
         values (?, ?, ?, ?, ?, ?)
         on conflict(run_id, entity_id, source, reason) do update set
-            status = excluded.status,
-            requested_at = excluded.requested_at
+            status = case
+                when backfill_jobs.status in ('completed', 'failed') then backfill_jobs.status
+                else excluded.status
+            end,
+            requested_at = excluded.requested_at,
+            completed_at = backfill_jobs.completed_at,
+            result_ref = backfill_jobs.result_ref
         """,
         [
             (
