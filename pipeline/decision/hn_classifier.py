@@ -6,6 +6,7 @@ import sqlite3
 import urllib.parse
 from typing import Any
 
+from pipeline.decision.bounded_parallel import bounded_parallel_map
 from pipeline.decision.entity_resolution import (
     SHARED_DOMAIN_BLOCKLIST,
     entity_id_for_key,
@@ -456,6 +457,73 @@ def _provider_name(provider: Any) -> str:
     return str(getattr(provider, "provider_name", provider.__class__.__name__.lower()))
 
 
+def _cache_key_for_input(*, provider: Any, input_payload: dict[str, Any]) -> str:
+    return cache_key_for(
+        provider=_provider_name(provider),
+        model=_provider_model(provider),
+        prompt_version=PROMPT_VERSION,
+        task=TASK,
+        input_payload=input_payload,
+    )
+
+
+def _get_cached_output(
+    conn: sqlite3.Connection,
+    *,
+    provider: Any,
+    input_payload: dict[str, Any],
+) -> dict[str, Any] | None:
+    cached = get_cached_response(
+        conn,
+        _cache_key_for_input(provider=provider, input_payload=input_payload),
+    )
+    if not cached or cached["status"] != "ok":
+        return None
+    response = dict(cached["response_json"])
+    validate_hn_output(response)
+    return response
+
+
+def _store_output_cache(
+    conn: sqlite3.Connection,
+    *,
+    provider: Any,
+    input_payload: dict[str, Any],
+    system_prompt: str,
+    response_payload: dict[str, Any],
+    status: str,
+    error: str | None = None,
+) -> None:
+    store_cached_response(
+        conn,
+        provider=_provider_name(provider),
+        model=_provider_model(provider),
+        prompt_version=PROMPT_VERSION,
+        task=TASK,
+        input_payload=input_payload,
+        request_payload={"system_prompt": system_prompt, "input_payload": input_payload},
+        response_payload=response_payload,
+        status=status,
+        error=error,
+    )
+
+
+def _call_provider(
+    *,
+    provider: Any,
+    input_payload: dict[str, Any],
+    system_prompt: str,
+) -> dict[str, Any]:
+    response = provider.complete_json(
+        task=TASK,
+        prompt_version=PROMPT_VERSION,
+        input_payload=input_payload,
+        system_prompt=system_prompt,
+    )
+    validate_hn_output(response)
+    return response
+
+
 def _complete_with_cache(
     conn: sqlite3.Connection,
     *,
@@ -463,50 +531,32 @@ def _complete_with_cache(
     input_payload: dict[str, Any],
     system_prompt: str,
 ) -> dict[str, Any]:
-    provider_name = _provider_name(provider)
-    model = _provider_model(provider)
-    key = cache_key_for(
-        provider=provider_name,
-        model=model,
-        prompt_version=PROMPT_VERSION,
-        task=TASK,
-        input_payload=input_payload,
-    )
-    cached = get_cached_response(conn, key)
-    if cached and cached["status"] == "ok":
-        return dict(cached["response_json"])
-    request_payload = {"system_prompt": system_prompt, "input_payload": input_payload}
+    cached = _get_cached_output(conn, provider=provider, input_payload=input_payload)
+    if cached:
+        return cached
     try:
-        response = provider.complete_json(
-            task=TASK,
-            prompt_version=PROMPT_VERSION,
+        response = _call_provider(
+            provider=provider,
             input_payload=input_payload,
             system_prompt=system_prompt,
         )
-        validate_hn_output(response)
     except Exception as exc:
-        store_cached_response(
+        _store_output_cache(
             conn,
-            provider=provider_name,
-            model=model,
-            prompt_version=PROMPT_VERSION,
-            task=TASK,
+            provider=provider,
             input_payload=input_payload,
-            request_payload=request_payload,
+            system_prompt=system_prompt,
             response_payload={"error": str(exc)},
             status="error",
             error=str(exc),
         )
         raise
-    store_cached_response(
+    _store_output_cache(
         conn,
-        provider=provider_name,
-        model=model,
-        prompt_version=PROMPT_VERSION,
-        task=TASK,
+        provider=provider,
         input_payload=input_payload,
-        request_payload=request_payload,
         response_payload=response,
+        system_prompt=system_prompt,
         status="ok",
     )
     return response
@@ -519,23 +569,72 @@ def run_hn_classifier(
     provider: Any,
     limit: int,
     now: str,
+    llm_concurrency: int = 1,
 ) -> dict[str, Any]:
+    if llm_concurrency <= 0:
+        raise ValueError("llm_concurrency must be positive")
     system_prompt = (
         "You are a bounded Hacker News source classifier. Return only JSON. "
         "Do not promote news articles, topic discussions, or generic terms as projects."
     )
+    units = candidate_hn_units(conn, limit)
+    outputs_by_unit_key: dict[str, dict[str, Any]] = {}
+    uncached_jobs: list[dict[str, Any]] = []
+    cache_hits = 0
+    cache_misses = 0
+    for unit in units:
+        input_payload = build_hn_prompt_payload(unit)
+        cached = _get_cached_output(conn, provider=provider, input_payload=input_payload)
+        if cached:
+            cache_hits += 1
+            outputs_by_unit_key[unit["unit_key"]] = cached
+            continue
+        cache_misses += 1
+        uncached_jobs.append({"unit_key": unit["unit_key"], "input_payload": input_payload})
+
+    def complete_job(job: dict[str, Any]) -> dict[str, Any]:
+        try:
+            response = _call_provider(
+                provider=provider,
+                input_payload=job["input_payload"],
+                system_prompt=system_prompt,
+            )
+            return {**job, "response": response, "error": None}
+        except Exception as exc:
+            return {**job, "response": {"error": str(exc)}, "error": exc}
+
+    results = bounded_parallel_map(
+        uncached_jobs,
+        complete_job,
+        concurrency=llm_concurrency,
+    )
+    first_error: Exception | None = None
+    for result in results:
+        error = result["error"]
+        status = "error" if error else "ok"
+        _store_output_cache(
+            conn,
+            provider=provider,
+            input_payload=result["input_payload"],
+            system_prompt=system_prompt,
+            response_payload=result["response"],
+            status=status,
+            error=str(error) if error else None,
+        )
+        if error:
+            if first_error is None:
+                first_error = error
+            continue
+        outputs_by_unit_key[result["unit_key"]] = result["response"]
+    if first_error:
+        raise first_error
+
     classified = 0
     classified_items = 0
     aliases = 0
     proposals = 0
-    for unit in candidate_hn_units(conn, limit):
-        input_payload = build_hn_prompt_payload(unit)
-        output = _complete_with_cache(
-            conn,
-            provider=provider,
-            input_payload=input_payload,
-            system_prompt=system_prompt,
-        )
+    for unit in units:
+        output = outputs_by_unit_key[unit["unit_key"]]
         deterministic_links = output["deterministic_links"]
         for row in unit["rows"]:
             entity_key = deterministic_links[0]["key"] if deterministic_links else f"hn:{row['item_id']}"
@@ -569,4 +668,6 @@ def run_hn_classifier(
         "classified_items": classified_items,
         "aliases": aliases,
         "proposals": proposals,
+        "cache_hits": cache_hits,
+        "cache_misses": cache_misses,
     }

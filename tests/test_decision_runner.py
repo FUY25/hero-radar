@@ -302,6 +302,7 @@ class DecisionRunnerTest(unittest.TestCase):
         self.assertIn("--classify-hn-limit", result.stdout)
         self.assertIn("--classify-x-limit", result.stdout)
         self.assertIn("--llm-model", result.stdout)
+        self.assertIn("--llm-concurrency", result.stdout)
         self.assertIn("--x-credible-handles", result.stdout)
 
     def test_run_from_args_wires_llm_provider_only_when_limits_are_explicit(self):
@@ -329,6 +330,7 @@ class DecisionRunnerTest(unittest.TestCase):
             classify_hn_limit=2,
             classify_x_limit=3,
             llm_model="deepseek-v4-flash",
+            llm_concurrency=3,
             x_stage1_batch_size=4,
             x_credible_handles="credible1, credible2",
         )
@@ -345,6 +347,7 @@ class DecisionRunnerTest(unittest.TestCase):
         self.assertIs(calls[0]["x_llm_provider"], provider)
         self.assertEqual(calls[0]["hn_classifier_limit"], 2)
         self.assertEqual(calls[0]["x_classifier_limit"], 3)
+        self.assertEqual(calls[0]["llm_concurrency"], 3)
         self.assertEqual(calls[0]["x_stage1_batch_size"], 4)
         self.assertEqual(calls[0]["x_credible_handles"], {"credible1", "credible2"})
 
@@ -375,6 +378,7 @@ class DecisionRunnerTest(unittest.TestCase):
             classify_hn_limit=0,
             classify_x_limit=0,
             llm_model=None,
+            llm_concurrency=1,
             x_stage1_batch_size=100,
             x_credible_handles="",
         )

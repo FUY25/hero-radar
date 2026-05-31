@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 import unittest
 
 from pipeline.decision.llm_provider import FakeLLMProvider
@@ -371,6 +372,84 @@ class HnClassifierTest(unittest.TestCase):
         self.assertEqual(second["classified"], 1)
         self.assertEqual(second["classified_items"], 2)
         self.assertEqual(len(provider.calls), 1)
+
+    def test_hn_classifier_parallelizes_uncached_units_without_parallel_db_writes(self) -> None:
+        from pipeline.decision.hn_classifier import run_hn_classifier
+
+        class BarrierHNProvider:
+            provider_name = "fake"
+            model = "barrier-hn"
+
+            def __init__(self) -> None:
+                self.barrier = threading.Barrier(2, timeout=3)
+                self.lock = threading.Lock()
+                self.active = 0
+                self.max_active = 0
+                self.calls: list[int] = []
+
+            def complete_json(
+                self,
+                *,
+                task: str,
+                prompt_version: str,
+                input_payload: dict,
+                system_prompt: str = "",
+            ) -> dict:
+                item_id = int(input_payload["item"]["item_id"])
+                with self.lock:
+                    self.active += 1
+                    self.max_active = max(self.max_active, self.active)
+                    self.calls.append(item_id)
+                try:
+                    self.barrier.wait()
+                    return {
+                        "item_id": item_id,
+                        "projectness": "news_article",
+                        "confidence": 0.9,
+                        "canonical_name": "",
+                        "deterministic_links": [],
+                        "proposed_links": [],
+                        "summary": "News, not project evidence.",
+                    }
+                finally:
+                    with self.lock:
+                        self.active -= 1
+
+        conn = self.make_conn(title="Seed")
+        conn.execute("delete from items")
+        self.insert_hn_item(
+            conn,
+            source="hn_firebase",
+            external_id="a",
+            title="AI news A",
+            url="https://example.com/a",
+            score=120,
+        )
+        self.insert_hn_item(
+            conn,
+            source="hn_firebase",
+            external_id="b",
+            title="AI news B",
+            url="https://example.com/b",
+            score=110,
+        )
+        provider = BarrierHNProvider()
+
+        summary = run_hn_classifier(
+            conn,
+            run_id="decision_run",
+            provider=provider,
+            limit=2,
+            now="2026-05-31T00:00:00Z",
+            llm_concurrency=2,
+        )
+
+        self.assertEqual(summary["classified"], 2)
+        self.assertEqual(summary["cache_hits"], 0)
+        self.assertEqual(summary["cache_misses"], 2)
+        self.assertGreaterEqual(provider.max_active, 2)
+        self.assertEqual(conn.execute("select count(*) from evidence_rows").fetchone()[0], 2)
+        self.assertEqual(conn.execute("select count(*) from llm_cache").fetchone()[0], 2)
 
     def test_hn_classifier_writes_projectness_evidence_and_alias_link(self) -> None:
         from pipeline.decision.entity_resolution import entity_id_for_key

@@ -466,6 +466,7 @@ def run_decision(
     hn_classifier_limit: int = 0,
     x_llm_provider: Any | None = None,
     x_classifier_limit: int = 0,
+    llm_concurrency: int = 1,
     x_stage1_batch_size: int = 100,
     x_credible_handles: set[str] | None = None,
     npm_client: Any | None = None,
@@ -525,6 +526,7 @@ def run_decision(
                 provider=hn_llm_provider,
                 limit=hn_classifier_limit,
                 now=now,
+                llm_concurrency=llm_concurrency,
             )
 
         x_stage1_summary: dict[str, Any] = {"mentions": 0}
@@ -669,6 +671,7 @@ def run_from_args(
         hn_classifier_limit=hn_limit,
         x_llm_provider=llm_provider if x_limit > 0 else None,
         x_classifier_limit=x_limit,
+        llm_concurrency=int(getattr(args, "llm_concurrency", 1) or 1),
         x_stage1_batch_size=args.x_stage1_batch_size,
         x_credible_handles=parse_credible_handles(args.x_credible_handles),
     )
@@ -684,6 +687,7 @@ def main() -> None:
     parser.add_argument("--classify-hn-limit", type=int, default=0)
     parser.add_argument("--classify-x-limit", type=int, default=0)
     parser.add_argument("--llm-model", default=None)
+    parser.add_argument("--llm-concurrency", type=int, default=1)
     parser.add_argument("--x-stage1-batch-size", type=int, default=100)
     parser.add_argument("--x-credible-handles", default="")
     args = parser.parse_args()
