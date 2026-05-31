@@ -81,6 +81,58 @@ def hn_eval_cases() -> list[dict[str, Any]]:
                 "summary": "Topic discussion, not launch evidence.",
             },
         },
+        {
+            "name": "hn_hot_news_with_company_url_noise",
+            "input": {
+                "title": "AI lab announces a new product policy",
+                "url": "https://example.com/company-news",
+                "description": "A hot company news article, not a concrete project launch.",
+            },
+            "expected": {
+                "projectness": "news_article",
+                "requires_alias": False,
+                "noise": True,
+            },
+            "fake_provider_response": {
+                "item_id": 4,
+                "projectness": "news_article",
+                "confidence": 0.91,
+                "canonical_name": "",
+                "deterministic_links": [],
+                "proposed_links": [],
+                "summary": "Company news, not product/repo evidence.",
+            },
+        },
+        {
+            "name": "hn_show_hn_product_domain_potential",
+            "input": {
+                "title": "Show HN: Clawdbot, a review tool for coding agents",
+                "url": "https://clawdbot.dev",
+                "description": "Launch post for a concrete product with an official site.",
+            },
+            "expected": {
+                "projectness": "company_product",
+                "requires_alias": True,
+                "noise": False,
+                "deterministic_link_type": "domain",
+                "deterministic_link_host": "clawdbot.dev",
+            },
+            "fake_provider_response": {
+                "item_id": 5,
+                "projectness": "company_product",
+                "confidence": 0.9,
+                "canonical_name": "Clawdbot",
+                "deterministic_links": [
+                    {
+                        "type": "domain",
+                        "key": "domain:clawdbot.dev",
+                        "url": "https://clawdbot.dev",
+                    }
+                ],
+                "proposed_links": [],
+                "summary": "Show HN launch for a concrete product.",
+            },
+        },
     ]
 
 

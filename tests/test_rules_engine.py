@@ -223,6 +223,105 @@ class RulesEngineTest(unittest.TestCase):
         self.assertEqual(result.potential_candidates[0].level, "potential")
         self.assertIn("hn_score", {row.metric_name for row in result.evidence_rows})
 
+    def test_hn_classifier_projectness_allows_hot_self_post_potential(self):
+        rows = [
+            {
+                "id": 26,
+                "source": "hn_firebase",
+                "external_id": "hn-26",
+                "name": "Show HN: Clawdbot",
+                "url": "https://news.ycombinator.com/item?id=26",
+                "description": "Launch post for a coding-agent review tool.",
+                "metadata": {"score": 180, "comments": 55, "list": "topstories"},
+                "fetched_at": "2026-05-31T00:00:00Z",
+            }
+        ]
+        resolution = resolve_entities(rows, first_seen="2026-05-31T00:00:00Z")
+
+        result = evaluate_entities(
+            rows,
+            resolution,
+            run_id="run-1",
+            rule_version="rules-v1",
+            now="2026-05-31T00:00:00Z",
+            classifier_evidence=[
+                {
+                    "entity_id": resolution.entities[0].entity_id,
+                    "source": "hn_llm_classifier",
+                    "family": "hn",
+                    "metric_name": "hn_projectness",
+                    "metric_value": "project",
+                    "signal_label": "watch",
+                    "raw_url_or_ref": "item:26",
+                }
+            ],
+        )
+
+        self.assertEqual(result.potential_candidates[0].level, "potential")
+        self.assertIn("hn_score", {row.metric_name for row in result.evidence_rows})
+
+    def test_hn_self_post_url_is_not_strict_domain_without_classifier(self):
+        rows = [
+            {
+                "id": 28,
+                "source": "hn_firebase",
+                "external_id": "hn-28",
+                "name": "Show HN: Clawdbot",
+                "url": "https://news.ycombinator.com/item?id=28",
+                "description": "Launch post whose only URL is the HN discussion.",
+                "metadata": {"score": 180, "comments": 55, "list": "topstories"},
+                "fetched_at": "2026-05-31T00:00:00Z",
+            }
+        ]
+        resolution = resolve_entities(rows, first_seen="2026-05-31T00:00:00Z")
+
+        result = evaluate_entities(
+            rows,
+            resolution,
+            run_id="run-1",
+            rule_version="rules-v1",
+            now="2026-05-31T00:00:00Z",
+        )
+
+        self.assertEqual(result.potential_candidates, [])
+
+    def test_hn_classifier_news_suppresses_hot_self_post(self):
+        rows = [
+            {
+                "id": 27,
+                "source": "hn_firebase",
+                "external_id": "hn-27",
+                "name": "AI lab announces a new product policy",
+                "url": "https://news.ycombinator.com/item?id=27",
+                "description": "Hot discussion, not a concrete launch.",
+                "metadata": {"score": 260, "comments": 155, "list": "topstories"},
+                "fetched_at": "2026-05-31T00:00:00Z",
+            }
+        ]
+        resolution = resolve_entities(rows, first_seen="2026-05-31T00:00:00Z")
+
+        result = evaluate_entities(
+            rows,
+            resolution,
+            run_id="run-1",
+            rule_version="rules-v1",
+            now="2026-05-31T00:00:00Z",
+            classifier_evidence=[
+                {
+                    "entity_id": resolution.entities[0].entity_id,
+                    "source": "hn_llm_classifier",
+                    "family": "hn",
+                    "metric_name": "hn_projectness",
+                    "metric_value": "news_article",
+                    "signal_label": "noise",
+                    "raw_url_or_ref": "item:27",
+                }
+            ],
+        )
+
+        self.assertEqual(result.potential_candidates, [])
+        self.assertEqual(result.edge_watch_candidates, [])
+
     def test_x_social_evidence_can_promote_to_potential(self):
         entity = Entity(
             entity_id="entity:x",

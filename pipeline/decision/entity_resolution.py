@@ -22,6 +22,7 @@ SHARED_DOMAIN_BLOCKLIST = {
     "twitter.com",
     "github.com",
     "news.ycombinator.com",
+    "ycombinator.com",
 }
 
 GENERIC_NAME_STOPWORDS = {

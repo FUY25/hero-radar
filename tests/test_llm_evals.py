@@ -19,6 +19,8 @@ class LlmClassifierEvalTest(unittest.TestCase):
                 "hn_project_with_github",
                 "hn_news_noise",
                 "hn_topic_noise",
+                "hn_hot_news_with_company_url_noise",
+                "hn_show_hn_product_domain_potential",
             },
         )
 
@@ -44,6 +46,8 @@ class LlmClassifierEvalTest(unittest.TestCase):
         self.assertFalse(hn_by_name["hn_project_with_github"]["expected"]["noise"])
         self.assertTrue(hn_by_name["hn_news_noise"]["expected"]["noise"])
         self.assertTrue(hn_by_name["hn_topic_noise"]["expected"]["noise"])
+        self.assertTrue(hn_by_name["hn_hot_news_with_company_url_noise"]["expected"]["noise"])
+        self.assertFalse(hn_by_name["hn_show_hn_product_domain_potential"]["expected"]["noise"])
         self.assertEqual(
             x_by_name["x_linked_two_credible_potential"]["expected"]["x_tier"],
             "potential",
@@ -84,6 +88,13 @@ class LlmClassifierEvalTest(unittest.TestCase):
             if not expected.get("requires_alias"):
                 continue
             haystack = " ".join(str(value) for value in case["input"].values()).lower()
+            if expected.get("deterministic_link_host"):
+                self.assertIn(
+                    expected["deterministic_link_host"],
+                    haystack,
+                    f"{case['name']} requires an alias but has no verifiable host",
+                )
+                continue
             self.assertIn(
                 f"{expected['deterministic_link_type']}.com",
                 haystack,

@@ -17,6 +17,7 @@ GITHUB_BOARD_SOURCES = {
 }
 HF_SOURCES = {"huggingface_models", "huggingface_datasets", "huggingface_spaces"}
 HN_NOISE_PROJECTNESS = {"news_article", "topic_discussion", "research_paper", "unknown"}
+HN_PROJECT_PROJECTNESS = {"project", "package", "company_product"}
 X_TIER_LEVELS = {"watch": "watch", "potential": "potential", "high": "high_potential", "high_potential": "high_potential"}
 
 
@@ -266,10 +267,38 @@ def hn_noise_item_ids(classifier_evidence: list[Any] | None) -> set[int]:
     return item_ids
 
 
+def hn_project_item_ids(classifier_evidence: list[Any] | None) -> set[int]:
+    item_ids: set[int] = set()
+    for row in classifier_evidence or []:
+        if evidence_field(row, "source") != "hn_llm_classifier":
+            continue
+        if evidence_field(row, "metric_name") != "hn_projectness":
+            continue
+        projectness = str(evidence_field(row, "metric_value") or "")
+        if projectness not in HN_PROJECT_PROJECTNESS:
+            continue
+        raw_ref = str(evidence_field(row, "raw_url_or_ref") or "")
+        if not raw_ref.startswith("item:"):
+            continue
+        try:
+            item_ids.add(int(raw_ref.split(":", 1)[1]))
+        except ValueError:
+            continue
+    return item_ids
+
+
 def hn_row_is_noise(row: dict[str, Any], noise_item_ids: set[int]) -> bool:
     row_id = row.get("id")
     try:
         return int(row_id) in noise_item_ids
+    except (TypeError, ValueError):
+        return False
+
+
+def hn_row_is_project(row: dict[str, Any], project_item_ids: set[int]) -> bool:
+    row_id = row.get("id")
+    try:
+        return int(row_id) in project_item_ids
     except (TypeError, ValueError):
         return False
 
@@ -295,6 +324,7 @@ def evaluate_entities(
     npm_classifier_evidence = npm_evidence_by_entity(classifier_evidence)
     x_classifier_evidence = x_evidence_by_entity(classifier_evidence)
     hn_noise_items = hn_noise_item_ids(classifier_evidence)
+    hn_project_items = hn_project_item_ids(classifier_evidence)
     states = {
         entity_id: EntityState(entity=entity)
         for entity_id, entity in entities.items()
@@ -318,10 +348,27 @@ def evaluate_entities(
             evaluate_repofomo(state, entity_rows, active_rules, rule_version, run_id)
         )
         evidence_rows.extend(
-            evaluate_hn_firebase(state, entity_rows, active_rules, rule_version, run_id, hn_noise_items)
+            evaluate_hn_firebase(
+                state,
+                entity_rows,
+                active_rules,
+                rule_version,
+                run_id,
+                hn_noise_items,
+                hn_project_items,
+            )
         )
         evidence_rows.extend(
-            evaluate_hn_algolia(state, entity_rows, active_rules, rule_version, run_id, now_dt, hn_noise_items)
+            evaluate_hn_algolia(
+                state,
+                entity_rows,
+                active_rules,
+                rule_version,
+                run_id,
+                now_dt,
+                hn_noise_items,
+                hn_project_items,
+            )
         )
         evidence_rows.extend(
             evaluate_product_hunt(state, entity_rows, active_rules, rule_version, run_id)
@@ -528,16 +575,18 @@ def evaluate_hn_firebase(
     rule_version: str,
     run_id: str,
     hn_noise_items: set[int] | None = None,
+    hn_project_items: set[int] | None = None,
 ) -> list[EvidenceRow]:
     output: list[EvidenceRow] = []
     thresholds = rules["hn"]
-    strong = state.entity.key_type in {"github", "domain"}
+    strong_entity = state.entity.key_type in {"github", "domain"}
     for row in rows:
         metadata = row.get("metadata") or {}
         if row.get("source") != "hn_firebase":
             continue
         if hn_row_is_noise(row, hn_noise_items or set()):
             continue
+        strong = strong_entity or hn_row_is_project(row, hn_project_items or set())
         score = number(metadata.get("score"))
         level = "none"
         if score >= number(thresholds["front_page_score_watch"]):
@@ -578,15 +627,17 @@ def evaluate_hn_algolia(
     run_id: str,
     now_dt: dt.datetime,
     hn_noise_items: set[int] | None = None,
+    hn_project_items: set[int] | None = None,
 ) -> list[EvidenceRow]:
-    if state.entity.key_type not in {"github", "domain"}:
-        return []
+    strong_entity = state.entity.key_type in {"github", "domain"}
     stories: dict[str, dict[str, Any]] = {}
     for row in rows:
         metadata = row.get("metadata") or {}
         if row.get("source") != "hn_algolia":
             continue
         if hn_row_is_noise(row, hn_noise_items or set()):
+            continue
+        if not strong_entity and not hn_row_is_project(row, hn_project_items or set()):
             continue
         created = parse_time(metadata.get("created_at") or row.get("fetched_at"))
         if not created or created < now_dt - dt.timedelta(days=7) or created > now_dt:
