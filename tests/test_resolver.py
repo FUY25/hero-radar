@@ -153,6 +153,30 @@ class ResolverTest(unittest.TestCase):
         self.assertEqual(len(search_client.calls), 1)
         self.assertEqual(search_client.calls[0]["limit"], 1)
 
+    def test_resolver_normalizes_plain_search_url_results(self) -> None:
+        from pipeline.decision.resolver import resolve_candidate_links
+
+        conn = self.make_conn()
+        search_client = FakeSearchClient(
+            [
+                {
+                    "title": "Clawdbot",
+                    "url": "https://github.com/owner/clawdbot",
+                    "description": "Official GitHub repository.",
+                }
+            ]
+        )
+
+        result = resolve_candidate_links(
+            conn,
+            "name:clawdbot",
+            search_client=search_client,
+            max_searches=1,
+        )
+
+        self.assertEqual(result["source"], "search")
+        self.assertEqual(result["resolved_links"][0]["key"], "github:owner/clawdbot")
+
     def test_resolver_uses_agentic_research_after_direct_lookup_fails(self) -> None:
         from pipeline.decision.resolver import resolve_candidate_links
 

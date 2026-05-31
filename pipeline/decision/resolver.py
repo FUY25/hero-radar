@@ -155,6 +155,10 @@ def _normalize_search_result(result: dict[str, Any]) -> dict[str, Any] | None:
     link_type = str(result.get("type") or "").strip()
     key = str(result.get("key") or "").strip()
     url = str(result.get("url") or "").strip()
+    if not key and url:
+        links = _links_from_texts([url], confidence=float(result.get("confidence") or 0.5))
+        if links:
+            return links[0]
     if not key and link_type and url:
         if link_type == "npm":
             key = _npm_key_from_url(url) or ""
