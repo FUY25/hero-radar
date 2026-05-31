@@ -470,6 +470,8 @@ def run_decision(
     x_credible_handles: set[str] | None = None,
     npm_client: Any | None = None,
     npm_backfill_limit: int = 0,
+    resolver_search_client: Any | None = None,
+    resolver_search_limit: int = 0,
 ) -> dict[str, int | str]:
     rules = load_rules()
     conn = sqlite3.connect(db_path)
@@ -559,6 +561,18 @@ def run_decision(
                 limit=npm_backfill_limit,
             )
 
+        resolver_summary: dict[str, Any] = {"enriched": 0, "aliases": 0, "proposals": 0}
+        if hn_summary.get("classified") or x_stage2_summary.get("tiered"):
+            from pipeline.decision.resolver import enrich_classifier_candidates
+
+            resolver_summary = enrich_classifier_candidates(
+                conn,
+                run_id=run_id,
+                search_client=resolver_search_client,
+                max_searches_per_candidate=resolver_search_limit,
+                now=now,
+            )
+
         classifier_evidence = read_classifier_evidence(conn, run_id)
         final_result = (
             evaluate_entities(
@@ -596,6 +610,9 @@ def run_decision(
             "x_stage1_mentions": int(x_stage1_summary.get("mentions") or 0),
             "x_stage2_tiered": int(x_stage2_summary.get("tiered") or 0),
             "npm_backfill_completed": int(npm_summary.get("completed") or 0),
+            "resolver_enriched": int(resolver_summary.get("enriched") or 0),
+            "resolver_aliases": int(resolver_summary.get("aliases") or 0),
+            "resolver_proposals": int(resolver_summary.get("proposals") or 0),
             "export": str(export_json_path),
         }
         return summary

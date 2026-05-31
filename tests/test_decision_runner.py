@@ -551,9 +551,16 @@ class DecisionRunnerTest(unittest.TestCase):
 
             self.assertEqual(summary["x_stage1_mentions"], 2)
             self.assertEqual(summary["x_stage2_tiered"], 1)
+            self.assertEqual(summary["resolver_enriched"], 1)
             self.assertEqual(summary["potential_candidates"], 1)
             payload = json.loads(export_path.read_text())
             self.assertEqual(payload["candidates"][0]["fired_families"], ["x_social"])
+            conn = sqlite3.connect(db_path)
+            resolver_alias = conn.execute(
+                "select alias from alias_links where origin = 'resolver'"
+            ).fetchone()
+            conn.close()
+            self.assertEqual(resolver_alias, ("github:owner/repo",))
 
     def test_runner_invokes_npm_backfill_before_final_rules(self):
         with tempfile.TemporaryDirectory() as tmpdir:
