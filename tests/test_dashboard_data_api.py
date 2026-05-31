@@ -131,6 +131,98 @@ class DashboardDataApiTest(unittest.TestCase):
         self.assertEqual(payload["items"][0]["channel"], "github_trending")
         self.assertEqual(payload["candidates"]["run_id"], "")
 
+    def test_server_candidates_include_evidence_context(self) -> None:
+        import pipeline.server as server
+        from pipeline.decision.schema import (
+            begin_decision_run,
+            finish_decision_run,
+            init_decision_db,
+        )
+
+        temp, db_path = self.make_db()
+        self.addCleanup(temp.cleanup)
+        conn = sqlite3.connect(db_path)
+        init_decision_db(conn)
+        begin_decision_run(
+            conn,
+            run_id="decision-run",
+            source_snapshot_run_id="source-run",
+            config_hash="config",
+            rule_version="rules-v1",
+        )
+        conn.execute(
+            """
+            insert into entities(entity_id, canonical_entity, canonical_key, key_type, first_seen, aliases_json, source_item_ids_json)
+            values (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "entity:repo",
+                "owner/repo",
+                "github:owner/repo",
+                "github",
+                "2026-05-31T10:00:00Z",
+                "[]",
+                "[1]",
+            ),
+        )
+        conn.execute(
+            """
+            insert into potential_candidates(entity_id, run_id, level, fired_families_json, first_trigger_at)
+            values (?, ?, ?, ?, ?)
+            """,
+            (
+                "entity:repo",
+                "decision-run",
+                "potential",
+                json.dumps(["github"]),
+                "2026-05-31T10:00:00Z",
+            ),
+        )
+        conn.execute(
+            """
+            insert into evidence_rows(entity_id, canonical_entity, alias, source, event_at, metric_name, metric_value, family, rule_id, rule_version, signal_label, historical_safety, note, raw_url_or_ref, run_id)
+            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "entity:repo",
+                "owner/repo",
+                "owner/repo",
+                "github_trending",
+                "2026-05-31T10:00:00Z",
+                "stars_today",
+                "321",
+                "github",
+                "github_daily",
+                "rules-v1",
+                "potential",
+                "snapshot_only",
+                "passed",
+                "item:1",
+                "decision-run",
+            ),
+        )
+        finish_decision_run(conn, run_id="decision-run", status="ok")
+        conn.close()
+
+        with mock.patch.object(server, "DB_PATH", db_path):
+            with mock.patch.object(
+                server,
+                "read_json",
+                return_value={
+                    "github_trending": {"periods": ["daily"], "languages": [""]},
+                    "github_search": {"queries": []},
+                    "hn": {"algolia_queries": []},
+                    "npm": {"queries": []},
+                    "apify": {"enabled": False, "x_keyword_queries": []},
+                },
+            ):
+                payload = server.query_dashboard_data_payload()
+
+        row = payload["candidates"]["candidates"][0]
+        self.assertEqual(row["canonical_link"], "https://github.com/owner/repo")
+        self.assertEqual(row["evidence_bullets"][0]["label"], "GH +321 stars / 24h")
+        self.assertEqual(row["binding_confidence"], "verified")
+
 
 if __name__ == "__main__":
     unittest.main()

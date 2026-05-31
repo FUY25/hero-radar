@@ -26,6 +26,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from pipeline.dashboard_data import build_dashboard_data
+from pipeline.decision.candidate_context import context_bundle_for_entity
 from pipeline.decision.schema import init_decision_db
 
 CONFIG_PATH = ROOT / "pipeline" / "config.json"
@@ -154,8 +155,20 @@ def query_latest_decision_run(conn: sqlite3.Connection) -> str | None:
 
 
 def query_candidates(conn: sqlite3.Connection, run_id: str) -> dict[str, Any]:
-    candidates = [
-        {
+    candidates = []
+    for row in conn.execute(
+        """
+        select pc.entity_id, e.canonical_entity, e.canonical_key, pc.level, pc.fired_families_json, pc.first_trigger_at
+        from potential_candidates pc
+        join entities e on e.entity_id = pc.entity_id
+        where pc.run_id = ?
+        order by
+            case pc.level when 'high_potential' then 0 when 'potential' then 1 else 2 end,
+            e.canonical_entity
+        """,
+        (run_id,),
+    ).fetchall():
+        payload = {
             "entity_id": row[0],
             "canonical_entity": row[1],
             "canonical_key": row[2],
@@ -163,21 +176,21 @@ def query_candidates(conn: sqlite3.Connection, run_id: str) -> dict[str, Any]:
             "fired_families": json_loads(row[4], []),
             "first_trigger_at": row[5],
         }
-        for row in conn.execute(
-            """
-            select pc.entity_id, e.canonical_entity, e.canonical_key, pc.level, pc.fired_families_json, pc.first_trigger_at
-            from potential_candidates pc
-            join entities e on e.entity_id = pc.entity_id
-            where pc.run_id = ?
-            order by
-                case pc.level when 'high_potential' then 0 when 'potential' then 1 else 2 end,
-                e.canonical_entity
-            """,
-            (run_id,),
-        ).fetchall()
-    ]
-    edge_watch = [
-        {
+        payload.update(context_bundle_for_entity(conn, entity_id=payload["entity_id"], run_id=run_id))
+        candidates.append(payload)
+
+    edge_watch = []
+    for row in conn.execute(
+        """
+        select ew.entity_id, e.canonical_entity, e.canonical_key, ew.reason_json, ew.source_refs_json, ew.status
+        from edge_watch_candidates ew
+        join entities e on e.entity_id = ew.entity_id
+        where ew.run_id = ?
+        order by e.canonical_entity
+        """,
+        (run_id,),
+    ).fetchall():
+        payload = {
             "entity_id": row[0],
             "canonical_entity": row[1],
             "canonical_key": row[2],
@@ -186,17 +199,8 @@ def query_candidates(conn: sqlite3.Connection, run_id: str) -> dict[str, Any]:
             "source_refs": json_loads(row[4], []),
             "status": row[5],
         }
-        for row in conn.execute(
-            """
-            select ew.entity_id, e.canonical_entity, e.canonical_key, ew.reason_json, ew.source_refs_json, ew.status
-            from edge_watch_candidates ew
-            join entities e on e.entity_id = ew.entity_id
-            where ew.run_id = ?
-            order by e.canonical_entity
-            """,
-            (run_id,),
-        ).fetchall()
-    ]
+        payload.update(context_bundle_for_entity(conn, entity_id=payload["entity_id"], run_id=run_id))
+        edge_watch.append(payload)
     return {"run_id": run_id, "candidates": candidates, "edge_watch": edge_watch}
 
 
@@ -343,6 +347,7 @@ def query_entity(conn: sqlite3.Connection, entity_id: str, run_id: str) -> dict[
         "edge_watch": edge_watch,
         "backfill_jobs": backfill_jobs,
         "evidence": query_evidence(conn, entity_id, run_id),
+        "context": context_bundle_for_entity(conn, entity_id=entity_id, run_id=run_id),
     }
 
 
