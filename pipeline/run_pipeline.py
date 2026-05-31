@@ -708,10 +708,45 @@ def collect_product_hunt(config: dict[str, Any], fetched_at: str) -> tuple[list[
     return items, None
 
 
+def extract_github_repo_from_card(text: str) -> str | None:
+    match = re.search(r"https?://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)", text)
+    if not match:
+        return None
+    owner = match.group(1)
+    repo = match.group(2).removesuffix(".git")
+    return f"https://github.com/{owner}/{repo}"
+
+
+def huggingface_card_readme_url(resource: str, item_id: str) -> str:
+    prefix = {"models": "", "datasets": "datasets/", "spaces": "spaces/"}.get(resource, "")
+    quoted_id = urllib.parse.quote(item_id, safe="/")
+    return f"https://huggingface.co/{prefix}{quoted_id}/raw/main/README.md"
+
+
+def enrich_huggingface_card_links(resource: str, resource_items: list[SourceItem], limit: int) -> None:
+    if limit <= 0:
+        return
+    ranked_items = sorted(
+        resource_items,
+        key=lambda item: float(item.raw.get("trendingScore") or 0),
+        reverse=True,
+    )
+    for item in ranked_items[:limit]:
+        try:
+            readme = request_text(huggingface_card_readme_url(resource, item.external_id), timeout=8)
+            github_link = extract_github_repo_from_card(readme)
+            if github_link:
+                item.metadata["repository"] = github_link
+        except Exception:  # noqa: BLE001
+            continue
+
+
 def collect_huggingface(config: dict[str, Any], fetched_at: str) -> tuple[list[SourceItem], str | None]:
     items: list[SourceItem] = []
     settings = config["huggingface"]
+    card_enrich_limit = max(0, int(settings.get("card_enrich_limit", 50)))
     for resource in settings["resources"]:
+        resource_start = len(items)
         params = urllib.parse.urlencode(
             {"sort": "trendingScore", "direction": "-1", "limit": str(settings.get("limit", 20))}
         )
@@ -745,6 +780,7 @@ def collect_huggingface(config: dict[str, Any], fetched_at: str) -> tuple[list[S
                     raw=entry,
                 )
             )
+        enrich_huggingface_card_links(resource, items[resource_start:], card_enrich_limit)
         time.sleep(0.5)
     return items, None
 
