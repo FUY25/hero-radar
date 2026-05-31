@@ -38,7 +38,7 @@ Excluded:
 ## File Ownership For Parallel Agents
 
 - **Dashboard/API/UI agent:** `pipeline/dashboard_data.py`, `pipeline/server.py`, `tests/test_dashboard_data_api.py`, all `web/src/*`, `web/package.json`.
-- **LLM/HN/X agent:** `pipeline/decision/llm_cache.py`, `pipeline/decision/llm_provider.py`, `pipeline/decision/hn_classifier.py`, `pipeline/decision/x_classifier.py`, `tests/test_llm_cache.py`, `tests/test_llm_provider.py`, `tests/test_hn_classifier.py`, `tests/test_x_classifier.py`.
+- **LLM/HN/X agent:** `pipeline/decision/llm_cache.py`, `pipeline/decision/llm_provider.py`, `pipeline/decision/hn_classifier.py`, `pipeline/decision/x_classifier.py`, `pipeline/decision/llm_evals.py`, `tests/test_llm_cache.py`, `tests/test_llm_provider.py`, `tests/test_hn_classifier.py`, `tests/test_x_classifier.py`, `tests/test_llm_evals.py`.
 - **NPM/rules agent:** `pipeline/decision/npm_backfill.py`, `tests/test_npm_backfill.py`, focused changes in `pipeline/decision/rules.py`, `pipeline/rules.json`.
 - **Coordinator only:** `pipeline/decision/schema.py` and `pipeline/decision/run_decision.py`, because these files are shared integration points.
 
@@ -186,6 +186,21 @@ The deterministic rule evaluator must not call an LLM inline. HN/X/npm producers
 - Or extend `evaluate_entities` with an explicit `classifier_evidence` argument loaded from DB.
 
 Do not rely on DB evidence rows being magically consumed by `evaluate_entities`; this plan requires an explicit data path.
+
+### AI Evaluation Requirements
+
+LLM-related tasks require more than happy-path unit tests. Before HN/X classifier work is accepted:
+
+- Schema validation rejects missing required fields, invalid enum values, empty citations for non-`none` tiers, out-of-range confidence, and malformed links.
+- Fake-provider eval cases cover at least:
+  - HN `project` with GitHub link -> approved deterministic alias + non-noise evidence.
+  - HN `news_article` / `topic_discussion` -> noise evidence and no HN-only Potential vote.
+  - X linked repo with two credible authors -> `potential`.
+  - X fuzzy name-only output with no citations -> ignored or watch-only, never sole Potential.
+  - X generic terms such as `OpenAI`, `Claude`, `MCP` without concrete binding -> `none`.
+- Prompt payload builders are tested separately from provider calls so we can review what goes to paid APIs without printing secrets.
+- Small real DeepSeek smoke uses at most one Stage 1-style batch and one Stage 2-style entity prompt, prints only enum/shape summaries, and is skipped unless `DEEPSEEK_API_KEY` is present.
+- Regression evals run locally with `python3 -m unittest tests.test_llm_evals tests.test_hn_classifier tests.test_x_classifier -v`.
 
 ## Task 1: Dynamic Dashboard Data API
 
@@ -1552,7 +1567,131 @@ git add pipeline/decision/x_classifier.py pipeline/decision/rules.py pipeline/ru
 git commit -m "feat: add x social tier evidence"
 ```
 
-## Task 9: NPM Registry Backfill
+## Task 9: LLM Classifier Eval Suite
+
+**Files:**
+- Create: `pipeline/decision/llm_evals.py`
+- Test: `tests/test_llm_evals.py`
+- Test: `tests/test_hn_classifier.py`
+- Test: `tests/test_x_classifier.py`
+
+- [ ] **Step 1: Write the failing eval tests**
+
+Create `tests/test_llm_evals.py`:
+
+```python
+from __future__ import annotations
+
+import unittest
+
+
+class LlmClassifierEvalTest(unittest.TestCase):
+    def test_hn_eval_cases_cover_project_and_noise(self):
+        from pipeline.decision.llm_evals import hn_eval_cases, validate_eval_coverage
+
+        cases = hn_eval_cases()
+        labels = {case["expected"]["projectness"] for case in cases}
+        self.assertIn("project", labels)
+        self.assertIn("news_article", labels)
+        self.assertIn("topic_discussion", labels)
+        validate_eval_coverage(cases, required_names={"hn_project_with_github", "hn_news_noise", "hn_topic_noise"})
+
+    def test_x_eval_cases_cover_linked_potential_and_fuzzy_noise(self):
+        from pipeline.decision.llm_evals import validate_eval_coverage, x_eval_cases
+
+        cases = x_eval_cases()
+        names = {case["name"] for case in cases}
+        self.assertIn("x_linked_two_credible_potential", names)
+        self.assertIn("x_fuzzy_no_citations_not_potential", names)
+        self.assertIn("x_generic_known_term_none", names)
+        validate_eval_coverage(cases, required_names=names)
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run:
+
+```bash
+python3 -m unittest tests.test_llm_evals -v
+```
+
+Expected: FAIL because `llm_evals.py` does not exist.
+
+- [ ] **Step 3: Write minimal implementation**
+
+Create `pipeline/decision/llm_evals.py`:
+
+```python
+from __future__ import annotations
+
+from typing import Any
+
+
+def hn_eval_cases() -> list[dict[str, Any]]:
+    return [
+        {
+            "name": "hn_project_with_github",
+            "input": {"title": "Show HN: Clawdbot", "url": "https://news.ycombinator.com/item?id=1"},
+            "expected": {"projectness": "project", "requires_alias": True, "noise": False},
+        },
+        {
+            "name": "hn_news_noise",
+            "input": {"title": "Major AI lab announces policy change", "url": "https://example.com/news"},
+            "expected": {"projectness": "news_article", "requires_alias": False, "noise": True},
+        },
+        {
+            "name": "hn_topic_noise",
+            "input": {"title": "Ask HN: What do you use for MCP?", "url": "https://news.ycombinator.com/item?id=2"},
+            "expected": {"projectness": "topic_discussion", "requires_alias": False, "noise": True},
+        },
+    ]
+
+
+def x_eval_cases() -> list[dict[str, Any]]:
+    return [
+        {
+            "name": "x_linked_two_credible_potential",
+            "input": {"tweets": ["https://github.com/owner/repo is great", "Trying owner/repo today"], "credible_authors": 2},
+            "expected": {"x_tier": "potential", "entity_confidence": "linked", "requires_citations": True},
+        },
+        {
+            "name": "x_fuzzy_no_citations_not_potential",
+            "input": {"tweets": ["Clawdbot looks interesting"], "credible_authors": 1},
+            "expected": {"max_tier": "watch", "requires_citations": True},
+        },
+        {
+            "name": "x_generic_known_term_none",
+            "input": {"tweets": ["Claude and MCP are everywhere"], "credible_authors": 1},
+            "expected": {"x_tier": "none"},
+        },
+    ]
+
+
+def validate_eval_coverage(cases: list[dict[str, Any]], *, required_names: set[str]) -> None:
+    names = {str(case.get("name")) for case in cases}
+    missing = sorted(required_names - names)
+    if missing:
+        raise AssertionError(f"missing eval cases: {', '.join(missing)}")
+```
+
+- [ ] **Step 4: Run eval tests**
+
+Run:
+
+```bash
+python3 -m unittest tests.test_llm_evals -v
+```
+
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add pipeline/decision/llm_evals.py tests/test_llm_evals.py docs/superpowers/plans/2026-05-31-layer1-dynamic-ui-x-hn-npm.md
+git commit -m "test: add llm classifier eval cases"
+```
+
+## Task 10: NPM Registry Backfill
 
 **Files:**
 - Create: `pipeline/decision/npm_backfill.py`
@@ -1666,7 +1805,7 @@ git add pipeline/decision/npm_backfill.py pipeline/decision/rules.py pipeline/ru
 git commit -m "feat: add npm registry backfill"
 ```
 
-## Task 10: Decision Runner Integration
+## Task 11: Decision Runner Integration
 
 **Files:**
 - Modify: `pipeline/decision/run_decision.py`
@@ -1756,7 +1895,7 @@ git add pipeline/decision/run_decision.py tests/test_decision_runner.py
 git commit -m "feat: integrate bounded classifiers"
 ```
 
-## Task 11: Bounded Real Smoke Tests
+## Task 12: Bounded Real Smoke Tests
 
 **Files:**
 - Create: `pipeline/decision/smoke_llm.py`
@@ -1839,7 +1978,7 @@ git add pipeline/decision/smoke_llm.py pipeline/decision/smoke_npm.py
 git commit -m "chore: add bounded source smoke checks"
 ```
 
-## Task 12: Final Verification And Push
+## Task 13: Final Verification And Push
 
 **Files:**
 - Verification only; source edits should already be committed by Tasks 1-11.
@@ -1892,7 +2031,7 @@ Expected: `main` pushed.
 
 ## Self-Review
 
-- Spec coverage: UI migration is covered by Tasks 1-3; DeepSeek/LLM harness by Tasks 4-5 and 11; HN LLM project/entity classification by Task 6; X social classifier by Tasks 7-8; npm registry backfill by Task 9; runner integration by Task 10; final verification by Task 12.
+- Spec coverage: UI migration is covered by Tasks 1-3; DeepSeek/LLM harness by Tasks 4-5 and 12; HN LLM project/entity classification by Task 6; X social classifier by Tasks 7-8; AI classifier evals by Task 9; npm registry backfill by Task 10; runner integration by Task 11; final verification by Task 13.
 - Scope check: Layer 2 Feed selection/cards, Kimi deepdive, chatbot, cron, and rule editor are explicitly excluded. Candidate Pool remains inside Feed; Daily Feed remains locked.
 - TDD check: Every implementation task starts with a failing test or smoke script, then minimal implementation, then verification, then commit.
 - API contract check: `/api/dashboard-data` returns source dashboard payload and candidate data without exposing secrets. Existing `/api/candidates`, `/api/evidence`, and `/api/entity/{entity_id}` are not removed.
