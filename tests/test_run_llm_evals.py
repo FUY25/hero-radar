@@ -14,10 +14,13 @@ class RunLlmEvalsTest(unittest.TestCase):
             [case["fake_provider_response"] for case in hn_eval_cases()]
         )
 
-        results = run_hn_eval_cases(provider, hn_eval_cases(), limit=3)
+        results = run_hn_eval_cases(provider, hn_eval_cases(), limit=len(hn_eval_cases()))
         summary = summarize_results(results)
 
-        self.assertEqual(summary, {"total": 3, "passed": 3, "failed": 0})
+        self.assertEqual(
+            summary,
+            {"total": len(hn_eval_cases()), "passed": len(hn_eval_cases()), "failed": 0},
+        )
         self.assertEqual([result["case"] for result in results], [case["name"] for case in hn_eval_cases()])
 
     def test_x_eval_runner_applies_acceptance_safety_to_stage2_outputs(self) -> None:
