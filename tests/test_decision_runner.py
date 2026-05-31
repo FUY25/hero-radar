@@ -410,6 +410,50 @@ class DecisionRunnerTest(unittest.TestCase):
         self.assertEqual(calls[0]["resolver_research_limit"], 5)
         self.assertEqual(calls[0]["resolver_research_rounds"], 3)
 
+    def test_run_from_args_builds_search_client_for_agentic_research_limit(self):
+        from pipeline.decision.run_decision import run_from_args
+
+        calls = []
+        search_client = object()
+
+        def fake_runner(**kwargs):
+            calls.append(kwargs)
+            return {
+                "entities": 0,
+                "potential_candidates": 0,
+                "edge_watch_candidates": 0,
+                "backfill_jobs": 0,
+                "export": str(kwargs["export_json_path"]),
+            }
+
+        args = Namespace(
+            db=Path("db.sqlite"),
+            run_id="run",
+            export_json=Path("out.json"),
+            now="2026-05-31T00:00:00Z",
+            backfill=False,
+            classify_hn_limit=0,
+            classify_x_limit=0,
+            llm_model="deepseek-v4-flash",
+            llm_concurrency=1,
+            x_stage1_batch_size=100,
+            x_credible_handles="",
+            resolver_search_limit=0,
+            resolver_research_limit=5,
+            resolver_research_rounds=3,
+            enrich_readme_limit=0,
+        )
+
+        run_from_args(
+            args,
+            decision_runner=fake_runner,
+            llm_provider_builder=lambda parsed: object(),
+            github_client_builder=lambda: None,
+            resolver_search_client_builder=lambda parsed: search_client,
+        )
+
+        self.assertIs(calls[0]["resolver_search_client"], search_client)
+
     def test_run_from_args_does_not_build_llm_provider_when_limits_are_zero(self):
         from pipeline.decision.run_decision import run_from_args
 

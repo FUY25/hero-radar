@@ -704,6 +704,12 @@ def build_github_readme_client_from_args(args: argparse.Namespace) -> Any:
     return GitHubReadmeClient()
 
 
+def build_resolver_search_client_from_args(args: argparse.Namespace) -> Any:
+    from pipeline.decision.web_search import DuckDuckGoSearchClient
+
+    return DuckDuckGoSearchClient()
+
+
 def run_from_args(
     args: argparse.Namespace,
     *,
@@ -711,6 +717,7 @@ def run_from_args(
     llm_provider_builder: Any = build_deepseek_provider_from_args,
     github_client_builder: Any = build_github_client,
     github_readme_client_builder: Any = build_github_readme_client_from_args,
+    resolver_search_client_builder: Any = build_resolver_search_client_from_args,
 ) -> dict[str, int | str]:
     hn_limit = int(args.classify_hn_limit or 0)
     x_limit = int(args.classify_x_limit or 0)
@@ -721,6 +728,11 @@ def run_from_args(
     llm_provider = (
         llm_provider_builder(args)
         if hn_limit > 0 or x_limit > 0 or resolver_research_limit > 0
+        else None
+    )
+    resolver_search_client = (
+        resolver_search_client_builder(args)
+        if resolver_search_limit > 0 or resolver_research_limit > 0
         else None
     )
     return decision_runner(
@@ -736,6 +748,7 @@ def run_from_args(
         llm_concurrency=int(getattr(args, "llm_concurrency", 1) or 1),
         x_stage1_batch_size=args.x_stage1_batch_size,
         x_credible_handles=parse_credible_handles(args.x_credible_handles),
+        resolver_search_client=resolver_search_client,
         resolver_search_limit=resolver_search_limit,
         resolver_research_provider=llm_provider if resolver_research_limit > 0 else None,
         resolver_research_limit=resolver_research_limit,
