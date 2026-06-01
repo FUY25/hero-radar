@@ -120,6 +120,37 @@ class DecisionSchemaTest(unittest.TestCase):
         self.assertIn("deepdive_reports", names)
         self.assertIn("l2_feed_items", names)
         self.assertIn("feed_feedback", names)
+        self.assertIn("l2_stage_events", names)
+
+    def test_init_creates_layer2_stage_events_table(self):
+        conn = sqlite3.connect(":memory:")
+        init_decision_db(conn)
+
+        conn.execute(
+            """
+            insert into l2_stage_events(
+              feed_run_id, group_id, stage, status, error_type, error,
+              metadata_json, created_at
+            )
+            values (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "l2-run",
+                "group:repo",
+                "scoring",
+                "scoring_error",
+                "ValueError",
+                "bad response",
+                "{}",
+                "2026-06-01T00:00:00Z",
+            ),
+        )
+
+        row = conn.execute(
+            "select status, error_type from l2_stage_events where feed_run_id = ?",
+            ("l2-run",),
+        ).fetchone()
+        self.assertEqual(row, ("scoring_error", "ValueError"))
 
     def test_reset_stage_allows_layer2_run_scoped_tables(self):
         conn = sqlite3.connect(":memory:")
@@ -158,15 +189,32 @@ class DecisionSchemaTest(unittest.TestCase):
             """,
             ("l2-run", "group:one", 80, "{}", "Workflow Shift", "[]", "Good", "[]", "kimi", "kimi-k2.5", "v1", "cache"),
         )
+        conn.execute(
+            """
+            insert into l2_stage_events(feed_run_id, group_id, stage, status, error_type, error, metadata_json, created_at)
+            values (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "l2-run",
+                "group:one",
+                "scoring",
+                "scoring_ok",
+                "",
+                "",
+                "{}",
+                "2026-06-01T00:00:00Z",
+            ),
+        )
 
         reset_decision_stage(
             conn,
             run_id="l2-run",
-            tables=["l2_candidate_groups", "l2_scores"],
+            tables=["l2_candidate_groups", "l2_scores", "l2_stage_events"],
         )
 
         self.assertEqual(conn.execute("select count(*) from l2_candidate_groups").fetchone()[0], 0)
         self.assertEqual(conn.execute("select count(*) from l2_scores").fetchone()[0], 0)
+        self.assertEqual(conn.execute("select count(*) from l2_stage_events").fetchone()[0], 0)
         self.assertEqual(conn.execute("select count(*) from l2_feed_runs").fetchone()[0], 1)
 
 

@@ -230,6 +230,18 @@ create table if not exists l2_feed_items (
     unique(feed_run_id, group_id, section)
 );
 
+create table if not exists l2_stage_events (
+    id integer primary key autoincrement,
+    feed_run_id text not null,
+    group_id text,
+    stage text not null,
+    status text not null,
+    error_type text,
+    error text,
+    metadata_json text not null,
+    created_at text not null
+);
+
 create table if not exists feed_feedback (
     id integer primary key autoincrement,
     feed_run_id text not null,
@@ -247,6 +259,7 @@ create index if not exists idx_backfill_run_status on backfill_jobs(run_id, stat
 create index if not exists idx_l2_groups_run on l2_candidate_groups(feed_run_id);
 create index if not exists idx_l2_scores_run_score on l2_scores(feed_run_id, l2_score);
 create index if not exists idx_l2_feed_items_run_section on l2_feed_items(feed_run_id, section, rank);
+create index if not exists idx_l2_stage_events_run on l2_stage_events(feed_run_id, stage, status);
 """
 
 
@@ -321,6 +334,7 @@ def reset_decision_stage(
         "l2_scores": "feed_run_id",
         "deepdive_reports": "feed_run_id",
         "l2_feed_items": "feed_run_id",
+        "l2_stage_events": "feed_run_id",
         "feed_feedback": "feed_run_id",
     }
     for table in tables:
