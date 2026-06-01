@@ -7,8 +7,11 @@ from pipeline.decision.layer2_models import CandidateGroup
 
 
 MAX_PROJECT_CONTEXT_CHARS = 4000
+MAX_WIDE_ONE_LINER_CHARS = 300
 MAX_SUMMARIES = 8
 MAX_SOURCE_CONTEXT = 12
+MAX_WIDE_SOURCE_TITLES = 3
+MAX_WIDE_SOURCE_TYPES = 5
 
 
 def scout_context_for_group(group: CandidateGroup) -> dict[str, Any]:
@@ -33,6 +36,23 @@ def scout_context_for_group(group: CandidateGroup) -> dict[str, Any]:
             "qualitative_summaries": qualitative_summaries,
         },
         "source_context": _source_context(members),
+    }
+
+
+def wide_scout_context_for_group(group: CandidateGroup) -> dict[str, Any]:
+    members = [
+        member
+        for member in group.context.get("members") or []
+        if isinstance(member, dict)
+    ]
+    return {
+        "group_id": group.group_id,
+        "name": group.canonical_name,
+        "link": group.canonical_link,
+        "object_hint": _object_hint(group),
+        "one_liner": _wide_one_liner(members, group.context.get("evidence_rows")),
+        "source_titles": _wide_source_titles(members),
+        "source_types": _wide_source_types(members),
     }
 
 
@@ -99,6 +119,40 @@ def _source_entry(link: dict[str, Any]) -> dict[str, str]:
         "author": str(link.get("author") or link.get("author_name") or ""),
         "text": text,
     }
+
+
+def _object_hint(group: CandidateGroup) -> str:
+    key = str(group.canonical_key or "")
+    if ":" in key:
+        return key.split(":", 1)[0] or "unknown"
+    if group.canonical_link:
+        return "link"
+    return "unknown"
+
+
+def _wide_one_liner(members: list[dict[str, Any]], rows: Any) -> str:
+    for member in members:
+        snippet = _clean_snippet(
+            member.get("context_preview"), limit=MAX_WIDE_ONE_LINER_CHARS
+        )
+        if snippet:
+            return snippet
+    summaries = _qualitative_summaries(rows)
+    return summaries[0][:MAX_WIDE_ONE_LINER_CHARS] if summaries else ""
+
+
+def _wide_source_titles(members: list[dict[str, Any]]) -> list[str]:
+    titles: list[str] = []
+    for entry in _source_context(members):
+        _append_unique(titles, entry.get("title", ""))
+    return titles[:MAX_WIDE_SOURCE_TITLES]
+
+
+def _wide_source_types(members: list[dict[str, Any]]) -> list[str]:
+    types: list[str] = []
+    for entry in _source_context(members):
+        _append_unique(types, entry.get("source", "") or entry.get("channel", ""))
+    return types[:MAX_WIDE_SOURCE_TYPES]
 
 
 def _clean_snippet(value: Any, *, limit: int) -> str:

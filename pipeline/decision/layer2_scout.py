@@ -4,12 +4,12 @@ import hashlib
 import sqlite3
 from typing import Any
 
-from pipeline.decision.layer2_scout_context import scout_context_for_group
+from pipeline.decision.layer2_scout_context import wide_scout_context_for_group
 from pipeline.decision.layer2_models import CandidateGroup
 from pipeline.decision.schema import to_json
 
 
-DEFAULT_SCOUT_PROMPT_VERSION = "layer2-edge-scout-v2"
+DEFAULT_SCOUT_PROMPT_VERSION = "layer2-edge-scout-v3"
 
 
 NOVELTY_AXES = ("workflow_shift", "technical_substance", "product_market_fit")
@@ -19,24 +19,33 @@ BLOCKED_OBJECT_TYPES = {"model", "article", "tutorial", "discussion", "news", "u
 
 SCOUT_SYSTEM_PROMPT = """
 You are the Edge Watch Scout for Hero Radar.
-Decide whether each edge_watch candidate is a concrete product, repo, package,
-tool, or workflow worth Layer 2 scoring.
+You are a fast wide triage gate, not a scorer.
 
-Evaluate candidates independently. Do not rank, compare, or enforce a quota.
-Return strict JSON with top-level decisions array. Each decision must include:
-group_id, is_concrete_product boolean, object_type string,
-workflow_shift, technical_substance, product_market_fit, confidence number 0..1,
-and reason string.
+You receive many edge_watch candidates. Return only the candidates that may be
+worth spending a later scoring call on. Omit all obvious filters.
 
-Use novelty values only: none, weak, medium, strong.
-Medium is not enough for inclusion; at least one novelty axis must be strong.
-Do not require an academic breakthrough for a strong axis. Strong technical
-substance can be an unusual system combination, local runtime, validation or
-release-evidence harness, memory/tool protocol, multi-agent runtime, or
-inspectable reliability mechanism.
-News, articles, tutorials, discussions, standalone model releases, and unknown
-objects are not concrete products unless the candidate is actually about a
-linked product/repo/package/workflow.
+Promote when there is a plausible concrete product, repo, package, tool, or
+workflow with any possible novelty or product signal. Be rough and permissive:
+the later scorer will judge workflow_shift, technical_substance, and
+product_market_fit in detail.
+
+Filter obvious noise:
+- acquisition, funding, policy, or company news
+- pure article, tutorial, resource list, discussion, paper, dataset, or model
+  release with no product/workflow wrapper
+- routine release with no new usage, technical, or product angle
+- generic chatbot or thin wrapper with no clear wedge
+
+Return strict JSON with top-level promotions array only:
+{
+  "promotions": [
+    {
+      "group_id": "...",
+      "reason_code": "possible_workflow_shift|possible_technical_substance|possible_product_wedge|concrete_tool_unclear_but_interesting",
+      "reason": "Short reason for why this might be worth scoring."
+    }
+  ]
+}
 """
 
 
@@ -47,25 +56,23 @@ def scout_edge_watch_groups(
     groups: list[CandidateGroup],
     provider: Any,
     prompt_version: str = DEFAULT_SCOUT_PROMPT_VERSION,
-    batch_size: int = 3,
+    batch_size: int = 30,
 ) -> list[CandidateGroup]:
     included: list[CandidateGroup] = []
-    group_by_id = {group.group_id: group for group in groups}
     context_by_id: dict[str, dict[str, Any]] = {}
     for batch in _chunks(groups, max(1, int(batch_size or 1))):
-        candidates = [scout_context_for_group(group) for group in batch]
+        candidates = [wide_scout_context_for_group(group) for group in batch]
         for candidate in candidates:
             context_by_id[str(candidate["group_id"])] = candidate
         payload = {
             "candidates": candidates,
             "decision_rule": (
-                "Include only concrete products with at least one strong novelty "
-                "axis among workflow_shift, technical_substance, and "
-                "product_market_fit. Medium-only candidates must be filtered."
+                "Return only candidates that may be worth a later scoring call. "
+                "Omit obvious filters."
             ),
             "instruction": (
-                "Judge every candidate independently. Return JSON object with "
-                "decisions array in any order."
+                "Do not score every candidate. Return JSON object with promotions "
+                "array only."
             ),
         }
         response = provider.complete_json(
@@ -74,17 +81,16 @@ def scout_edge_watch_groups(
             input_payload=payload,
             system_prompt=SCOUT_SYSTEM_PROMPT,
         )
-        decisions = _validate_batch_response(
+        promotions = _validate_promotions_response(
             response, expected_group_ids=[group.group_id for group in batch]
         )
-        for decision in decisions:
-            group_id = decision["group_id"]
-            group = group_by_id[group_id]
+        for group in batch:
+            decision = promotions.get(group.group_id) or _filtered_decision(group.group_id)
             cache_key = _cache_key(
                 provider.provider_name,
                 provider.model,
                 prompt_version,
-                {"candidate": context_by_id[group_id]},
+                {"candidate": context_by_id[group.group_id]},
             )
             conn.execute(
                 """
@@ -96,7 +102,7 @@ def scout_edge_watch_groups(
                 """,
                 (
                     feed_run_id,
-                    group_id,
+                    group.group_id,
                     1 if decision["include_in_l2_scoring"] else 0,
                     decision["scout_score"],
                     decision["reason"],
@@ -113,6 +119,24 @@ def scout_edge_watch_groups(
                 included.append(group)
     conn.commit()
     return included
+
+
+def normalize_wide_scout_promotion(response: dict[str, Any]) -> dict[str, Any]:
+    group_id = str(response.get("group_id") or "").strip()
+    if not group_id:
+        raise ValueError("wide scout promotion missing group_id")
+    reason_code = str(
+        response.get("reason_code") or "concrete_tool_unclear_but_interesting"
+    )
+    reason = str(response.get("reason") or "Possible Edge Watch signal.")[:600]
+    return {
+        "group_id": group_id,
+        "include_in_l2_scoring": True,
+        "scout_score": 1.0,
+        "reason": reason,
+        "risk": f"reason_code={reason_code}"[:300],
+        "confidence": 0.0,
+    }
 
 
 def normalize_scout_decision(response: dict[str, Any]) -> dict[str, Any]:
@@ -177,12 +201,45 @@ def _validate_batch_response(
     decisions = response.get("decisions")
     if not isinstance(decisions, list):
         raise ValueError("scout response missing decisions array")
-    normalized = [normalize_scout_decision(item) for item in decisions if isinstance(item, dict)]
+    normalized = [
+        normalize_scout_decision(item) for item in decisions if isinstance(item, dict)
+    ]
     by_group_id = {decision["group_id"]: decision for decision in normalized}
-    missing = [group_id for group_id in expected_group_ids if group_id not in by_group_id]
+    missing = [
+        group_id for group_id in expected_group_ids if group_id not in by_group_id
+    ]
     if missing:
         raise ValueError(f"scout response missing decisions for groups: {missing}")
     return [by_group_id[group_id] for group_id in expected_group_ids]
+
+
+def _validate_promotions_response(
+    response: dict[str, Any], *, expected_group_ids: list[str]
+) -> dict[str, dict[str, Any]]:
+    promotions = response.get("promotions")
+    if not isinstance(promotions, list):
+        raise ValueError("scout response missing promotions array")
+    expected = set(expected_group_ids)
+    normalized: dict[str, dict[str, Any]] = {}
+    for item in promotions:
+        if not isinstance(item, dict):
+            continue
+        promotion = normalize_wide_scout_promotion(item)
+        if promotion["group_id"] not in expected:
+            continue
+        normalized[promotion["group_id"]] = promotion
+    return normalized
+
+
+def _filtered_decision(group_id: str) -> dict[str, Any]:
+    return {
+        "group_id": group_id,
+        "include_in_l2_scoring": False,
+        "scout_score": 0.0,
+        "reason": "Not selected by wide scout.",
+        "risk": "reason_code=not_selected",
+        "confidence": 0.0,
+    }
 
 
 def _novelty_value(value: Any) -> str:

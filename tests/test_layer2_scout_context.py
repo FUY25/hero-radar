@@ -100,6 +100,61 @@ class Layer2ScoutContextTest(unittest.TestCase):
         )
         self.assertGreater(len(view["candidate"]["project_context"][0]), 1000)
 
+    def test_wide_scout_context_is_compact(self):
+        from pipeline.decision.layer2_scout_context import wide_scout_context_for_group
+
+        group = CandidateGroup(
+            group_id="group:clicky",
+            canonical_entity_id="entity:clicky",
+            canonical_name="Clicky",
+            canonical_key="domain:heyclicky.com",
+            canonical_link="https://www.heyclicky.com/",
+            member_entity_ids=["entity:clicky"],
+            level="edge_watch",
+            source_families=["hn", "x_social"],
+            context={
+                "evidence_rows": [
+                    {
+                        "metric_name": "hn_max_points_7d",
+                        "metric_value": "144",
+                        "note": "Clicky: screen-aware Mac assistant.",
+                    }
+                ],
+                "members": [
+                    {
+                        "context_preview": "Clicky lives beside your cursor on Mac.",
+                        "readme_excerpt_available": False,
+                        "source_links": [
+                            {
+                                "source": "hn_firebase",
+                                "channel": "hn_top",
+                                "name": "Show HN: Clicky",
+                                "external_url": "https://www.heyclicky.com/",
+                            }
+                        ],
+                    }
+                ],
+            },
+        )
+
+        view = wide_scout_context_for_group(group)
+
+        self.assertEqual(
+            view,
+            {
+                "group_id": "group:clicky",
+                "name": "Clicky",
+                "link": "https://www.heyclicky.com/",
+                "object_hint": "domain",
+                "one_liner": "Clicky lives beside your cursor on Mac.",
+                "source_titles": ["Show HN: Clicky"],
+                "source_types": ["hn_firebase"],
+            },
+        )
+        serialized = json.dumps(view)
+        self.assertNotIn("hn_max_points_7d", serialized)
+        self.assertNotIn("144", serialized)
+
 
 if __name__ == "__main__":
     unittest.main()
