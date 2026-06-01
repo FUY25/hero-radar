@@ -101,6 +101,54 @@ class FeedApiTest(unittest.TestCase):
             payload["today_focus"][0]["deepdive"]["summary"], "Deep summary"
         )
 
+    def test_query_feed_payload_exposes_run_status_and_stage_telemetry(self):
+        import pipeline.server as server
+
+        temp, db_path = self.make_db()
+        self.addCleanup(temp.cleanup)
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "update l2_feed_runs set status = ?, note = ? where feed_run_id = ?",
+            (
+                "ok_with_errors",
+                json.dumps(
+                    {
+                        "error_counts": {"scoring": 1},
+                        "stage_counts": {"scoring_error": 1},
+                    }
+                ),
+                "l2-run",
+            ),
+        )
+        conn.execute(
+            """
+            insert into l2_stage_events(
+              feed_run_id, group_id, stage, status, error_type, error, metadata_json, created_at
+            )
+            values (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "l2-run",
+                "group:repo",
+                "scoring",
+                "scoring_error",
+                "ValueError",
+                "bad score",
+                json.dumps({"attempt": 1}),
+                "2026-05-31T00:00:30Z",
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+        with mock.patch.object(server, "DB_PATH", db_path):
+            payload = server.query_feed_payload()
+
+        self.assertEqual(payload["run_status"], "ok_with_errors")
+        self.assertEqual(payload["telemetry"]["error_counts"]["scoring"], 1)
+        self.assertEqual(payload["stage_events"][0]["status"], "scoring_error")
+        self.assertEqual(payload["stage_events"][0]["metadata"], {"attempt": 1})
+
     def test_record_feed_feedback_upserts_vote(self):
         import pipeline.server as server
 

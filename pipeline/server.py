@@ -209,7 +209,7 @@ def query_latest_feed_run(conn: sqlite3.Connection) -> str | None:
         """
         select feed_run_id
         from l2_feed_runs
-        where status = 'ok'
+        where status in ('ok', 'ok_with_errors')
         order by coalesce(completed_at, started_at) desc, started_at desc
         limit 1
         """
@@ -225,7 +225,7 @@ def query_feed_payload(feed_run_id: str | None = None) -> dict[str, Any]:
             return _empty_feed_payload()
         run = conn.execute(
             """
-            select decision_run_id, completed_at, started_at, model_profile_json
+            select decision_run_id, completed_at, started_at, model_profile_json, status, note
             from l2_feed_runs
             where feed_run_id = ?
             """,
@@ -233,6 +233,26 @@ def query_feed_payload(feed_run_id: str | None = None) -> dict[str, Any]:
         ).fetchone()
         if not run:
             return _empty_feed_payload()
+        stage_events = [
+            {
+                "group_id": row[0],
+                "stage": row[1],
+                "status": row[2],
+                "error_type": row[3],
+                "error": row[4],
+                "metadata": json_loads(row[5], {}),
+                "created_at": row[6],
+            }
+            for row in conn.execute(
+                """
+                select group_id, stage, status, error_type, error, metadata_json, created_at
+                from l2_stage_events
+                where feed_run_id = ?
+                order by id
+                """,
+                (active_feed_run_id,),
+            ).fetchall()
+        ]
         items = [
             _feed_item(row)
             for row in conn.execute(
@@ -264,6 +284,9 @@ def query_feed_payload(feed_run_id: str | None = None) -> dict[str, Any]:
             "decision_run_id": run[0],
             "generated_at": run[1] or run[2],
             "model_profile": json_loads(run[3], {}),
+            "run_status": run[4],
+            "telemetry": json_loads(run[5], {}),
+            "stage_events": stage_events,
             "today_focus": [
                 item for item in items if item["section"] == "today_focus"
             ],
@@ -280,6 +303,9 @@ def _empty_feed_payload() -> dict[str, Any]:
         "decision_run_id": "",
         "generated_at": "",
         "model_profile": {},
+        "run_status": "",
+        "telemetry": {},
+        "stage_events": [],
         "today_focus": [],
         "scored_list": [],
         "pending": {"edge_watch_scout": 0, "deepdive": 0},

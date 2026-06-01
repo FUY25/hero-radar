@@ -59,6 +59,21 @@ test('normalizeFeedPayload keeps run summary and item evidence', () => {
   assert.equal(normalized.today_focus[0].source_links[0].channel_label, 'GitHub Trending');
 });
 
+test('normalizeFeedPayload preserves run status and telemetry', () => {
+  const normalized = normalizeFeedPayload({
+    feed_run_id: 'l2-run',
+    run_status: 'ok_with_errors',
+    telemetry: { error_counts: { scoring: 1 } },
+    stage_events: [{ stage: 'scoring', status: 'scoring_error' }],
+    today_focus: [],
+    scored_list: [],
+  });
+
+  assert.equal(normalized.run_status, 'ok_with_errors');
+  assert.equal(normalized.telemetry.error_counts.scoring, 1);
+  assert.equal(normalized.stage_events[0].status, 'scoring_error');
+});
+
 test('feedRows merges today focus and scored list with section markers', () => {
   const rows = feedRows(normalizeFeedPayload(payload));
 
