@@ -30,6 +30,10 @@ and reason string.
 
 Use novelty values only: none, weak, medium, strong.
 Medium is not enough for inclusion; at least one novelty axis must be strong.
+Do not require an academic breakthrough for a strong axis. Strong technical
+substance can be an unusual system combination, local runtime, validation or
+release-evidence harness, memory/tool protocol, multi-agent runtime, or
+inspectable reliability mechanism.
 News, articles, tutorials, discussions, standalone model releases, and unknown
 objects are not concrete products unless the candidate is actually about a
 linked product/repo/package/workflow.
