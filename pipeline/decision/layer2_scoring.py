@@ -54,6 +54,8 @@ def score_candidate_groups(
         try:
             normalized = _validate_response(response)
         except ValueError as exc:
+            if not _repairable_validation_error(exc):
+                raise
             repair_payload = {
                 **payload,
                 "validation_error": str(exc),
@@ -155,6 +157,10 @@ def _response_shape(response: dict[str, Any]) -> dict[str, Any]:
         for key, value in response.items()
         if isinstance(key, str)
     }
+
+
+def _repairable_validation_error(error: ValueError) -> bool:
+    return "missing" in str(error).lower()
 
 
 def _cache_key(

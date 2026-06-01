@@ -25,6 +25,7 @@ from pipeline.decision.layer2_grouping import (
     persist_candidate_groups,
 )
 from pipeline.decision.layer2_harness import (
+    TelemetryLLMProvider,
     final_run_status,
     record_stage_event,
     stage_summary,
@@ -58,6 +59,29 @@ def latest_decision_run(conn: sqlite3.Connection) -> str:
     if not row:
         raise RuntimeError("no successful decision run found")
     return str(row[0])
+
+
+def finalize_stale_running_runs(
+    conn: sqlite3.Connection,
+    *,
+    before_started_at: str,
+    completed_at: str,
+) -> int:
+    note = to_json(
+        {
+            "reason": "stale running run finalized before starting new Layer 2 run",
+            "stale_before": before_started_at,
+        }
+    )
+    cursor = conn.execute(
+        """
+        update l2_feed_runs
+        set completed_at = ?, status = ?, note = ?
+        where status = 'running' and started_at < ?
+        """,
+        (completed_at, "error", note, before_started_at),
+    )
+    return int(cursor.rowcount or 0)
 
 
 def previous_group_hashes(
@@ -105,6 +129,14 @@ def run_layer2_feed(
     init_decision_db(conn)
     try:
         active_decision_run_id = decision_run_id or latest_decision_run(conn)
+        stale_before = cfg.get("finalize_stale_running_before")
+        if stale_before:
+            finalize_stale_running_runs(
+                conn,
+                before_started_at=str(stale_before),
+                completed_at=active_now,
+            )
+            conn.commit()
         scout_provider = provider or KimiProvider(
             model=str(cfg.get("edge_scout_model") or DEFAULT_KIMI_SCORING_MODEL)
         )
@@ -173,15 +205,23 @@ def run_layer2_feed(
                 group_id=group.group_id,
                 stage="schedule",
                 status="pending_budget",
-            )
+        )
         scouted = []
         for group in schedule.scout_edge_watch:
             try:
+                active_scout_provider = TelemetryLLMProvider(
+                    scout_provider,
+                    conn=conn,
+                    feed_run_id=active_feed_run_id,
+                    group_id=group.group_id,
+                    stage="scout",
+                    timeout_seconds=_optional_int(cfg.get("scout_timeout_seconds")),
+                )
                 result = scout_edge_watch_groups(
                     conn,
                     feed_run_id=active_feed_run_id,
                     groups=[group],
-                    provider=scout_provider,
+                    provider=active_scout_provider,
                 )
                 record_stage_event(
                     conn,
@@ -201,13 +241,36 @@ def run_layer2_feed(
                     error=exc,
                 )
         scored = []
-        for group in [*schedule.score_now, *scouted]:
+        scoring_candidates = [*schedule.score_now, *scouted]
+        max_total_scoring = cfg.get("max_total_scoring_candidates")
+        if max_total_scoring is not None:
+            cap = max(0, int(max_total_scoring))
+            deferred = scoring_candidates[cap:]
+            scoring_candidates = scoring_candidates[:cap]
+            for group in deferred:
+                record_stage_event(
+                    conn,
+                    feed_run_id=active_feed_run_id,
+                    group_id=group.group_id,
+                    stage="scoring",
+                    status="pending_budget",
+                    metadata={"reason": "max_total_scoring_candidates"},
+                )
+        for group in scoring_candidates:
             try:
+                active_scoring_provider = TelemetryLLMProvider(
+                    scoring_provider,
+                    conn=conn,
+                    feed_run_id=active_feed_run_id,
+                    group_id=group.group_id,
+                    stage="scoring",
+                    timeout_seconds=_optional_int(cfg.get("scoring_timeout_seconds")),
+                )
                 result = score_candidate_groups(
                     conn,
                     feed_run_id=active_feed_run_id,
                     groups=[group],
-                    provider=scoring_provider,
+                    provider=active_scoring_provider,
                 )
                 scored.extend(result)
                 record_stage_event(
@@ -244,6 +307,9 @@ def run_layer2_feed(
                     "not_deepdived",
                 ),
             )
+        web_search_timeout = _optional_int(cfg.get("web_search_timeout_seconds"))
+        if web_search_timeout is not None and hasattr(active_deepdive_provider, "timeout"):
+            setattr(active_deepdive_provider, "timeout", web_search_timeout)
         web_search_client = (
             KimiWebSearchClient(provider=active_deepdive_provider)
             if bool(cfg.get("enable_kimi_web_search", False))
@@ -290,12 +356,20 @@ def run_layer2_feed(
                 status="deepdive_selected",
             )
             try:
+                active_deepdive_stage_provider = TelemetryLLMProvider(
+                    active_deepdive_provider,
+                    conn=conn,
+                    feed_run_id=active_feed_run_id,
+                    group_id=group.group_id,
+                    stage="deepdive",
+                    timeout_seconds=_optional_int(cfg.get("deepdive_timeout_seconds")),
+                )
                 reports.extend(
                     run_deepdives(
                         conn,
                         feed_run_id=active_feed_run_id,
                         scored=[row],
-                        provider=active_deepdive_provider,
+                        provider=active_deepdive_stage_provider,
                         max_deepdives=1,
                         min_l2_score=0,
                         tools=active_tools,
@@ -367,7 +441,13 @@ def run_layer2_feed(
         conn.close()
 
 
-def main(argv: list[str] | None = None) -> int:
+def _optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    return int(value)
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run Layer 2 Kimi Feed")
     parser.add_argument("--decision-run-id", default=None)
     parser.add_argument("--feed-run-id", default=None)
@@ -375,38 +455,64 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--edge-scout-limit", type=int, default=50)
     parser.add_argument("--scoring-limit", type=int, default=150)
     parser.add_argument("--deepdive-limit", type=int, default=10)
+    parser.add_argument("--no-deepdive", action="store_true")
     parser.add_argument("--deepdive-min-l2-score", type=float, default=70)
     parser.add_argument("--scout-model", default=DEFAULT_KIMI_SCORING_MODEL)
     parser.add_argument("--scoring-model", default=DEFAULT_KIMI_SCORING_MODEL)
     parser.add_argument("--deepdive-model", default=DEFAULT_KIMI_DEEPDIVE_MODEL)
     parser.add_argument("--enable-kimi-web-search", action="store_true")
+    parser.add_argument("--max-total-scoring-candidates", type=int, default=None)
+    parser.add_argument("--scout-timeout-seconds", type=int, default=None)
+    parser.add_argument("--scoring-timeout-seconds", type=int, default=None)
+    parser.add_argument("--deepdive-timeout-seconds", type=int, default=None)
+    parser.add_argument("--web-search-timeout-seconds", type=int, default=None)
+    parser.add_argument("--finalize-stale-running-before", default=None)
     parser.add_argument("--max-tool-calls-per-candidate", type=int, default=20)
     parser.add_argument("--max-web-search-calls-per-candidate", type=int, default=3)
     parser.add_argument("--max-repo-files-per-candidate", type=int, default=8)
     parser.add_argument("--max-pages-per-candidate", type=int, default=6)
     parser.add_argument("--max-hn-thread-fetches-per-candidate", type=int, default=3)
     parser.add_argument("--max-x-context-fetches-per-candidate", type=int, default=5)
-    args = parser.parse_args(argv)
+    return parser
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    return build_arg_parser().parse_args(argv)
+
+
+def config_from_args(args: argparse.Namespace) -> dict[str, Any]:
+    deepdive_limit = 0 if args.no_deepdive else args.deepdive_limit
+    return {
+        "max_edge_watch_scout": args.edge_scout_limit,
+        "max_scored_candidates": args.scoring_limit,
+        "max_deepdives_per_run": deepdive_limit,
+        "deepdive_min_l2_score": args.deepdive_min_l2_score,
+        "edge_scout_model": args.scout_model,
+        "scoring_model": args.scoring_model,
+        "deepdive_model": args.deepdive_model,
+        "enable_kimi_web_search": args.enable_kimi_web_search,
+        "max_total_scoring_candidates": args.max_total_scoring_candidates,
+        "scout_timeout_seconds": args.scout_timeout_seconds,
+        "scoring_timeout_seconds": args.scoring_timeout_seconds,
+        "deepdive_timeout_seconds": args.deepdive_timeout_seconds,
+        "web_search_timeout_seconds": args.web_search_timeout_seconds,
+        "finalize_stale_running_before": args.finalize_stale_running_before,
+        "max_tool_calls_per_candidate": args.max_tool_calls_per_candidate,
+        "max_web_search_calls_per_candidate": args.max_web_search_calls_per_candidate,
+        "max_repo_files_per_candidate": args.max_repo_files_per_candidate,
+        "max_pages_per_candidate": args.max_pages_per_candidate,
+        "max_hn_thread_fetches_per_candidate": args.max_hn_thread_fetches_per_candidate,
+        "max_x_context_fetches_per_candidate": args.max_x_context_fetches_per_candidate,
+    }
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
     summary = run_layer2_feed(
         decision_run_id=args.decision_run_id,
         feed_run_id=args.feed_run_id,
         now=args.now,
-        config={
-            "max_edge_watch_scout": args.edge_scout_limit,
-            "max_scored_candidates": args.scoring_limit,
-            "max_deepdives_per_run": args.deepdive_limit,
-            "deepdive_min_l2_score": args.deepdive_min_l2_score,
-            "edge_scout_model": args.scout_model,
-            "scoring_model": args.scoring_model,
-            "deepdive_model": args.deepdive_model,
-            "enable_kimi_web_search": args.enable_kimi_web_search,
-            "max_tool_calls_per_candidate": args.max_tool_calls_per_candidate,
-            "max_web_search_calls_per_candidate": args.max_web_search_calls_per_candidate,
-            "max_repo_files_per_candidate": args.max_repo_files_per_candidate,
-            "max_pages_per_candidate": args.max_pages_per_candidate,
-            "max_hn_thread_fetches_per_candidate": args.max_hn_thread_fetches_per_candidate,
-            "max_x_context_fetches_per_candidate": args.max_x_context_fetches_per_candidate,
-        },
+        config=config_from_args(args),
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0
