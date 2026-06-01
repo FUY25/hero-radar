@@ -18,6 +18,7 @@ SUCCESS_STATUSES = {
     "scheduled",
     "skipped_unchanged",
     "pending_budget",
+    "scout_disabled",
     "scout_ok",
     "scout_filtered",
     "scoring_ok",

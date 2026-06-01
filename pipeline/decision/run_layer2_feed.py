@@ -207,38 +207,49 @@ def run_layer2_feed(
                 status="pending_budget",
         )
         scouted = []
-        for group in schedule.scout_edge_watch:
-            try:
-                active_scout_provider = TelemetryLLMProvider(
-                    scout_provider,
-                    conn=conn,
-                    feed_run_id=active_feed_run_id,
-                    group_id=group.group_id,
-                    stage="scout",
-                    timeout_seconds=_optional_int(cfg.get("scout_timeout_seconds")),
-                )
-                result = scout_edge_watch_groups(
-                    conn,
-                    feed_run_id=active_feed_run_id,
-                    groups=[group],
-                    provider=active_scout_provider,
-                )
+        if bool(cfg.get("enable_edge_scout", False)):
+            for group in schedule.scout_edge_watch:
+                try:
+                    active_scout_provider = TelemetryLLMProvider(
+                        scout_provider,
+                        conn=conn,
+                        feed_run_id=active_feed_run_id,
+                        group_id=group.group_id,
+                        stage="scout",
+                        timeout_seconds=_optional_int(cfg.get("scout_timeout_seconds")),
+                    )
+                    result = scout_edge_watch_groups(
+                        conn,
+                        feed_run_id=active_feed_run_id,
+                        groups=[group],
+                        provider=active_scout_provider,
+                    )
+                    record_stage_event(
+                        conn,
+                        feed_run_id=active_feed_run_id,
+                        group_id=group.group_id,
+                        stage="scout",
+                        status="scout_ok" if result else "scout_filtered",
+                    )
+                    scouted.extend(result)
+                except Exception as exc:
+                    record_stage_event(
+                        conn,
+                        feed_run_id=active_feed_run_id,
+                        group_id=group.group_id,
+                        stage="scout",
+                        status="scout_error",
+                        error=exc,
+                    )
+        else:
+            for group in schedule.scout_edge_watch:
                 record_stage_event(
                     conn,
                     feed_run_id=active_feed_run_id,
                     group_id=group.group_id,
                     stage="scout",
-                    status="scout_ok" if result else "scout_filtered",
-                )
-                scouted.extend(result)
-            except Exception as exc:
-                record_stage_event(
-                    conn,
-                    feed_run_id=active_feed_run_id,
-                    group_id=group.group_id,
-                    stage="scout",
-                    status="scout_error",
-                    error=exc,
+                    status="scout_disabled",
+                    metadata={"reason": "enable_edge_scout=false"},
                 )
         scored = []
         scoring_candidates = [*schedule.score_now, *scouted]
@@ -457,6 +468,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--deepdive-limit", type=int, default=10)
     parser.add_argument("--no-deepdive", action="store_true")
     parser.add_argument("--deepdive-min-l2-score", type=float, default=70)
+    parser.add_argument("--enable-edge-scout", action="store_true")
     parser.add_argument("--scout-model", default=DEFAULT_KIMI_SCORING_MODEL)
     parser.add_argument("--scoring-model", default=DEFAULT_KIMI_SCORING_MODEL)
     parser.add_argument("--deepdive-model", default=DEFAULT_KIMI_DEEPDIVE_MODEL)
@@ -487,6 +499,7 @@ def config_from_args(args: argparse.Namespace) -> dict[str, Any]:
         "max_scored_candidates": args.scoring_limit,
         "max_deepdives_per_run": deepdive_limit,
         "deepdive_min_l2_score": args.deepdive_min_l2_score,
+        "enable_edge_scout": args.enable_edge_scout,
         "edge_scout_model": args.scout_model,
         "scoring_model": args.scoring_model,
         "deepdive_model": args.deepdive_model,

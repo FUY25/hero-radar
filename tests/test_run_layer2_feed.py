@@ -10,6 +10,13 @@ from pipeline.decision.schema import init_decision_db
 
 class Layer2RunnerTest(unittest.TestCase):
     def make_db_with_potentials(self, db_path: Path, names: list[str]) -> None:
+        self.make_db_with_candidates(
+            db_path, [(name, "potential") for name in names]
+        )
+
+    def make_db_with_candidates(
+        self, db_path: Path, candidates: list[tuple[str, str]]
+    ) -> None:
         conn = sqlite3.connect(db_path)
         init_decision_db(conn)
         conn.execute(
@@ -25,7 +32,7 @@ class Layer2RunnerTest(unittest.TestCase):
                 "",
             ),
         )
-        for index, name in enumerate(names):
+        for index, (name, level) in enumerate(candidates):
             entity_id = f"entity:{index}"
             conn.execute(
                 "insert into entities(entity_id, canonical_entity, canonical_key, key_type, first_seen, aliases_json, source_item_ids_json) values (?, ?, ?, ?, ?, ?, ?)",
@@ -44,7 +51,7 @@ class Layer2RunnerTest(unittest.TestCase):
                 (
                     entity_id,
                     "decision-run",
-                    "potential",
+                    level,
                     '["github"]',
                     "2026-06-01T00:00:00Z",
                 ),
@@ -335,6 +342,87 @@ class Layer2RunnerTest(unittest.TestCase):
         self.assertEqual(summary["scored"], 1)
         self.assertIn(("scoring", "pending_budget"), stage_rows)
 
+    def test_run_layer2_disables_edge_scout_by_default(self):
+        from pipeline.decision.llm_provider import FakeLLMProvider
+        from pipeline.decision.run_layer2_feed import run_layer2_feed
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "hero.sqlite"
+            self.make_db_with_candidates(db_path, [("edge/repo", "edge_watch")])
+            provider = FakeLLMProvider([])
+
+            summary = run_layer2_feed(
+                db_path=db_path,
+                decision_run_id="decision-run",
+                feed_run_id="l2-scout-disabled",
+                now="2026-06-01T12:00:00Z",
+                provider=provider,
+                config={"max_deepdives_per_run": 0},
+            )
+
+            conn = sqlite3.connect(db_path)
+            stage_rows = conn.execute(
+                "select stage, status from l2_stage_events where feed_run_id = ? order by id",
+                ("l2-scout-disabled",),
+            ).fetchall()
+            scout_rows = conn.execute(
+                "select count(*) from l2_scout_results where feed_run_id = ?",
+                ("l2-scout-disabled",),
+            ).fetchone()[0]
+            conn.close()
+
+        self.assertEqual(provider.calls, [])
+        self.assertEqual(summary["scored"], 0)
+        self.assertEqual(summary["errors"], 0)
+        self.assertIn(("scout", "scout_disabled"), stage_rows)
+        self.assertEqual(scout_rows, 0)
+
+    def test_run_layer2_runs_edge_scout_when_enabled(self):
+        from pipeline.decision.llm_provider import FakeLLMProvider
+        from pipeline.decision.layer2_grouping import build_candidate_groups
+        from pipeline.decision.run_layer2_feed import run_layer2_feed
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "hero.sqlite"
+            self.make_db_with_candidates(db_path, [("edge/repo", "edge_watch")])
+            conn = sqlite3.connect(db_path)
+            group_id = build_candidate_groups(conn, decision_run_id="decision-run")[
+                0
+            ].group_id
+            conn.close()
+            provider = FakeLLMProvider(
+                [
+                    {
+                        "promotions": [
+                            {
+                                "group_id": group_id,
+                                "reason_code": "possible_workflow_shift",
+                                "reason": "Worth scoring.",
+                            }
+                        ]
+                    },
+                    self.valid_score_response("Edge Scout Promotion"),
+                ]
+            )
+
+            summary = run_layer2_feed(
+                db_path=db_path,
+                decision_run_id="decision-run",
+                feed_run_id="l2-scout-enabled",
+                now="2026-06-01T12:00:00Z",
+                provider=provider,
+                config={
+                    "enable_edge_scout": True,
+                    "max_deepdives_per_run": 0,
+                },
+            )
+
+        self.assertEqual(summary["scored"], 1)
+        self.assertEqual(
+            [call["task"] for call in provider.calls],
+            ["layer2_edge_scout", "layer2_scoring"],
+        )
+
     def test_run_layer2_marks_stale_running_runs_before_starting(self):
         from pipeline.decision.llm_provider import FakeLLMProvider
         from pipeline.decision.run_layer2_feed import run_layer2_feed
@@ -396,6 +484,10 @@ class Layer2RunnerTest(unittest.TestCase):
         )
         config = config_from_args(args)
 
+        self.assertFalse(config["enable_edge_scout"])
         self.assertEqual(config["max_deepdives_per_run"], 0)
         self.assertEqual(config["scout_timeout_seconds"], 7)
         self.assertEqual(config["max_total_scoring_candidates"], 2)
+
+        enabled = config_from_args(parse_args(["--enable-edge-scout"]))
+        self.assertTrue(enabled["enable_edge_scout"])
