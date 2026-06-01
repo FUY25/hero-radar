@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import tempfile
 import unittest
 from unittest import mock
 
@@ -98,3 +99,88 @@ class KimiProviderTest(unittest.TestCase):
             [{"type": "builtin_function", "function": {"name": "$web_search"}}],
         )
         self.assertNotIn("response_format", captured_payloads[0])
+
+    def test_kimi_provider_reads_local_secrets_when_env_absent(self):
+        from pathlib import Path
+
+        from pipeline.decision import kimi_provider
+        from pipeline.decision.kimi_provider import KimiProvider
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            secrets_path = Path(tmpdir) / "secrets.local.json"
+            secrets_path.write_text(
+                json.dumps(
+                    {
+                        "kimi": {
+                            "api_key": "local-kimi-secret",
+                            "base_url": "https://api.moonshot.cn/v1",
+                        }
+                    }
+                )
+            )
+            with mock.patch.object(kimi_provider, "LOCAL_SECRETS_PATH", secrets_path):
+                with mock.patch.dict("os.environ", {}, clear=True):
+                    provider = KimiProvider()
+
+        self.assertEqual(provider.api_key, "local-kimi-secret")
+        self.assertEqual(provider.base_url, "https://api.moonshot.cn/v1")
+        self.assertNotIn("local-kimi-secret", repr(provider))
+
+    def test_kimi_provider_env_overrides_local_secrets(self):
+        from pathlib import Path
+
+        from pipeline.decision import kimi_provider
+        from pipeline.decision.kimi_provider import KimiProvider
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            secrets_path = Path(tmpdir) / "secrets.local.json"
+            secrets_path.write_text(
+                json.dumps(
+                    {
+                        "kimi": {
+                            "api_key": "local-kimi-secret",
+                            "base_url": "https://api.moonshot.cn/v1",
+                        }
+                    }
+                )
+            )
+            with mock.patch.object(kimi_provider, "LOCAL_SECRETS_PATH", secrets_path):
+                with mock.patch.dict(
+                    "os.environ",
+                    {
+                        "KIMI_API_KEY": "env-kimi-secret",
+                        "KIMI_BASE_URL": "https://api.moonshot.ai/v1",
+                    },
+                    clear=True,
+                ):
+                    provider = KimiProvider()
+
+        self.assertEqual(provider.api_key, "env-kimi-secret")
+        self.assertEqual(provider.base_url, "https://api.moonshot.ai/v1")
+
+    def test_kimi_provider_handshake_returns_sanitized_model_count(self):
+        from pipeline.decision.kimi_provider import KimiProvider
+
+        def fake_urlopen(request, timeout):
+            self.assertEqual(request.full_url, "https://api.moonshot.cn/v1/models")
+            self.assertIn("Bearer secret", request.headers["Authorization"])
+            return FakeHttpResponse({"data": [{"id": "kimi-k2.5"}, {"id": "kimi-k2.6"}]})
+
+        provider = KimiProvider(
+            api_key="secret",
+            base_url="https://api.moonshot.cn/v1",
+            timeout=1,
+        )
+        with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            result = provider.handshake()
+
+        self.assertEqual(
+            result,
+            {
+                "ok": True,
+                "base_url_host": "api.moonshot.cn",
+                "key_configured": True,
+                "models_count": 2,
+            },
+        )
+        self.assertNotIn("secret", json.dumps(result))

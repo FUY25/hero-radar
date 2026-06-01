@@ -4,13 +4,35 @@ import json
 import os
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 
 DEFAULT_KIMI_BASE_URL = "https://api.moonshot.ai/v1"
 DEFAULT_KIMI_SCOUT_MODEL = "kimi-k2.5"
 DEFAULT_KIMI_SCORING_MODEL = "kimi-k2.5"
 DEFAULT_KIMI_DEEPDIVE_MODEL = "kimi-k2.6"
+ROOT = Path(__file__).resolve().parents[2]
+LOCAL_SECRETS_PATH = ROOT / "pipeline" / "secrets.local.json"
+
+
+def load_local_kimi_config(path: Path | None = None) -> dict[str, str]:
+    active_path = path or LOCAL_SECRETS_PATH
+    try:
+        payload = json.loads(active_path.read_text())
+    except FileNotFoundError:
+        return {}
+    except (OSError, TypeError, ValueError):
+        return {}
+    kimi = payload.get("kimi") if isinstance(payload, dict) else {}
+    if not isinstance(kimi, dict):
+        return {}
+    return {
+        "api_key": str(kimi.get("api_key") or ""),
+        "base_url": str(kimi.get("base_url") or ""),
+        "model": str(kimi.get("model") or ""),
+    }
 
 
 class KimiProvider:
@@ -25,14 +47,25 @@ class KimiProvider:
         timeout: int = 90,
         max_retries: int = 2,
     ) -> None:
+        local_config = load_local_kimi_config()
         self.api_key = (
             api_key
             or os.environ.get("KIMI_API_KEY", "")
             or os.environ.get("MOONSHOT_API_KEY", "")
+            or local_config.get("api_key", "")
         )
-        self.model = model or os.environ.get("KIMI_MODEL", DEFAULT_KIMI_SCORING_MODEL)
+        self.model = (
+            model
+            or os.environ.get("KIMI_MODEL", "")
+            or local_config.get("model", "")
+            or DEFAULT_KIMI_SCORING_MODEL
+        )
         self.base_url = (
-            base_url or os.environ.get("KIMI_BASE_URL", DEFAULT_KIMI_BASE_URL)
+            base_url
+            or os.environ.get("KIMI_BASE_URL", "")
+            or os.environ.get("MOONSHOT_BASE_URL", "")
+            or local_config.get("base_url", "")
+            or DEFAULT_KIMI_BASE_URL
         ).rstrip("/")
         self.timeout = timeout
         self.max_retries = max(0, int(max_retries))
@@ -42,6 +75,52 @@ class KimiProvider:
             f"KimiProvider(model={self.model!r}, base_url={self.base_url!r}, "
             f"api_key_configured={bool(self.api_key)})"
         )
+
+    def handshake(self) -> dict[str, Any]:
+        host = urlparse(self.base_url).netloc
+        if not self.api_key:
+            return {
+                "ok": False,
+                "base_url_host": host,
+                "key_configured": False,
+                "models_count": 0,
+                "reason": "Kimi key not configured",
+            }
+        request = urllib.request.Request(
+            f"{self.base_url}/models",
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Accept": "application/json",
+            },
+            method="GET",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                body = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            return {
+                "ok": False,
+                "base_url_host": host,
+                "key_configured": True,
+                "models_count": 0,
+                "status": exc.code,
+                "reason": "HTTPError",
+            }
+        except (TimeoutError, urllib.error.URLError, ValueError) as exc:
+            return {
+                "ok": False,
+                "base_url_host": host,
+                "key_configured": True,
+                "models_count": 0,
+                "reason": type(exc).__name__,
+            }
+        data = body.get("data") if isinstance(body, dict) else []
+        return {
+            "ok": True,
+            "base_url_host": host,
+            "key_configured": True,
+            "models_count": len(data) if isinstance(data, list) else 0,
+        }
 
     def build_payload(
         self,

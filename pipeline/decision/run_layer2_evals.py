@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 from statistics import mean
 from typing import Any
 
@@ -74,11 +73,13 @@ def rank_eval_cases(cases: list[dict[str, Any]]) -> dict[str, Any]:
     return {"ok": ok, "top": top, "ranked": ranked, "metrics": metrics}
 
 
-def run_smoke(model: str = "kimi-k2.5") -> dict[str, Any]:
-    if not (os.environ.get("KIMI_API_KEY") or os.environ.get("MOONSHOT_API_KEY")):
+def run_smoke(
+    model: str = "kimi-k2.5", *, provider: Any | None = None
+) -> dict[str, Any]:
+    active_provider = provider or KimiProvider(model=model, timeout=45, max_retries=1)
+    if not getattr(active_provider, "api_key", ""):
         return {"ok": False, "skipped": True, "reason": "Kimi key not configured"}
-    provider = KimiProvider(model=model, timeout=45, max_retries=1)
-    response = provider.complete_json(
+    response = active_provider.complete_json(
         task="layer2_eval_smoke",
         prompt_version="layer2-eval-smoke-v1",
         system_prompt="Return strict JSON with ok boolean and score number.",
@@ -96,12 +97,25 @@ def run_smoke(model: str = "kimi-k2.5") -> dict[str, Any]:
     }
 
 
+def run_handshake(
+    *, provider: Any | None = None, model: str = "kimi-k2.5"
+) -> dict[str, Any]:
+    active_provider = provider or KimiProvider(model=model, timeout=20, max_retries=0)
+    return active_provider.handshake()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run Layer 2 evals")
+    parser.add_argument("--handshake", action="store_true")
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--model", default="kimi-k2.5")
     args = parser.parse_args()
-    result = run_smoke(args.model) if args.smoke else rank_eval_cases(default_eval_cases())
+    if args.handshake:
+        result = run_handshake(model=args.model)
+    elif args.smoke:
+        result = run_smoke(args.model)
+    else:
+        result = rank_eval_cases(default_eval_cases())
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0 if result.get("ok") or result.get("skipped") else 1
 
