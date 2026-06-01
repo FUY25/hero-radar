@@ -33,7 +33,7 @@ const payload = {
             evidence_bullets: [
               {
                 label: 'GH +321 stars / 24h',
-                display_label: 'GitHub: +321 stars in 24h',
+                display_label: 'GitHub 24 小时新增：321 stars',
                 origin_type: 'deterministic_rule',
               },
             ],
@@ -55,7 +55,7 @@ test('normalizeFeedPayload keeps run summary and item evidence', () => {
 
   assert.equal(normalized.feed_run_id, 'l2-run');
   assert.equal(normalized.today_focus[0].title, 'owner/repo');
-  assert.equal(normalized.today_focus[0].evidence_bullets[0].display_label, 'GitHub: +321 stars in 24h');
+  assert.equal(normalized.today_focus[0].evidence_bullets[0].display_label, 'GitHub 24 小时新增：321 stars');
   assert.equal(normalized.today_focus[0].source_links[0].channel_label, 'GitHub Trending');
 });
 

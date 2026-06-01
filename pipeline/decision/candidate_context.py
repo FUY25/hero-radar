@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import html
 import json
+import re
 import sqlite3
 from typing import Any
 
 
-SOURCE_CLASSIFIER_SOURCES = {"hn_llm_classifier", "x_tweets", "npm_registry"}
-BACKFILL_SOURCES = {"github_api", "github_stargazers", "npm_downloads"}
+SOURCE_CLASSIFIER_SOURCES = {"hn_llm_classifier", "x_tweets"}
+BACKFILL_SOURCES = {"github_api", "github_stargazers", "github_backfill", "npm_downloads", "npm_registry"}
 KEY_LINK_TYPES = {"github", "domain", "npm"}
 MAX_SOURCE_LINKS = 12
 
@@ -221,7 +223,7 @@ def _best_source_description(conn: sqlite3.Connection, entity: dict[str, Any]) -
         ).fetchone()
     except sqlite3.OperationalError:
         return ""
-    return str(row[0]) if row else ""
+    return clean_preview_text(str(row[0])) if row else ""
 
 
 def _best_source_link(conn: sqlite3.Connection, entity: dict[str, Any]) -> str | None:
@@ -278,7 +280,40 @@ def _readme_preview(
     if not row:
         return ""
     response = _json_loads(row[0], {})
-    return str(response.get("preview") or response.get("excerpt") or "")[:1000]
+    return clean_preview_text(str(response.get("preview") or response.get("excerpt") or ""))[:1000]
+
+
+def clean_preview_text(raw: str) -> str:
+    text = str(raw or "")
+    if not text.strip():
+        return ""
+    text = re.sub(r"```[\s\S]*?```", " ", text)
+    text = re.sub(r"~~~[\s\S]*?~~~", " ", text)
+    text = re.sub(r"<!--[\s\S]*?-->", " ", text)
+    text = re.sub(r"\[\s*!\[[^\]]*]\s*]\([^)]*\)", " ", text)
+    text = re.sub(r"\[\s*!\[[^\]]*]\s*]\[[^\]]*]", " ", text)
+    text = re.sub(r"\[\s*!\[[^\]]*](?:\[[^\]]*]|\([^)]*)?.*$", " ", text)
+    text = re.sub(r"(?m)^\s*\[[^\]]+]:\s*\S+.*$", " ", text)
+    text = re.sub(r"!\[[^\]]*$", " ", text)
+    text = re.sub(r"!\[[^\]]*]\([^)]*\)", " ", text)
+    text = re.sub(
+        r"<(?:img|source)\b\s+[A-Za-z_:.-]+=[\"']?\s*(?=[^<>]*<)",
+        " ",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(r"<(?:img|source)\b[^<>]*$", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = html.unescape(text)
+    text = re.sub(r"\[([^\]]+)]\([^)]*\)", r"\1", text)
+    text = re.sub(r"https?://\S+", " ", text)
+    text = re.sub(r"<([^<>]{1,80})>", r"\1", text)
+    text = re.sub(r"(^|\s)#{1,6}\s*", " ", text)
+    text = re.sub(r"(^|\s)>+\s*", " ", text)
+    text = re.sub(r"(^|\s)[*-]\s+", " ", text)
+    text = text.replace("`", "").replace("*", "")
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
 
 
 def _repo_key(key: str | None) -> str | None:
@@ -408,6 +443,8 @@ def _source_link_for_item_id(conn: sqlite3.Connection, item_id: int, ref: str) -
         return None
     metadata = _json_loads(row[4], {})
     label = _channel_label(channel)
+    if source == "hn_firebase":
+        label = _hn_firebase_label(metadata)
     return {
         "ref": ref,
         "item_id": int(row[0]),
@@ -435,6 +472,14 @@ def _dashboard_channel_for_source(source: str) -> str | None:
 
 def _channel_label(channel: str) -> str:
     return SOURCE_CHANNEL_LABELS.get(channel, channel)
+
+
+def _hn_firebase_label(metadata: dict[str, Any]) -> str:
+    return {
+        "topstories": "HN Top",
+        "beststories": "HN Best",
+        "newstories": "HN New",
+    }.get(str(metadata.get("list") or "").strip().lower(), "HN Firebase")
 
 
 def _evidence_label(row: dict[str, Any]) -> str:

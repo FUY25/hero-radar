@@ -176,7 +176,7 @@ export function candidateTableColumns() {
     { label: '证据', cls: 'candidate-evidence-col' },
     { label: '来源', cls: 'candidate-source-col' },
     { label: '链接', cls: 'candidate-link-col' },
-    { label: '上下文', cls: 'candidate-context-col' },
+    { label: '简介', cls: 'candidate-context-col' },
   ];
 }
 
@@ -187,6 +187,50 @@ export function candidateVisibleEvidence(row, expanded = false) {
     bullets: expanded ? bullets : bullets.slice(0, 3),
     extraCount: expanded ? 0 : hidden,
     expandable: bullets.length > 3 || hidden > 0,
+  };
+}
+
+export function candidateVisibleSources(row, expanded = false, limit = 4) {
+  const links = Array.isArray(row?.source_links) ? row.source_links : [];
+  const groupsByKey = new Map();
+  for (const link of links) {
+    const label = sourceGroupLabel(link);
+    const key = label;
+    if (!groupsByKey.has(key)) {
+      groupsByKey.set(key, {
+        key,
+        label,
+        count: 0,
+        link,
+        names: [],
+      });
+    }
+    const group = groupsByKey.get(key);
+    group.count += 1;
+    if (link.name && !group.names.includes(link.name)) group.names.push(link.name);
+  }
+  const groups = [...groupsByKey.values()].map((group) => ({
+    ...group,
+    title: group.names.slice(0, 4).join('\n'),
+  }));
+  const visibleLimit = Math.max(1, Number(limit) || 4);
+  return {
+    sources: expanded ? groups : groups.slice(0, visibleLimit),
+    extraCount: expanded ? 0 : Math.max(0, groups.length - visibleLimit),
+    expandable: groups.length > visibleLimit,
+    totalCount: links.length,
+  };
+}
+
+export function candidateContextSummary(rawText, expanded = false, limit = 220) {
+  const text = cleanPreviewText(rawText);
+  if (!text) return { text: '', expandable: false };
+  const maxLength = Math.max(40, Number(limit) || 220);
+  if (text.length <= maxLength) return { text, expandable: false };
+  if (expanded) return { text, expandable: true };
+  return {
+    text: `${text.slice(0, maxLength).trimEnd()}...`,
+    expandable: true,
   };
 }
 
@@ -389,22 +433,37 @@ function readableEvidenceLabel(bullet) {
   const strength = String(bullet?.strength || '').trim();
 
   const githubStars = label.match(/^GH \+(.+) stars \/ 24h$/i);
-  if (githubStars) return `GitHub: +${githubStars[1]} stars in 24h`;
+  if (githubStars) return `GitHub 24 小时新增：${githubStars[1]} stars`;
+
+  const githubMetric = label.match(/^github:\s*(stars_today|stars_7d|stars_velocity|forks_velocity|new_forks|forks_7d|daily_downloads)\s+(.+)$/i);
+  if (githubMetric) return readableMetricEvidence('github', githubMetric[1], githubMetric[2]);
 
   const hnStoryCount = label.match(/^hn:\s*strict_story_count_(\d+d)\s+(\d+)$/i);
-  if (hnStoryCount) return `HN: ${hnStoryCount[2]} qualifying stories in ${hnStoryCount[1]}`;
+  if (hnStoryCount) return `HN ${readableWindow(hnStoryCount[1])}内合格讨论：${hnStoryCount[2]} 条`;
+
+  const hnMetric = label.match(/^hn:\s*(hn_max_points_7d)\s+(.+)$/i);
+  if (hnMetric) return readableMetricEvidence('hn', hnMetric[1], hnMetric[2]);
 
   const hnMaxPoints = label.match(/^HN max (.+) pts \/ (.+)$/i);
-  if (hnMaxPoints) return `HN: max ${hnMaxPoints[1]} points in ${hnMaxPoints[2]}`;
+  if (hnMaxPoints) return `HN ${readableWindow(hnMaxPoints[2])}内最高热度：${hnMaxPoints[1]} points`;
 
   const hnClassifier = label.match(/^HN classifier:\s*(.+)$/i);
-  if (hnClassifier) return `HN: LLM says ${readableClassifierValue(hnClassifier[1])}`;
+  if (hnClassifier) return `HN 语义判定：${readableClassifierValue(hnClassifier[1])}`;
 
   const xTier = label.match(/^X\s+(.+)$/i);
-  if (xTier) return `X: LLM marked ${readableTier(xTier[1])}`;
+  if (xTier) return `X 语义判定：${readableTier(xTier[1])}`;
+
+  const productHuntRank = label.match(/^product_hunt:\s*(daily_rank|weekly_rank)\s+(.+)$/i);
+  if (productHuntRank) return readableMetricEvidence('product_hunt', productHuntRank[1], productHuntRank[2]);
+
+  const npmMetric = label.match(/^(package_family|npm):\s*(daily_downloads|downloads_7d)\s+(.+)$/i);
+  if (npmMetric) return readableMetricEvidence('npm', npmMetric[2], npmMetric[3]);
+
+  const npmRepositoryLink = label.match(/^(package_family|npm):\s*npm_repository_link\s+(.+)$/i);
+  if (npmRepositoryLink) return `npm 仓库链接：${readableLinkKey(npmRepositoryLink[2])}`;
 
   const resolved = label.match(/^Resolved\s+(.+)$/i);
-  if (resolved) return `Link resolved: ${readableLinkKey(resolved[1])}`;
+  if (resolved) return `已解析链接：${readableLinkKey(resolved[1])}`;
 
   if (family) return `${candidateSourceLabel(family)}: ${label.replace(`${family}:`, '').trim() || readableTier(strength)}`;
   return label;
@@ -414,33 +473,29 @@ function readableProvenanceBadge(bullet) {
   const origin = String(bullet?.origin_type || '').trim();
   const badge = String(bullet?.provenance_badge || '').trim();
   if (origin === 'source_classifier' || badge === 'LLM classifier') return 'LLM';
-  if (origin === 'deterministic_rule' || badge === 'rule') return 'Deterministic';
-  if (origin === 'backfill' || badge === 'backfill') return 'Backfill';
-  if (origin === 'resolver' || badge === 'resolver') return 'Resolver';
-  if (origin === 'cross_source_rule' || badge === 'cross-source') return 'Cross-source';
-  return badge;
+  return '';
 }
 
 function readableClassifierValue(value) {
   const normalized = String(value || '').trim().toLowerCase();
   return {
-    company_product: 'product/company',
-    project: 'project',
-    repo: 'repo/project',
-    package: 'package',
-    non_product: 'not a product',
-    topic: 'topic only',
+    company_product: '产品/公司',
+    project: '项目',
+    repo: 'repo/项目',
+    package: '包/库',
+    non_product: '非产品',
+    topic: '仅话题',
   }[normalized] || normalized.replaceAll('_', ' ');
 }
 
 function readableTier(value) {
   const normalized = String(value || '').trim().toLowerCase();
   return {
-    high_potential: 'high potential',
-    potential: 'potential',
-    watch: 'watch',
-    edge_watch: 'edge watch',
-    none: 'not relevant',
+    high_potential: '高潜力',
+    potential: '潜力',
+    watch: '观察',
+    edge_watch: '观察',
+    none: '不相关',
   }[normalized] || normalized.replaceAll('_', ' ');
 }
 
@@ -450,6 +505,93 @@ function readableLinkKey(value) {
   if (normalized.startsWith('domain:')) return normalized.slice('domain:'.length);
   if (normalized.startsWith('npm:')) return `npm ${normalized.slice('npm:'.length)}`;
   return normalized;
+}
+
+function readableMetricEvidence(family, metric, value) {
+  const compact = String(value || '').trim();
+  const normalized = String(metric || '').trim().toLowerCase();
+  if (family === 'github') {
+    return {
+      stars_today: `GitHub 24 小时新增：${compact} stars`,
+      stars_7d: `GitHub 7 天新增：${compact} stars`,
+      stars_velocity: `GitHub star 动量：${compact}`,
+      forks_velocity: `GitHub fork 动量：${compact}`,
+      new_forks: `GitHub 新增 fork：${compact}`,
+      forks_7d: `GitHub 7 天新增 fork：${compact}`,
+      daily_downloads: `GitHub 相关下载：${compact}`,
+    }[normalized] || `GitHub ${normalized}：${compact}`;
+  }
+  if (family === 'hn') {
+    return {
+      hn_max_points_7d: `HN 7 天内最高热度：${compact} points`,
+    }[normalized] || `HN ${normalized}：${compact}`;
+  }
+  if (family === 'product_hunt') {
+    return {
+      daily_rank: `Product Hunt 当日排名：第 ${compact}`,
+      weekly_rank: `Product Hunt 本周排名：第 ${compact}`,
+    }[normalized] || `Product Hunt ${normalized}：${compact}`;
+  }
+  if (family === 'npm') {
+    return {
+      daily_downloads: `npm 日下载：${compact}`,
+      downloads_7d: `npm 7 天下载：${compact}`,
+    }[normalized] || `npm ${normalized}：${compact}`;
+  }
+  return `${normalized}：${compact}`;
+}
+
+function cleanPreviewText(rawText) {
+  let text = String(rawText || '');
+  if (!text.trim()) return '';
+  text = text
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/~~~[\s\S]*?~~~/g, ' ')
+    .replace(/<!--[\s\S]*?-->/g, ' ')
+    .replace(/\[\s*!\[[^\]]*]\s*]\([^)]*\)/g, ' ')
+    .replace(/\[\s*!\[[^\]]*]\s*]\[[^\]]*]/g, ' ')
+    .replace(/\[\s*!\[[^\]]*](?:\[[^\]]*]|\([^)]*)?.*$/g, ' ')
+    .replace(/^\s*\[[^\]]+]:\s*\S+.*$/gm, ' ')
+    .replace(/!\[[^\]]*$/g, ' ')
+    .replace(/!\[[^\]]*]\([^)]*\)/g, ' ')
+    .replace(/<(?:img|source)\b\s+[A-Za-z_:.-]+=["']?\s*(?=[^<>]*<)/gi, ' ')
+    .replace(/<(?:img|source)\b[^<>]*$/gi, ' ')
+    .replace(/<[^>]+>/g, ' ');
+  text = decodeHtmlEntities(text)
+    .replace(/\[([^\]]+)]\([^)]*\)/g, '$1')
+    .replace(/https?:\/\/\S+/g, ' ')
+    .replace(/<([^<>]{1,80})>/g, '$1')
+    .replace(/(^|\s)#{1,6}\s*/g, ' ')
+    .replace(/(^|\s)>+\s*/g, ' ')
+    .replace(/(^|\s)[*-]\s+/g, ' ')
+    .replaceAll('`', '')
+    .replaceAll('*', '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return text;
+}
+
+function decodeHtmlEntities(value) {
+  return String(value || '')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'");
+}
+
+function readableWindow(value) {
+  return String(value || '')
+    .replace(/^24h$/i, '24 小时')
+    .replace(/^(\d+)d$/i, '$1 天');
+}
+
+function sourceGroupLabel(sourceLink) {
+  const base = sourceLink?.channel_label || sourceLink?.label || sourceLink?.channel || '来源';
+  const window = String(sourceLink?.window || '').trim();
+  if (!window || window === 'current') return base;
+  return `${base} ${window}`;
 }
 
 function titleizeSource(value) {

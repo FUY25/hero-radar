@@ -70,6 +70,8 @@ class DailyPipelineTest(unittest.TestCase):
                 "50",
                 "--resolver-research-rounds",
                 "3",
+                "--npm-backfill-limit",
+                "40",
                 "--enrich-readme-limit",
                 "100",
             ],
@@ -93,6 +95,7 @@ class DailyPipelineTest(unittest.TestCase):
                 classify_x_limit=0,
                 resolver_search_limit=80,
                 resolver_research_limit=0,
+                npm_backfill_limit=0,
                 enrich_readme_limit=0,
                 runner=runner,
             )
@@ -104,6 +107,7 @@ class DailyPipelineTest(unittest.TestCase):
         self.assertIn("400", cmd)
         self.assertNotIn("--classify-x-limit", cmd)
         self.assertNotIn("--backfill", cmd)
+        self.assertNotIn("--npm-backfill-limit", cmd)
 
     def test_daily_pipeline_stops_after_failed_source_stage(self):
         from pipeline.run_daily import run_daily

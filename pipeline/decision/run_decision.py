@@ -63,11 +63,11 @@ def read_latest_items(conn: sqlite3.Connection) -> list[dict[str, Any]]:
             i.raw_json
         from items i
         join (
-            select source, max(id) as snapshot_id
+            select max(id) as snapshot_id
             from snapshots
             where status = 'ok'
             group by source
-        ) latest on latest.source = i.source and latest.snapshot_id = i.snapshot_id
+        ) latest on latest.snapshot_id = i.snapshot_id
         order by i.source, i.source_rank is null, i.source_rank, i.id
         """
     ).fetchall()
@@ -763,6 +763,13 @@ def build_github_readme_client_from_args(args: argparse.Namespace) -> Any:
     return GitHubReadmeClient()
 
 
+def build_npm_client_from_args(args: argparse.Namespace) -> Any:
+    from pipeline.decision.npm_backfill import NpmRegistryClient
+
+    _ = args
+    return NpmRegistryClient()
+
+
 def build_resolver_search_client_from_args(args: argparse.Namespace) -> Any:
     from pipeline.decision.web_search import DuckDuckGoSearchClient
 
@@ -776,6 +783,7 @@ def run_from_args(
     llm_provider_builder: Any = build_deepseek_provider_from_args,
     github_client_builder: Any = build_github_client,
     github_readme_client_builder: Any = build_github_readme_client_from_args,
+    npm_client_builder: Any = build_npm_client_from_args,
     resolver_search_client_builder: Any = build_resolver_search_client_from_args,
 ) -> dict[str, int | str]:
     hn_limit = int(args.classify_hn_limit or 0)
@@ -784,6 +792,7 @@ def run_from_args(
     resolver_research_limit = int(getattr(args, "resolver_research_limit", 0) or 0)
     resolver_research_rounds = int(getattr(args, "resolver_research_rounds", 3) or 0)
     enrich_readme_limit = int(getattr(args, "enrich_readme_limit", 0) or 0)
+    npm_backfill_limit = int(getattr(args, "npm_backfill_limit", 0) or 0)
     llm_provider = (
         llm_provider_builder(args)
         if hn_limit > 0 or x_limit > 0 or resolver_research_limit > 0
@@ -807,6 +816,8 @@ def run_from_args(
         llm_concurrency=int(getattr(args, "llm_concurrency", 1) or 1),
         x_stage1_batch_size=args.x_stage1_batch_size,
         x_credible_handles=parse_credible_handles(args.x_credible_handles),
+        npm_client=npm_client_builder(args) if npm_backfill_limit > 0 else None,
+        npm_backfill_limit=npm_backfill_limit,
         resolver_search_client=resolver_search_client,
         resolver_search_limit=resolver_search_limit,
         resolver_research_provider=llm_provider if resolver_research_limit > 0 else None,
@@ -835,6 +846,7 @@ def main() -> None:
     parser.add_argument("--resolver-search-limit", type=int, default=0)
     parser.add_argument("--resolver-research-limit", type=int, default=0)
     parser.add_argument("--resolver-research-rounds", type=int, default=3)
+    parser.add_argument("--npm-backfill-limit", type=int, default=0)
     parser.add_argument("--enrich-readme-limit", type=int, default=0)
     args = parser.parse_args()
 

@@ -117,6 +117,40 @@ class RulesEngineTest(unittest.TestCase):
             resolution.entities[0].entity_id,
         )
 
+    def test_repofomo_high_from_new_forks_reports_fork_evidence(self):
+        rows = [
+            {
+                "id": 4,
+                "source": "github_movers_repofomo",
+                "external_id": "repofomo:owner/repo",
+                "name": "owner/repo",
+                "url": "https://github.com/owner/repo",
+                "description": "",
+                "metadata": {
+                    "stars_7d": 0,
+                    "stars_30d": 6028,
+                    "stars_60d": 15962,
+                    "stars_total": 156152,
+                    "new_forks": 647,
+                },
+                "fetched_at": "2026-05-31T00:00:00Z",
+            }
+        ]
+        resolution = resolve_entities(rows, first_seen="2026-05-31T00:00:00Z")
+
+        result = evaluate_entities(
+            rows,
+            resolution,
+            run_id="run-1",
+            rule_version="rules-v1",
+            now="2026-05-31T00:00:00Z",
+        )
+
+        self.assertEqual(result.potential_candidates[0].level, "high_potential")
+        self.assertEqual(result.evidence_rows[0].metric_name, "new_forks")
+        self.assertEqual(result.evidence_rows[0].metric_value, "647")
+        self.assertEqual(result.evidence_rows[0].rule_id, "repofomo_new_forks_high_potential")
+
     def test_hn_uses_max_points_not_story_count_and_stops_at_watch(self):
         rows = [
             {
@@ -426,6 +460,49 @@ class RulesEngineTest(unittest.TestCase):
                     "metric_value": "company_product",
                     "signal_label": "watch",
                     "raw_url_or_ref": "item:29",
+                }
+            ],
+        )
+
+        self.assertEqual(result.potential_candidates, [])
+        self.assertEqual(result.edge_watch_candidates, [])
+        self.assertEqual(result.evidence_rows, [])
+
+    def test_hn_company_product_on_article_path_does_not_use_domain_bypass(self):
+        rows = [
+            {
+                "id": 30,
+                "source": "hn_firebase",
+                "external_id": "beststories:48318174",
+                "name": "Claude Code – Everything you can configure that the docs don't tell you",
+                "url": "https://buildingbetter.tech/p/i-read-the-claude-code-source-code",
+                "description": "",
+                "metadata": {
+                    "score": 324,
+                    "comments": 64,
+                    "list": "beststories",
+                    "created_at_unix": 1780185600,
+                },
+                "fetched_at": "2026-05-31T00:00:00Z",
+            }
+        ]
+        resolution = resolve_entities(rows, first_seen="2026-05-31T00:00:00Z")
+
+        result = evaluate_entities(
+            rows,
+            resolution,
+            run_id="run-1",
+            rule_version="rules-v1",
+            now="2026-05-31T00:00:00Z",
+            classifier_evidence=[
+                {
+                    "entity_id": resolution.entities[0].entity_id,
+                    "source": "hn_llm_classifier",
+                    "family": "hn",
+                    "metric_name": "hn_projectness",
+                    "metric_value": "company_product",
+                    "signal_label": "context",
+                    "raw_url_or_ref": "item:30",
                 }
             ],
         )

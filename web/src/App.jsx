@@ -10,10 +10,12 @@ import {
 import {
   activeChannelList,
   availableRanges as modelAvailableRanges,
+  candidateContextSummary,
   candidateSourceOptions,
   candidateRowsForFeed,
   candidateTableColumns,
   candidateVisibleEvidence,
+  candidateVisibleSources,
   columnWidthKey,
   columnWidthStyle,
   dashboardApiUrl,
@@ -409,6 +411,12 @@ function levelLabel(level) {
 function sourceChipLabel(sourceLink) {
   const base = sourceLink?.channel_label || sourceLink?.label || sourceLink?.channel || '来源';
   return sourceLink?.window ? `${base} ${sourceLink.window}` : base;
+}
+
+function sourceGroupTitle(sourceGroup) {
+  const names = sourceGroup?.title || '';
+  const suffix = sourceGroup?.count > 1 ? `${sourceGroup.count} 条内部来源` : '1 条内部来源';
+  return names ? `${suffix}\n${names}` : suffix;
 }
 
 function StatusDot({ error }) {
@@ -1401,6 +1409,8 @@ function FeedView({ payload, tab = 'daily', onTabChange, onOpenSource }) {
   const [levelFilter, setLevelFilter] = useState('all');
   const [sourceFilters, setSourceFilters] = useState([]);
   const [expandedEvidenceIds, setExpandedEvidenceIds] = useState(() => new Set());
+  const [expandedSourceIds, setExpandedSourceIds] = useState(() => new Set());
+  const [expandedContextIds, setExpandedContextIds] = useState(() => new Set());
   const [columnWidths, setColumnWidths] = useState(() => readColumnWidths('candidate_pool'));
   const columns = candidateTableColumns();
   const rows = useMemo(() => candidateRowsForFeed(payload.candidates), [payload.candidates]);
@@ -1418,6 +1428,22 @@ function FeedView({ payload, tab = 'daily', onTabChange, onOpenSource }) {
   };
   const toggleEvidence = (entityId) => {
     setExpandedEvidenceIds((current) => {
+      const next = new Set(current);
+      if (next.has(entityId)) next.delete(entityId);
+      else next.add(entityId);
+      return next;
+    });
+  };
+  const toggleSources = (entityId) => {
+    setExpandedSourceIds((current) => {
+      const next = new Set(current);
+      if (next.has(entityId)) next.delete(entityId);
+      else next.add(entityId);
+      return next;
+    });
+  };
+  const toggleContext = (entityId) => {
+    setExpandedContextIds((current) => {
       const next = new Set(current);
       if (next.has(entityId)) next.delete(entityId);
       else next.add(entityId);
@@ -1526,6 +1552,8 @@ function FeedView({ payload, tab = 'daily', onTabChange, onOpenSource }) {
               <tbody>
                 {filteredRows.length ? filteredRows.map((row) => {
                   const evidence = candidateVisibleEvidence(row, expandedEvidenceIds.has(row.entity_id));
+                  const sources = candidateVisibleSources(row, expandedSourceIds.has(row.entity_id));
+                  const context = candidateContextSummary(row.context_preview || row.first_trigger_at || row.status || '', expandedContextIds.has(row.entity_id));
                   return (
                     <tr key={`${row.pool_type}:${row.entity_id}`}>
                       <td className="candidate-name-cell" style={columnWidthStyle(columnWidths, 0)}>
@@ -1534,54 +1562,74 @@ function FeedView({ payload, tab = 'daily', onTabChange, onOpenSource }) {
                       </td>
                       <td style={columnWidthStyle(columnWidths, 1)}><span className={`badge ${row.level}`}>{levelLabel(row.level)}</span></td>
                       <td style={columnWidthStyle(columnWidths, 2)}>
-                        <div className="evidence-list">
+                        <ul className="evidence-list">
                           {evidence.bullets.map((bullet) => (
-                            <span className="evidence-pill" title={bullet.label} key={`${row.entity_id}:${bullet.label}:${bullet.origin_type}`}>
-                              {bullet.display_label || bullet.label}
-                              {(bullet.display_badge || bullet.provenance_badge) ? <small>{bullet.display_badge || bullet.provenance_badge}</small> : null}
-                            </span>
+                            <li className="evidence-bullet" title={bullet.label} key={`${row.entity_id}:${bullet.label}:${bullet.origin_type}`}>
+                              <span>{bullet.display_label || bullet.label}</span>
+                              {bullet.display_badge === 'LLM' ? <small className="evidence-llm-badge">LLM</small> : null}
+                            </li>
                           ))}
                           {evidence.extraCount > 0 ? (
-                            <button
-                              type="button"
-                              className="evidence-more"
-                              aria-expanded={false}
-                              onClick={() => toggleEvidence(row.entity_id)}
-                            >
-                              +{evidence.extraCount}
-                            </button>
+                            <li className="evidence-action">
+                              <button
+                                type="button"
+                                className="evidence-more"
+                                aria-expanded={false}
+                                onClick={() => toggleEvidence(row.entity_id)}
+                              >
+                                +{evidence.extraCount}
+                              </button>
+                            </li>
                           ) : null}
                           {evidence.expandable && evidence.extraCount === 0 ? (
+                            <li className="evidence-action">
+                              <button
+                                type="button"
+                                className="evidence-more"
+                                aria-expanded
+                                onClick={() => toggleEvidence(row.entity_id)}
+                              >
+                                收起
+                              </button>
+                            </li>
+                          ) : null}
+                        </ul>
+                      </td>
+                      <td style={columnWidthStyle(columnWidths, 3)}>
+                        <div className="candidate-source-list">
+                          {sources.sources.map((sourceGroup) => (
                             <button
                               type="button"
-                              className="evidence-more"
+                              className="candidate-source-row"
+                              key={`${row.entity_id}:${sourceGroup.key}`}
+                              title={sourceGroupTitle(sourceGroup)}
+                              onClick={() => onOpenSource?.(sourceGroup.link)}
+                            >
+                              <span>{sourceGroup.label}</span>
+                              {sourceGroup.count > 1 ? <small>{sourceGroup.count}</small> : null}
+                            </button>
+                          ))}
+                          {sources.extraCount > 0 ? (
+                            <button
+                              type="button"
+                              className="candidate-source-more"
+                              aria-expanded={false}
+                              onClick={() => toggleSources(row.entity_id)}
+                            >
+                              +{sources.extraCount}
+                            </button>
+                          ) : null}
+                          {sources.expandable && sources.extraCount === 0 ? (
+                            <button
+                              type="button"
+                              className="candidate-source-more"
                               aria-expanded
-                              onClick={() => toggleEvidence(row.entity_id)}
+                              onClick={() => toggleSources(row.entity_id)}
                             >
                               收起
                             </button>
                           ) : null}
-                        </div>
-                      </td>
-                      <td style={columnWidthStyle(columnWidths, 3)}>
-                        <div className="candidate-source-list">
-                          {(row.source_links || []).slice(0, 4).map((sourceLink) => (
-                            <button
-                              type="button"
-                              className="candidate-source-chip"
-                              key={`${row.entity_id}:${sourceLink.ref || sourceLink.channel}:${sourceLink.item_id}`}
-                              title={sourceLink.name || sourceLink.external_url || sourceLink.channel_label}
-                              onClick={() => onOpenSource?.(sourceLink)}
-                            >
-                              {sourceChipLabel(sourceLink)}
-                            </button>
-                          ))}
-                          {Math.max(0, Number(row.source_link_count || 0) - (row.source_links || []).slice(0, 4).length) > 0 ? (
-                            <span className="candidate-source-more">
-                              +{Math.max(0, Number(row.source_link_count || 0) - (row.source_links || []).slice(0, 4).length)}
-                            </span>
-                          ) : null}
-                          {!(row.source_links || []).length ? <span className="muted">暂无内部来源</span> : null}
+                          {!sources.sources.length ? <span className="muted">暂无内部来源</span> : null}
                         </div>
                       </td>
                       <td style={columnWidthStyle(columnWidths, 4)}>
@@ -1593,7 +1641,22 @@ function FeedView({ payload, tab = 'daily', onTabChange, onOpenSource }) {
                           <span className="muted">{row.binding_confidence === 'weak' ? '弱绑定' : '暂无链接'}</span>
                         )}
                       </td>
-                      <td className="candidate-context" style={columnWidthStyle(columnWidths, 5)}>{row.context_preview || row.first_trigger_at || row.status || ''}</td>
+                      <td className="candidate-context" style={columnWidthStyle(columnWidths, 5)}>
+                        {context.text ? (
+                          <>
+                            <span className="candidate-context-text">{context.text}</span>
+                            {context.expandable ? (
+                              <button
+                                type="button"
+                                className="candidate-context-toggle"
+                                onClick={() => toggleContext(row.entity_id)}
+                              >
+                                {expandedContextIds.has(row.entity_id) ? '收起' : '展开'}
+                              </button>
+                            ) : null}
+                          </>
+                        ) : null}
+                      </td>
                     </tr>
                   );
                 }) : (

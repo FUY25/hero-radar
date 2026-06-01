@@ -22,6 +22,24 @@ HN_ADMISSION_PROJECTNESS = {"project", "package"}
 HN_CONTENT_DOMAIN_EXACT = {"medium.com", "substack.com", "techcrunch.com"}
 HN_CONTENT_DOMAIN_SUFFIXES = (".medium.com", ".substack.com")
 HN_CONTENT_DOMAIN_PREFIXES = ("blog.", "news.", "newsroom.")
+HN_CONTENT_PATH_SEGMENTS = {
+    "article",
+    "articles",
+    "blog",
+    "blogs",
+    "essay",
+    "essays",
+    "news",
+    "newsletter",
+    "newsletters",
+    "p",
+    "post",
+    "posts",
+    "story",
+    "stories",
+    "writing",
+    "writings",
+}
 X_TIER_LEVELS = {"watch": "watch", "potential": "potential", "high": "high_potential", "high_potential": "high_potential"}
 
 
@@ -325,12 +343,24 @@ def is_hn_content_domain(domain: str) -> bool:
     return value.startswith(HN_CONTENT_DOMAIN_PREFIXES)
 
 
-def hn_strong_entity_bypass(entity: Entity) -> bool:
+def is_hn_content_path(url: str | None) -> bool:
+    if not url:
+        return False
+    parsed = urllib.parse.urlparse(str(url))
+    path_parts = [part.lower() for part in parsed.path.split("/") if part]
+    if not path_parts:
+        return False
+    return path_parts[0] in HN_CONTENT_PATH_SEGMENTS
+
+
+def hn_strong_entity_bypass(entity: Entity, row: dict[str, Any]) -> bool:
     if entity.key_type == "github":
         return True
     if entity.key_type != "domain":
         return False
-    return not is_hn_content_domain(domain_from_key(entity.canonical_key))
+    if is_hn_content_domain(domain_from_key(entity.canonical_key)):
+        return False
+    return not is_hn_content_path(row.get("url"))
 
 
 def entity_map(resolution: ResolutionResult) -> dict[str, Entity]:
@@ -563,8 +593,19 @@ def evaluate_repofomo(
             level = "high_potential"
         if level == "none":
             continue
+        metric_name = "stars_7d"
+        metric_value = stars_7d
+        reason = "repofomo_stars_7d"
+        if (
+            level == "high_potential"
+            and new_forks >= number(thresholds["new_forks_high"])
+            and stars_7d < number(thresholds["stars_7d_high"])
+        ):
+            metric_name = "new_forks"
+            metric_value = new_forks
+            reason = "repofomo_new_forks"
         event_at = row_time(row)
-        promote(state, level, "github", event_at, "repofomo_stars_7d")
+        promote(state, level, "github", event_at, reason)
         if level == "watch":
             add_weak_signal(state, "github", event_at)
         output.append(
@@ -573,10 +614,10 @@ def evaluate_repofomo(
                 row=row,
                 source="github_movers_repofomo",
                 event_at=event_at,
-                metric_name="stars_7d",
-                metric_value=stars_7d,
+                metric_name=metric_name,
+                metric_value=metric_value,
                 family="github",
-                rule_id=f"repofomo_stars_7d_{level}",
+                rule_id=f"{reason}_{level}",
                 rule_version=rule_version,
                 level=level,
                 historical_safety="snapshot_only",
@@ -630,7 +671,7 @@ def hn_row_is_qualified(
     row: dict[str, Any],
     hn_project_items: set[int],
 ) -> bool:
-    return hn_strong_entity_bypass(state.entity) or hn_row_is_project(row, hn_project_items)
+    return hn_strong_entity_bypass(state.entity, row) or hn_row_is_project(row, hn_project_items)
 
 
 def evaluate_hn(

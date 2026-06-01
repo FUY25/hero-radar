@@ -50,6 +50,7 @@ def decision_command(
     resolver_search_limit: int,
     resolver_research_limit: int,
     resolver_research_rounds: int,
+    npm_backfill_limit: int,
     enrich_readme_limit: int,
 ) -> list[str]:
     cmd = [
@@ -73,6 +74,8 @@ def decision_command(
     if resolver_research_limit > 0:
         cmd.extend(["--resolver-research-limit", str(resolver_research_limit)])
         cmd.extend(["--resolver-research-rounds", str(max(0, resolver_research_rounds))])
+    if npm_backfill_limit > 0:
+        cmd.extend(["--npm-backfill-limit", str(npm_backfill_limit)])
     if enrich_readme_limit > 0:
         cmd.extend(["--enrich-readme-limit", str(enrich_readme_limit)])
     return cmd
@@ -177,6 +180,7 @@ def run_daily(
     resolver_search_limit: int = 100,
     resolver_research_limit: int = 50,
     resolver_research_rounds: int = 3,
+    npm_backfill_limit: int = 40,
     enrich_readme_limit: int = 100,
     run_layer2: bool = False,
     layer2_scout_limit: int = 50,
@@ -238,6 +242,7 @@ def run_daily(
                             resolver_search_limit=resolver_search_limit,
                             resolver_research_limit=resolver_research_limit,
                             resolver_research_rounds=resolver_research_rounds,
+                            npm_backfill_limit=npm_backfill_limit if backfill else 0,
                             enrich_readme_limit=enrich_readme_limit,
                         ),
                         cwd=active_root,
@@ -313,6 +318,7 @@ def main() -> int:
     parser.add_argument("--resolver-search-limit", type=int, default=100)
     parser.add_argument("--resolver-research-limit", type=int, default=50)
     parser.add_argument("--resolver-research-rounds", type=int, default=3)
+    parser.add_argument("--npm-backfill-limit", type=int, default=40)
     parser.add_argument("--enrich-readme-limit", type=int, default=100)
     parser.add_argument("--run-layer2", action="store_true")
     parser.add_argument("--layer2-scout-limit", type=int, default=50)
@@ -345,6 +351,7 @@ def main() -> int:
         resolver_search_limit=args.resolver_search_limit,
         resolver_research_limit=args.resolver_research_limit,
         resolver_research_rounds=args.resolver_research_rounds,
+        npm_backfill_limit=args.npm_backfill_limit,
         enrich_readme_limit=args.enrich_readme_limit,
         run_layer2=args.run_layer2,
         layer2_scout_limit=args.layer2_scout_limit,

@@ -310,6 +310,119 @@ def seed_npm_source_tables(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def seed_aggregate_child_source_tables(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        create table snapshots (
+            id integer primary key autoincrement,
+            run_id text not null,
+            source text not null,
+            fetched_at text not null,
+            status text not null,
+            item_count integer not null,
+            error text
+        );
+        create table items (
+            id integer primary key autoincrement,
+            run_id text not null,
+            snapshot_id integer not null,
+            source text not null,
+            external_id text not null,
+            name text not null,
+            url text,
+            fetched_at text not null,
+            heat real,
+            velocity real,
+            acceleration real,
+            source_rank integer,
+            description text,
+            metadata_json text not null,
+            raw_json text not null
+        );
+        """
+    )
+    conn.execute(
+        "insert into snapshots(run_id, source, fetched_at, status, item_count, error) values (?, ?, ?, ?, ?, ?)",
+        ("source-run-movers-old", "github_movers", "2026-05-30T00:00:00Z", "ok", 1, None),
+    )
+    old_snapshot_id = conn.execute("select max(id) from snapshots").fetchone()[0]
+    conn.execute(
+        """
+        insert into items(run_id, snapshot_id, source, external_id, name, url, fetched_at, metadata_json, raw_json)
+        values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "source-run-movers-old",
+            old_snapshot_id,
+            "github_movers_trending_repos",
+            "old/repo",
+            "old/repo",
+            "https://github.com/old/repo",
+            "2026-05-30T00:00:00Z",
+            json.dumps({"period": "daily", "stars_velocity": 900, "forks_velocity": 10}),
+            "{}",
+        ),
+    )
+    conn.execute(
+        "insert into snapshots(run_id, source, fetched_at, status, item_count, error) values (?, ?, ?, ?, ?, ?)",
+        ("source-run-movers", "github_movers", "2026-05-31T00:00:00Z", "ok", 2, None),
+    )
+    movers_snapshot_id = conn.execute("select max(id) from snapshots").fetchone()[0]
+    conn.executemany(
+        """
+        insert into items(run_id, snapshot_id, source, external_id, name, url, fetched_at, metadata_json, raw_json)
+        values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                "source-run-movers",
+                movers_snapshot_id,
+                "github_movers_trending_repos",
+                "owner/mover",
+                "owner/mover",
+                "https://github.com/owner/mover",
+                "2026-05-31T00:00:00Z",
+                json.dumps({"period": "daily", "stars_velocity": 900, "forks_velocity": 10}),
+                "{}",
+            ),
+            (
+                "source-run-movers",
+                movers_snapshot_id,
+                "github_movers_repofomo",
+                "owner/fomo",
+                "owner/fomo",
+                "https://github.com/owner/fomo",
+                "2026-05-31T00:00:00Z",
+                json.dumps({"stars_7d": 240, "stars_30d": 300, "stars_60d": 500, "new_forks": 8}),
+                "{}",
+            ),
+        ],
+    )
+    conn.execute(
+        "insert into snapshots(run_id, source, fetched_at, status, item_count, error) values (?, ?, ?, ?, ?, ?)",
+        ("source-run-hf", "huggingface_trending", "2026-05-31T00:00:00Z", "ok", 1, None),
+    )
+    hf_snapshot_id = conn.execute("select max(id) from snapshots").fetchone()[0]
+    conn.execute(
+        """
+        insert into items(run_id, snapshot_id, source, external_id, name, url, fetched_at, metadata_json, raw_json)
+        values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "source-run-hf",
+            hf_snapshot_id,
+            "huggingface_spaces",
+            "owner/demo-space",
+            "Demo Space",
+            "https://huggingface.co/spaces/owner/demo-space",
+            "2026-05-31T00:00:00Z",
+            json.dumps({"createdAt": "2026-05-31T00:00:00Z"}),
+            "{}",
+        ),
+    )
+    conn.commit()
+
+
 class DecisionRunnerTest(unittest.TestCase):
     def test_cli_help_exposes_bounded_llm_classifier_flags(self):
         result = subprocess.run(
@@ -550,6 +663,107 @@ class DecisionRunnerTest(unittest.TestCase):
 
         self.assertIs(captured["readme_client"], readme_client)
         self.assertEqual(captured["enrich_readme_limit"], 2)
+
+    def test_run_from_args_builds_npm_client_only_when_limit_is_set(self):
+        from pipeline.decision.run_decision import run_from_args
+
+        captured = {}
+        npm_client = object()
+
+        def fake_runner(**kwargs):
+            captured.update(kwargs)
+            return {
+                "entities": 0,
+                "potential_candidates": 0,
+                "edge_watch_candidates": 0,
+                "backfill_jobs": 0,
+                "export": str(kwargs["export_json_path"]),
+            }
+
+        args = Namespace(
+            db=Path("db.sqlite"),
+            run_id="run",
+            export_json=Path("out.json"),
+            now="2026-05-31T00:00:00Z",
+            backfill=False,
+            classify_hn_limit=0,
+            classify_x_limit=0,
+            llm_model=None,
+            llm_concurrency=1,
+            x_stage1_batch_size=100,
+            x_credible_handles="",
+            resolver_search_limit=0,
+            resolver_research_limit=0,
+            resolver_research_rounds=3,
+            enrich_readme_limit=0,
+            npm_backfill_limit=7,
+        )
+
+        run_from_args(
+            args,
+            decision_runner=fake_runner,
+            llm_provider_builder=lambda parsed: None,
+            github_client_builder=lambda: None,
+            npm_client_builder=lambda parsed: npm_client,
+        )
+
+        self.assertIs(captured["npm_client"], npm_client)
+        self.assertEqual(captured["npm_backfill_limit"], 7)
+
+    def test_read_latest_items_includes_child_sources_from_latest_aggregate_snapshots(self):
+        from pipeline.decision.run_decision import read_latest_items
+
+        conn = sqlite3.connect(":memory:")
+        self.addCleanup(conn.close)
+        seed_aggregate_child_source_tables(conn)
+
+        rows = read_latest_items(conn)
+
+        self.assertEqual(
+            [row["source"] for row in rows],
+            [
+                "github_movers_repofomo",
+                "github_movers_trending_repos",
+                "huggingface_spaces",
+            ],
+        )
+        self.assertNotIn("old/repo", {row["external_id"] for row in rows})
+
+    def test_runner_promotes_child_sources_from_aggregate_snapshots(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "hero.sqlite"
+            export_path = Path(tmpdir) / "candidates.json"
+            conn = sqlite3.connect(db_path)
+            seed_aggregate_child_source_tables(conn)
+            init_decision_db(conn)
+            conn.close()
+
+            summary = run_decision(
+                db_path=db_path,
+                run_id="decision-run-aggregate",
+                export_json_path=export_path,
+                now="2026-05-31T00:00:00Z",
+            )
+
+            self.assertEqual(summary["potential_candidates"], 1)
+            self.assertEqual(summary["edge_watch_candidates"], 2)
+            conn = sqlite3.connect(db_path)
+            evidence_sources = {
+                row[0]
+                for row in conn.execute(
+                    "select source from evidence_rows where run_id = ?",
+                    ("decision-run-aggregate",),
+                ).fetchall()
+            }
+            conn.close()
+            self.assertEqual(
+                evidence_sources,
+                {
+                    "github_movers_trending_repos",
+                    "github_movers_repofomo",
+                    "huggingface",
+                },
+            )
 
     def test_enrich_readmes_for_candidates_uses_verified_github_links(self):
         from pipeline.decision.readme_enrichment import enrich_candidate_readmes

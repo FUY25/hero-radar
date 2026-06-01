@@ -117,6 +117,139 @@ class CandidateContextTest(unittest.TestCase):
         )
         self.assertEqual(bundle["evidence_bullets"][2]["origin_type"], "source_classifier")
 
+    def test_context_preview_cleans_readme_markup(self):
+        from pipeline.decision.candidate_context import context_bundle_for_entity
+
+        conn = self.make_conn()
+        conn.execute(
+            """
+            insert into api_cache(cache_key, source, external_id, window, input_hash, response_json, status, fetched_at)
+            values (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "readme:owner/repo",
+                "github_readme",
+                "owner/repo",
+                "candidate_context",
+                "hash",
+                json.dumps(
+                    {
+                        "preview": (
+                            '<p align="center"><a href="https://opencode.ai"><picture>'
+                            '<source srcset="packages/logo.svg"><img alt="OpenCode logo">'
+                            "</picture></a></p>\n"
+                            "![npm](https://img.shields.io/npm/v/opencode-ai.svg) "
+                            "# OpenCode\n"
+                            "An agentic terminal coding tool with [docs](https://opencode.ai/docs).\n"
+                            "```bash\nnpm install opencode-ai\n```"
+                        )
+                    }
+                ),
+                "ok",
+                "2026-05-31T00:00:00Z",
+            ),
+        )
+        conn.commit()
+
+        bundle = context_bundle_for_entity(conn, entity_id="entity:repo", run_id="run-1")
+
+        self.assertEqual(
+            bundle["context_preview"],
+            "OpenCode An agentic terminal coding tool with docs.",
+        )
+
+    def test_context_preview_cleans_truncated_html_fragments(self):
+        from pipeline.decision.candidate_context import context_bundle_for_entity
+
+        conn = self.make_conn()
+        conn.execute(
+            "update items set description = ? where id = 1",
+            ('<img src=" Banner title <p align="center">Readable project summary',),
+        )
+        conn.commit()
+
+        bundle = context_bundle_for_entity(conn, entity_id="entity:repo", run_id="run-1")
+
+        self.assertEqual(bundle["context_preview"], "Banner title Readable project summary")
+
+    def test_context_preview_cleans_reference_style_markdown_badges(self):
+        from pipeline.decision.candidate_context import context_bundle_for_entity
+
+        conn = self.make_conn()
+        description = (
+            "# Claude Agent SDK [![npm]][npm]\n"
+            "[npm]: https://img.shields.io/npm/v/@anthropic-ai/claude-agent-sdk.svg\n"
+            "The Claude Agent SDK enables programmatic agents."
+        )
+        conn.execute(
+            "update items set description = ? where id = 1",
+            (description,),
+        )
+        conn.commit()
+
+        bundle = context_bundle_for_entity(conn, entity_id="entity:repo", run_id="run-1")
+
+        self.assertEqual(
+            bundle["context_preview"],
+            "Claude Agent SDK The Claude Agent SDK enables programmatic agents.",
+        )
+
+    def test_context_preview_cleans_trailing_truncated_badges(self):
+        from pipeline.decision.candidate_context import context_bundle_for_entity
+
+        conn = self.make_conn()
+        conn.execute(
+            "update items set description = ? where id = 1",
+            ('Useful coding agent. [![Code style: Ruff](https:/ <img src="" ![Release',),
+        )
+        conn.commit()
+
+        bundle = context_bundle_for_entity(conn, entity_id="entity:repo", run_id="run-1")
+
+        self.assertEqual(bundle["context_preview"], "Useful coding agent.")
+
+        conn.execute("update items set description = ? where id = 1", ("Personal AI Infrastructure ![Releas",))
+        conn.commit()
+
+        bundle = context_bundle_for_entity(conn, entity_id="entity:repo", run_id="run-1")
+
+        self.assertEqual(bundle["context_preview"], "Personal AI Infrastructure")
+
+    def test_npm_registry_evidence_is_backfill_not_llm_classifier(self):
+        from pipeline.decision.candidate_context import context_bundle_for_entity
+
+        conn = self.make_conn()
+        conn.execute("delete from evidence_rows")
+        conn.execute(
+            """
+            insert into evidence_rows(entity_id, canonical_entity, alias, source, event_at, metric_name, metric_value, family, rule_id, rule_version, signal_label, historical_safety, note, raw_url_or_ref, run_id)
+            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "entity:repo",
+                "owner/repo",
+                "@scope/pkg",
+                "npm_registry",
+                "2026-05-31T00:00:00Z",
+                "npm_repository_link",
+                "github:owner/repo",
+                "package_family",
+                "npm_registry_npm_repository_link",
+                "rules-v1",
+                "backfill",
+                "partial_as_of",
+                "npm repository link backfill",
+                "https://www.npmjs.com/package/@scope/pkg",
+                "run-1",
+            ),
+        )
+        conn.commit()
+
+        bundle = context_bundle_for_entity(conn, entity_id="entity:repo", run_id="run-1")
+
+        self.assertEqual(bundle["evidence_bullets"][0]["origin_type"], "backfill")
+        self.assertEqual(bundle["evidence_bullets"][0]["provenance_badge"], "backfill")
+
     def test_context_bundle_expands_evidence_refs_to_internal_source_links(self):
         from pipeline.decision.candidate_context import context_bundle_for_entity
 
@@ -185,6 +318,61 @@ class CandidateContextTest(unittest.TestCase):
             links,
         )
         self.assertTrue(any(link["ref"] == "tweet:t1" and link["channel"] == "x_tweets" for link in links))
+
+    def test_hn_firebase_source_links_use_native_list_labels(self):
+        from pipeline.decision.candidate_context import context_bundle_for_entity
+
+        conn = self.make_conn()
+        conn.execute(
+            """
+            insert into items(id, run_id, snapshot_id, source, external_id, name, url, fetched_at, description, metadata_json, raw_json)
+            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                4,
+                "source-run",
+                1,
+                "hn_firebase",
+                "beststories:48318174",
+                "Claude Code – Everything you can configure that the docs don't tell you",
+                "https://buildingbetter.tech/p/i-read-the-claude-code-source-code",
+                "2026-05-31T00:00:00Z",
+                "",
+                json.dumps({"list": "beststories", "window": "current", "score": 324}),
+                "{}",
+            ),
+        )
+        conn.execute(
+            """
+            insert into evidence_rows(entity_id, canonical_entity, alias, source, event_at, metric_name, metric_value, family, rule_id, rule_version, signal_label, historical_safety, note, raw_url_or_ref, run_id)
+            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "entity:repo",
+                "owner/repo",
+                "owner/repo",
+                "hn_firebase",
+                "2026-05-31T00:00:00Z",
+                "hn_max_points_7d",
+                "324",
+                "hn",
+                "hn_max_points_7d_potential",
+                "rules-v1",
+                "early_trigger",
+                "as_of_safe",
+                "note",
+                "item:4",
+                "run-1",
+            ),
+        )
+        conn.commit()
+
+        bundle = context_bundle_for_entity(conn, entity_id="entity:repo", run_id="run-1")
+
+        best_link = next(link for link in bundle["source_links"] if link["ref"] == "item:4")
+        self.assertEqual(best_link["channel"], "hn_top")
+        self.assertEqual(best_link["channel_label"], "HN Best")
+        self.assertEqual(best_link["label"], "HN Best")
 
     def test_context_dedupes_repeated_evidence_bullets_and_keeps_refs(self):
         from pipeline.decision.candidate_context import context_bundle_for_entity
