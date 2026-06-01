@@ -207,6 +207,30 @@ class Layer2DeepdiveTest(unittest.TestCase):
             ["ok", "budget_exceeded", "ok", "budget_exceeded"],
         )
 
+    def test_tool_plan_records_tool_errors_without_aborting(self):
+        from pipeline.decision.layer2_deepdive import DeepdiveLimits, _run_tool_plan
+
+        def failing_tool(arguments):
+            raise RuntimeError("Bearer secret-token failed")
+
+        trace = _run_tool_plan(
+            {
+                "tool_requests": [
+                    {
+                        "name": "fetch_github_file",
+                        "arguments": {"repo": "owner/repo", "path": "README.md"},
+                    }
+                ]
+            },
+            {"fetch_github_file": failing_tool},
+            DeepdiveLimits(max_tool_calls=2),
+        )
+
+        self.assertEqual(trace[0]["status"], "error")
+        self.assertEqual(trace[0]["family"], "repo_file")
+        self.assertEqual(trace[0]["error_type"], "RuntimeError")
+        self.assertNotIn("secret-token", trace[0]["error"])
+
     def test_default_tools_expose_minimum_real_deepdive_tools(self):
         from pipeline.decision.layer2_deepdive import default_deepdive_tools
 

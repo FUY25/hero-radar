@@ -8,6 +8,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from pipeline.decision.layer2_harness import sanitized_error
 from pipeline.decision.layer2_models import LEVEL_RANK
 from pipeline.decision.schema import to_json, utc_now
 
@@ -182,6 +183,7 @@ def _run_tool_plan(
                 {
                     "tool": name,
                     "arguments": arguments,
+                    "family": family,
                     "status": "budget_exceeded",
                     "result": {},
                 }
@@ -192,18 +194,35 @@ def _run_tool_plan(
                 {
                     "tool": name,
                     "arguments": arguments,
+                    "family": family,
                     "status": "unavailable",
                     "result": {},
                 }
             )
             continue
-        result = tools[name](arguments)
         total_count += 1
         family_counts[family] = family_counts.get(family, 0) + 1
+        try:
+            result = tools[name](arguments)
+        except Exception as exc:
+            err = sanitized_error(exc)
+            trace.append(
+                {
+                    "tool": name,
+                    "arguments": arguments,
+                    "family": family,
+                    "status": "error",
+                    "error_type": err["error_type"],
+                    "error": err["error"],
+                    "result": {},
+                }
+            )
+            continue
         trace.append(
             {
                 "tool": name,
                 "arguments": arguments,
+                "family": family,
                 "status": "ok",
                 "result": _trim_result(result, limits.max_tool_result_chars),
             }
