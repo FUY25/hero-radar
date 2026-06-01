@@ -163,6 +163,56 @@ def level_for_thresholds(value: float, thresholds: dict[str, Any]) -> str:
     return level
 
 
+def momentum_rules(rules: dict[str, Any]) -> dict[str, Any]:
+    return rules.get("momentum", {})
+
+
+def numeric_sequence(value: Any) -> list[float]:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return []
+    if not isinstance(value, list):
+        return []
+    output: list[float] = []
+    for item in value:
+        try:
+            output.append(float(item))
+        except (TypeError, ValueError):
+            return []
+    return output
+
+
+def normalized_regression_slope(values: list[float]) -> float | None:
+    if len(values) < 3:
+        return None
+    mean_x = (len(values) - 1) / 2
+    mean_y = sum(values) / len(values)
+    denominator = sum((index - mean_x) ** 2 for index in range(len(values)))
+    if denominator <= 0:
+        return None
+    slope = sum((index - mean_x) * (value - mean_y) for index, value in enumerate(values)) / denominator
+    return slope / max(mean_y, 1)
+
+
+def trending_repos_direction(row: dict[str, Any], rules: dict[str, Any]) -> float | None:
+    metadata = row.get("metadata") or {}
+    if row.get("source") != "github_movers_trending_repos" or metadata.get("period") != "daily":
+        return None
+    trending_rules = rules["trending_repos"]
+    stars_velocity = number(metadata.get("stars_velocity"))
+    forks_velocity = number(metadata.get("forks_velocity"))
+    if stars_velocity < number(trending_rules["stars_velocity_floor"]) and forks_velocity < number(
+        trending_rules["forks_velocity_floor"]
+    ):
+        return None
+    direction = normalized_regression_slope(numeric_sequence(metadata.get("sparkline")))
+    if direction is None or direction <= 0:
+        return None
+    return direction
+
+
 def is_at_least(level: str, target: str) -> bool:
     return LEVEL_ORDER[level] >= LEVEL_ORDER[target]
 
@@ -177,6 +227,12 @@ def promote(state: EntityState, level: str, family: str, event_at: str, reason: 
 
 def add_weak_signal(state: EntityState, family: str, event_at: str) -> None:
     state.weak_signals.append((family, event_at))
+
+
+def entity_has_github_link(entity: Entity) -> bool:
+    return entity.canonical_key.startswith("github:") or any(
+        str(alias).startswith("github:") for alias in entity.aliases
+    )
 
 
 def evidence(
@@ -534,35 +590,29 @@ def evaluate_trending_repos(
 ) -> list[EvidenceRow]:
     output: list[EvidenceRow] = []
     for row in rows:
-        metadata = row.get("metadata") or {}
-        if row.get("source") != "github_movers_trending_repos" or metadata.get("period") != "daily":
+        direction = trending_repos_direction(row, rules)
+        if direction is None:
             continue
-        for metric_name in ("stars_velocity", "forks_velocity"):
-            metric_value = number(metadata.get(metric_name))
-            level = level_for_thresholds(metric_value, rules["trending_repos"][metric_name])
-            if level == "none":
-                continue
-            event_at = row_time(row)
-            promote(state, level, "github", event_at, f"trending_repos_{metric_name}")
-            if level == "watch":
-                add_weak_signal(state, "github", event_at)
-            output.append(
-                evidence(
-                    state=state,
-                    row=row,
-                    source="github_movers_trending_repos",
-                    event_at=event_at,
-                    metric_name=metric_name,
-                    metric_value=metric_value,
-                    family="github",
-                    rule_id=f"trending_repos_{metric_name}_{level}",
-                    rule_version=rule_version,
-                    level=level,
-                    historical_safety="snapshot_only",
-                    note="daily movers threshold passed",
-                    run_id=run_id,
-                )
+        event_at = row_time(row)
+        promote(state, "watch", "github", event_at, "trending_repos_direction")
+        add_weak_signal(state, "github", event_at)
+        output.append(
+            evidence(
+                state=state,
+                row=row,
+                source="github_movers_trending_repos",
+                event_at=event_at,
+                metric_name="trending_direction_slope",
+                metric_value=direction,
+                family="github",
+                rule_id="trending_repos_direction_watch",
+                rule_version=rule_version,
+                level="watch",
+                historical_safety="snapshot_only",
+                note="daily movers rising direction threshold passed",
+                run_id=run_id,
             )
+        )
     return output
 
 
@@ -581,29 +631,26 @@ def evaluate_repofomo(
             continue
         stars_7d = number(metadata.get("stars_7d"))
         stars_30d = number(metadata.get("stars_30d"))
-        stars_60d = number(metadata.get("stars_60d"))
-        new_forks = number(metadata.get("new_forks") or metadata.get("forks_7d"))
-        accelerating = stars_7d / 7 > stars_30d / 30 > stars_60d / 60
-        level = "none"
-        if stars_7d >= number(thresholds["stars_7d_watch"]):
+        if stars_7d < number(thresholds["stars_7d_floor"]):
+            continue
+        momentum = momentum_rules(rules)
+        baseline = stars_30d / 30
+        if stars_30d <= 0 or baseline <= 0:
             level = "watch"
-        if stars_7d >= number(thresholds["stars_7d_potential_if_accelerating"]) and accelerating:
-            level = "potential"
-        if stars_7d >= number(thresholds["stars_7d_high"]) or new_forks >= number(thresholds["new_forks_high"]):
-            level = "high_potential"
+            metric_name = "stars_7d"
+            metric_value = stars_7d
+            reason = "repofomo_missing_baseline"
+        else:
+            recent_rate = stars_7d / 7
+            accel = recent_rate / max(baseline, number(momentum.get("min_baseline_stars_per_day"), 1))
+            level = level_for_thresholds(accel, momentum)
+            if level == "none":
+                continue
+            metric_name = "stars_accel_7d_vs_30d"
+            metric_value = accel
+            reason = "repofomo_stars_accel"
         if level == "none":
             continue
-        metric_name = "stars_7d"
-        metric_value = stars_7d
-        reason = "repofomo_stars_7d"
-        if (
-            level == "high_potential"
-            and new_forks >= number(thresholds["new_forks_high"])
-            and stars_7d < number(thresholds["stars_7d_high"])
-        ):
-            metric_name = "new_forks"
-            metric_value = new_forks
-            reason = "repofomo_new_forks"
         event_at = row_time(row)
         promote(state, level, "github", event_at, reason)
         if level == "watch":
@@ -815,6 +862,7 @@ def evaluate_huggingface(
     level = (
         "potential"
         if count >= number(rules["huggingface"]["exact_resources_48h_potential"])
+        and entity_has_github_link(state.entity)
         else "watch"
     )
     first_row = sorted(
@@ -854,7 +902,10 @@ def evaluate_npm_registry(
 ) -> list[EvidenceRow]:
     if not npm_evidence:
         return []
-    thresholds = rules.get("npm_registry", {}).get("daily_downloads", {})
+    npm_rules = rules.get("npm_registry", {})
+    daily_downloads_floor = number(npm_rules.get("daily_downloads_floor"))
+    rising_thresholds = npm_rules.get("rising", {})
+    min_baseline = number(momentum_rules(rules).get("min_baseline_daily_downloads"), 100)
     output: list[EvidenceRow] = []
     packages: dict[str, dict[str, Any]] = {}
 
@@ -880,25 +931,24 @@ def evaluate_npm_registry(
         if daily_row is None:
             continue
         daily_downloads = number(evidence_field(daily_row, "metric_value"))
+        if daily_downloads < daily_downloads_floor:
+            continue
         weekly_row = package.get("downloads_7d")
         weekly_downloads = (
             number(evidence_field(weekly_row, "metric_value"))
             if weekly_row is not None
             else None
         )
-        rising = (
-            weekly_downloads is not None
-            and weekly_downloads > 0
-            and daily_downloads > weekly_downloads / 7
-        )
-
-        level = "none"
-        if daily_downloads >= number(thresholds.get("watch")):
+        if weekly_downloads is None or weekly_downloads <= 0:
             level = "watch"
-        if daily_downloads >= number(thresholds.get("potential")) and rising:
-            level = "potential"
-        if daily_downloads >= number(thresholds.get("high_potential")):
-            level = "high_potential"
+            metric_name = "daily_downloads"
+            metric_value = daily_downloads
+        else:
+            baseline = weekly_downloads / 7
+            rising = daily_downloads / max(baseline, min_baseline)
+            level = level_for_thresholds(rising, rising_thresholds)
+            metric_name = "daily_downloads_rising_ratio"
+            metric_value = rising
         if level == "none":
             continue
 
@@ -907,9 +957,9 @@ def evaluate_npm_registry(
         if level == "watch":
             add_weak_signal(state, "package_family", event_at)
         if level == "high_potential":
-            note = "npm daily downloads high threshold passed"
+            note = "npm daily downloads rising high threshold passed"
         elif level == "potential":
-            note = "npm daily downloads potential threshold passed and rising versus 7d average"
+            note = "npm daily downloads rising potential threshold passed"
         else:
             note = "npm daily downloads watch threshold passed; rising not proven"
         output.append(
@@ -920,8 +970,8 @@ def evaluate_npm_registry(
                 source="npm_registry",
                 event_at=event_at,
                 relative_to_reference=None,
-                metric_name="daily_downloads",
-                metric_value=value_text(daily_downloads),
+                metric_name=metric_name,
+                metric_value=value_text(metric_value),
                 family="package_family",
                 rule_id=f"npm_registry_daily_downloads_{level}",
                 rule_version=rule_version,
@@ -1150,7 +1200,13 @@ def build_backfill_jobs(
         for entity_id, entity_rows in grouped.items()
         if any(row.get("source") in GITHUB_BOARD_SOURCES for row in entity_rows)
     }
+    repofomo_entities = {
+        entity_id
+        for entity_id, entity_rows in grouped.items()
+        if any(row.get("source") == "github_movers_repofomo" for row in entity_rows)
+    }
 
+    potential_entity_ids = {candidate.entity_id for candidate in potential_candidates}
     for candidate in potential_candidates:
         state = states[candidate.entity_id]
         if state.entity.key_type == "github":
@@ -1196,10 +1252,40 @@ def build_backfill_jobs(
             reason="github_search_velocity_prefilter",
             status="pending",
             requested_at=now,
-            priority=stars_per_day,
+                priority=stars_per_day,
+            )
+
+    for entity_id, entity_rows in grouped.items():
+        state = states.get(entity_id)
+        if (
+            not state
+            or state.entity.key_type != "github"
+            or entity_id in repofomo_entities
+            or entity_id in potential_entity_ids
+        ):
+            continue
+        rising_rows = [
+            row
+            for row in entity_rows
+            if trending_repos_direction(row, rules) is not None
+        ]
+        if not rising_rows:
+            continue
+        best_priority = max(
+            number((row.get("metadata") or {}).get("stars_velocity"))
+            for row in rising_rows
+        )
+        jobs[(entity_id, "trending_repos_rising_watch")] = BackfillJob(
+            entity_id=entity_id,
+            run_id=run_id,
+            source="github_stargazers",
+            reason="trending_repos_rising_watch",
+            status="pending",
+            requested_at=now,
+            priority=100_000 + best_priority,
         )
 
-    npm_thresholds = rules.get("npm_registry", {}).get("daily_downloads", {})
+    npm_downloads_floor = number(rules.get("npm_registry", {}).get("daily_downloads_floor"))
     for row in rows:
         if row.get("source") != "npm_search":
             continue
@@ -1211,7 +1297,7 @@ def build_backfill_jobs(
             continue
         metadata = row.get("metadata") or {}
         weekly_downloads = number(metadata.get("weekly_downloads"))
-        if weekly_downloads < number(npm_thresholds.get("watch")):
+        if weekly_downloads < npm_downloads_floor:
             continue
         jobs[(entity_id, f"npm_registry:{package}")] = BackfillJob(
             entity_id=entity_id,

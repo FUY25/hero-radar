@@ -435,7 +435,7 @@ function readableEvidenceLabel(bullet) {
   const githubStars = label.match(/^GH \+(.+) stars \/ 24h$/i);
   if (githubStars) return `GitHub 24 小时新增：${githubStars[1]} stars`;
 
-  const githubMetric = label.match(/^github:\s*(stars_today|stars_7d|stars_velocity|forks_velocity|new_forks|forks_7d|daily_downloads)\s+(.+)$/i);
+  const githubMetric = label.match(/^github:\s*(stars_today|stars_7d|stars_velocity|forks_velocity|new_forks|forks_7d|daily_downloads|stars_accel_7d_vs_30d|trending_direction_slope)\s+(.+)$/i);
   if (githubMetric) return readableMetricEvidence('github', githubMetric[1], githubMetric[2]);
 
   const hnStoryCount = label.match(/^hn:\s*strict_story_count_(\d+d)\s+(\d+)$/i);
@@ -456,7 +456,7 @@ function readableEvidenceLabel(bullet) {
   const productHuntRank = label.match(/^product_hunt:\s*(daily_rank|weekly_rank)\s+(.+)$/i);
   if (productHuntRank) return readableMetricEvidence('product_hunt', productHuntRank[1], productHuntRank[2]);
 
-  const npmMetric = label.match(/^(package_family|npm):\s*(daily_downloads|downloads_7d)\s+(.+)$/i);
+  const npmMetric = label.match(/^(package_family|npm):\s*(daily_downloads|downloads_7d|daily_downloads_rising_ratio)\s+(.+)$/i);
   if (npmMetric) return readableMetricEvidence('npm', npmMetric[2], npmMetric[3]);
 
   const npmRepositoryLink = label.match(/^(package_family|npm):\s*npm_repository_link\s+(.+)$/i);
@@ -510,6 +510,8 @@ function readableLinkKey(value) {
 function readableMetricEvidence(family, metric, value) {
   const compact = String(value || '').trim();
   const normalized = String(metric || '').trim().toLowerCase();
+  const ratio = compactMetricNumber(compact, 1);
+  const decimal = compactMetricNumber(compact, 2);
   if (family === 'github') {
     return {
       stars_today: `GitHub 24 小时新增：${compact} stars`,
@@ -519,6 +521,8 @@ function readableMetricEvidence(family, metric, value) {
       new_forks: `GitHub 新增 fork：${compact}`,
       forks_7d: `GitHub 7 天新增 fork：${compact}`,
       daily_downloads: `GitHub 相关下载：${compact}`,
+      stars_accel_7d_vs_30d: `GitHub star 加速度：${ratio}x`,
+      trending_direction_slope: `GitHub 趋势方向：${decimal}`,
     }[normalized] || `GitHub ${normalized}：${compact}`;
   }
   if (family === 'hn') {
@@ -536,9 +540,19 @@ function readableMetricEvidence(family, metric, value) {
     return {
       daily_downloads: `npm 日下载：${compact}`,
       downloads_7d: `npm 7 天下载：${compact}`,
+      daily_downloads_rising_ratio: `npm 下载加速度：${ratio}x`,
     }[normalized] || `npm ${normalized}：${compact}`;
   }
   return `${normalized}：${compact}`;
+}
+
+function compactMetricNumber(value, maxFractionDigits) {
+  const raw = String(value || '').trim();
+  const numeric = Number(raw);
+  if (!Number.isFinite(numeric)) return raw;
+  return numeric
+    .toFixed(Math.max(0, Number(maxFractionDigits) || 0))
+    .replace(/\.?0+$/, '');
 }
 
 function cleanPreviewText(rawText) {

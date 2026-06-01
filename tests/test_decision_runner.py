@@ -39,7 +39,7 @@ class FakeNpmClient:
         return {"name": package, "repository": {"url": "git+https://github.com/owner/repo.git"}}
 
     def downloads(self, package, period):
-        downloads_by_period = {"last-day": 12000, "last-week": 70000}
+        downloads_by_period = {"last-day": 25000, "last-week": 70000}
         return {"downloads": downloads_by_period[period], "package": package}
 
 
@@ -382,7 +382,14 @@ def seed_aggregate_child_source_tables(conn: sqlite3.Connection) -> None:
                 "owner/mover",
                 "https://github.com/owner/mover",
                 "2026-05-31T00:00:00Z",
-                json.dumps({"period": "daily", "stars_velocity": 900, "forks_velocity": 10}),
+                json.dumps(
+                    {
+                        "period": "daily",
+                        "stars_velocity": 900,
+                        "forks_velocity": 10,
+                        "sparkline": [31, 33, 37, 23, 29, 190, 410],
+                    }
+                ),
                 "{}",
             ),
             (

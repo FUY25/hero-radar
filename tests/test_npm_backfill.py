@@ -29,7 +29,7 @@ class FakeNpmClient:
     def downloads(self, package: str, period: str) -> dict[str, object]:
         self.download_calls.append((package, period))
         downloads_by_period = {
-            "last-day": 12000,
+            "last-day": 25000,
             "last-week": 70000,
         }
         return {
@@ -104,7 +104,7 @@ class NpmBackfillTest(unittest.TestCase):
         self.assertEqual(
             rows,
             [
-                ("npm_registry", "package_family", "daily_downloads", "12000", "@scope/demo"),
+                ("npm_registry", "package_family", "daily_downloads", "25000", "@scope/demo"),
                 ("npm_registry", "package_family", "downloads_7d", "70000", "@scope/demo"),
                 ("npm_registry", "package_family", "npm_repository_link", "github:owner/repo", "@scope/demo"),
             ],
@@ -154,7 +154,7 @@ class NpmBackfillTest(unittest.TestCase):
             rule_version="rules-v1",
             now=NOW,
             classifier_evidence=[
-                self.npm_evidence(entity, "daily_downloads", "12000"),
+                self.npm_evidence(entity, "daily_downloads", "25000"),
                 self.npm_evidence(entity, "downloads_7d", "70000"),
             ],
         )
@@ -164,9 +164,9 @@ class NpmBackfillTest(unittest.TestCase):
         self.assertEqual(result.potential_candidates[0].fired_families, ("package_family",))
         self.assertEqual(result.evidence_rows[0].source, "npm_registry")
         self.assertEqual(result.evidence_rows[0].family, "package_family")
-        self.assertEqual(result.evidence_rows[0].metric_name, "daily_downloads")
+        self.assertEqual(result.evidence_rows[0].metric_name, "daily_downloads_rising_ratio")
 
-    def test_npm_registry_evidence_promotes_large_daily_downloads_to_high(self) -> None:
+    def test_npm_registry_evidence_promotes_spiking_downloads_to_high(self) -> None:
         entity = Entity(
             entity_id="entity:npm",
             canonical_entity="Demo Package",
@@ -181,7 +181,10 @@ class NpmBackfillTest(unittest.TestCase):
             run_id="run",
             rule_version="rules-v1",
             now=NOW,
-            classifier_evidence=[self.npm_evidence(entity, "daily_downloads", "100000")],
+            classifier_evidence=[
+                self.npm_evidence(entity, "daily_downloads", "40000"),
+                self.npm_evidence(entity, "downloads_7d", "70000"),
+            ],
         )
 
         self.assertEqual(len(result.potential_candidates), 1)

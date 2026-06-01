@@ -82,7 +82,7 @@ class RulesEngineTest(unittest.TestCase):
         evidence_rule_ids = {row.rule_id for row in result.evidence_rows}
         self.assertIn("verified_cross_source_two_weak_48h", evidence_rule_ids)
 
-    def test_repofomo_watch_without_acceleration_becomes_edge_watch(self):
+    def test_repofomo_flat_growth_is_discarded_even_above_floor(self):
         rows = [
             {
                 "id": 3,
@@ -111,13 +111,10 @@ class RulesEngineTest(unittest.TestCase):
         )
 
         self.assertEqual(result.potential_candidates, [])
-        self.assertEqual(len(result.edge_watch_candidates), 1)
-        self.assertEqual(
-            result.edge_watch_candidates[0].entity_id,
-            resolution.entities[0].entity_id,
-        )
+        self.assertEqual(result.edge_watch_candidates, [])
+        self.assertEqual(result.evidence_rows, [])
 
-    def test_repofomo_high_from_new_forks_reports_fork_evidence(self):
+    def test_repofomo_new_forks_do_not_promote_without_star_momentum(self):
         rows = [
             {
                 "id": 4,
@@ -146,10 +143,187 @@ class RulesEngineTest(unittest.TestCase):
             now="2026-05-31T00:00:00Z",
         )
 
+        self.assertEqual(result.potential_candidates, [])
+        self.assertEqual(result.edge_watch_candidates, [])
+        self.assertEqual(result.evidence_rows, [])
+
+    def test_repofomo_uses_acceleration_ratio_for_high_potential(self):
+        rows = [
+            {
+                "id": 5,
+                "source": "github_movers_repofomo",
+                "external_id": "repofomo:owner/repo",
+                "name": "owner/repo",
+                "url": "https://github.com/owner/repo",
+                "description": "",
+                "metadata": {
+                    "stars_7d": 210,
+                    "stars_30d": 300,
+                    "stars_60d": 2000,
+                    "stars_total": 2500,
+                },
+                "fetched_at": "2026-05-31T00:00:00Z",
+            }
+        ]
+        resolution = resolve_entities(rows, first_seen="2026-05-31T00:00:00Z")
+
+        result = evaluate_entities(
+            rows,
+            resolution,
+            run_id="run-1",
+            rule_version="rules-v2",
+            now="2026-05-31T00:00:00Z",
+        )
+
         self.assertEqual(result.potential_candidates[0].level, "high_potential")
-        self.assertEqual(result.evidence_rows[0].metric_name, "new_forks")
-        self.assertEqual(result.evidence_rows[0].metric_value, "647")
-        self.assertEqual(result.evidence_rows[0].rule_id, "repofomo_new_forks_high_potential")
+        self.assertEqual(result.evidence_rows[0].metric_name, "stars_accel_7d_vs_30d")
+        self.assertEqual(result.evidence_rows[0].metric_value, "3")
+        self.assertEqual(result.evidence_rows[0].rule_id, "repofomo_stars_accel_high_potential")
+
+    def test_repofomo_missing_baseline_caps_at_watch(self):
+        rows = [
+            {
+                "id": 6,
+                "source": "github_movers_repofomo",
+                "external_id": "repofomo:owner/repo",
+                "name": "owner/repo",
+                "url": "https://github.com/owner/repo",
+                "description": "",
+                "metadata": {
+                    "stars_7d": 100,
+                    "stars_30d": 0,
+                    "stars_60d": 0,
+                    "stars_total": 100,
+                },
+                "fetched_at": "2026-05-31T00:00:00Z",
+            }
+        ]
+        resolution = resolve_entities(rows, first_seen="2026-05-31T00:00:00Z")
+
+        result = evaluate_entities(
+            rows,
+            resolution,
+            run_id="run-1",
+            rule_version="rules-v2",
+            now="2026-05-31T00:00:00Z",
+        )
+
+        self.assertEqual(result.potential_candidates, [])
+        self.assertEqual(len(result.edge_watch_candidates), 1)
+        self.assertEqual(result.evidence_rows[0].rule_id, "repofomo_missing_baseline_watch")
+
+    def test_trending_repos_rising_daily_row_is_watch_only(self):
+        rows = [
+            {
+                "id": 7,
+                "source": "github_movers_trending_repos",
+                "external_id": "daily:owner/repo",
+                "name": "owner/repo",
+                "url": "https://github.com/owner/repo",
+                "description": "",
+                "metadata": {
+                    "period": "daily",
+                    "stars_velocity": 1800,
+                    "forks_velocity": 120,
+                    "sparkline": [31, 33, 37, 23, 29, 190, 410],
+                },
+                "fetched_at": "2026-05-31T00:00:00Z",
+            }
+        ]
+        resolution = resolve_entities(rows, first_seen="2026-05-31T00:00:00Z")
+
+        result = evaluate_entities(
+            rows,
+            resolution,
+            run_id="run-1",
+            rule_version="rules-v2",
+            now="2026-05-31T00:00:00Z",
+        )
+
+        self.assertEqual(result.potential_candidates, [])
+        self.assertEqual(len(result.edge_watch_candidates), 1)
+        self.assertEqual(result.evidence_rows[0].rule_id, "trending_repos_direction_watch")
+        self.assertEqual(result.backfill_jobs[0].source, "github_stargazers")
+        self.assertEqual(result.backfill_jobs[0].reason, "trending_repos_rising_watch")
+
+    def test_trending_repos_short_sparkline_is_excluded(self):
+        rows = [
+            {
+                "id": 8,
+                "source": "github_movers_trending_repos",
+                "external_id": "daily:owner/repo",
+                "name": "owner/repo",
+                "url": "https://github.com/owner/repo",
+                "description": "",
+                "metadata": {
+                    "period": "daily",
+                    "stars_velocity": 1591,
+                    "forks_velocity": 94,
+                    "sparkline": [1591],
+                },
+                "fetched_at": "2026-05-31T00:00:00Z",
+            }
+        ]
+        resolution = resolve_entities(rows, first_seen="2026-05-31T00:00:00Z")
+
+        result = evaluate_entities(
+            rows,
+            resolution,
+            run_id="run-1",
+            rule_version="rules-v2",
+            now="2026-05-31T00:00:00Z",
+        )
+
+        self.assertEqual(result.potential_candidates, [])
+        self.assertEqual(result.edge_watch_candidates, [])
+        self.assertEqual(result.backfill_jobs, [])
+        self.assertEqual(result.evidence_rows, [])
+
+    def test_trending_repos_backfill_is_skipped_when_repofomo_row_exists(self):
+        rows = [
+            {
+                "id": 9,
+                "source": "github_movers_trending_repos",
+                "external_id": "daily:owner/repo",
+                "name": "owner/repo",
+                "url": "https://github.com/owner/repo",
+                "description": "",
+                "metadata": {
+                    "period": "daily",
+                    "stars_velocity": 1800,
+                    "forks_velocity": 120,
+                    "sparkline": [31, 33, 37, 23, 29, 190, 410],
+                },
+                "fetched_at": "2026-05-31T00:00:00Z",
+            },
+            {
+                "id": 10,
+                "source": "github_movers_repofomo",
+                "external_id": "repofomo:owner/repo",
+                "name": "owner/repo",
+                "url": "https://github.com/owner/repo",
+                "description": "",
+                "metadata": {
+                    "stars_7d": 350,
+                    "stars_30d": 2000,
+                    "stars_60d": 4500,
+                    "stars_total": 9000,
+                },
+                "fetched_at": "2026-05-31T00:00:00Z",
+            },
+        ]
+        resolution = resolve_entities(rows, first_seen="2026-05-31T00:00:00Z")
+
+        result = evaluate_entities(
+            rows,
+            resolution,
+            run_id="run-1",
+            rule_version="rules-v2",
+            now="2026-05-31T00:00:00Z",
+        )
+
+        self.assertEqual(len(result.edge_watch_candidates), 1)
+        self.assertEqual(result.backfill_jobs, [])
 
     def test_hn_uses_max_points_not_story_count_and_stops_at_watch(self):
         rows = [
@@ -660,6 +834,124 @@ class RulesEngineTest(unittest.TestCase):
         self.assertEqual(result.backfill_jobs[0].source, "npm_registry")
         self.assertEqual(result.backfill_jobs[0].reason, "package_downloads:demo-package")
 
+    def test_npm_registry_uses_rising_ratio_for_high_potential(self):
+        entity = Entity(
+            entity_id="entity:npm",
+            canonical_entity="demo-package",
+            canonical_key="npm:demo-package",
+            key_type="npm",
+            aliases=("demo-package",),
+            source_refs=(),
+        )
+
+        result = evaluate_entities(
+            [],
+            ResolutionResult(entities=[entity], item_to_entity={}),
+            run_id="run-npm",
+            rule_version="rules-v2",
+            now="2026-05-31T00:00:00Z",
+            classifier_evidence=[
+                {
+                    "entity_id": "entity:npm",
+                    "source": "npm_registry",
+                    "family": "package_family",
+                    "metric_name": "daily_downloads",
+                    "metric_value": "40000",
+                    "alias": "demo-package",
+                    "event_at": "2026-05-31T00:00:00Z",
+                },
+                {
+                    "entity_id": "entity:npm",
+                    "source": "npm_registry",
+                    "family": "package_family",
+                    "metric_name": "downloads_7d",
+                    "metric_value": "70000",
+                    "alias": "demo-package",
+                    "event_at": "2026-05-31T00:00:00Z",
+                },
+            ],
+        )
+
+        self.assertEqual(result.potential_candidates[0].level, "high_potential")
+        self.assertEqual(result.evidence_rows[0].metric_name, "daily_downloads_rising_ratio")
+        self.assertEqual(result.evidence_rows[0].metric_value, "4")
+        self.assertEqual(result.evidence_rows[0].rule_id, "npm_registry_daily_downloads_high_potential")
+
+    def test_npm_registry_flat_large_package_is_discarded(self):
+        entity = Entity(
+            entity_id="entity:npm",
+            canonical_entity="demo-package",
+            canonical_key="npm:demo-package",
+            key_type="npm",
+            aliases=("demo-package",),
+            source_refs=(),
+        )
+
+        result = evaluate_entities(
+            [],
+            ResolutionResult(entities=[entity], item_to_entity={}),
+            run_id="run-npm",
+            rule_version="rules-v2",
+            now="2026-05-31T00:00:00Z",
+            classifier_evidence=[
+                {
+                    "entity_id": "entity:npm",
+                    "source": "npm_registry",
+                    "family": "package_family",
+                    "metric_name": "daily_downloads",
+                    "metric_value": "120000",
+                    "alias": "demo-package",
+                    "event_at": "2026-05-31T00:00:00Z",
+                },
+                {
+                    "entity_id": "entity:npm",
+                    "source": "npm_registry",
+                    "family": "package_family",
+                    "metric_name": "downloads_7d",
+                    "metric_value": "840000",
+                    "alias": "demo-package",
+                    "event_at": "2026-05-31T00:00:00Z",
+                },
+            ],
+        )
+
+        self.assertEqual(result.potential_candidates, [])
+        self.assertEqual(result.edge_watch_candidates, [])
+        self.assertEqual(result.evidence_rows, [])
+
+    def test_npm_registry_missing_baseline_caps_at_watch(self):
+        entity = Entity(
+            entity_id="entity:npm",
+            canonical_entity="demo-package",
+            canonical_key="npm:demo-package",
+            key_type="npm",
+            aliases=("demo-package",),
+            source_refs=(),
+        )
+
+        result = evaluate_entities(
+            [],
+            ResolutionResult(entities=[entity], item_to_entity={}),
+            run_id="run-npm",
+            rule_version="rules-v2",
+            now="2026-05-31T00:00:00Z",
+            classifier_evidence=[
+                {
+                    "entity_id": "entity:npm",
+                    "source": "npm_registry",
+                    "family": "package_family",
+                    "metric_name": "daily_downloads",
+                    "metric_value": "120000",
+                    "alias": "demo-package",
+                    "event_at": "2026-05-31T00:00:00Z",
+                },
+            ],
+        )
+
+        self.assertEqual(result.potential_candidates, [])
+        self.assertEqual(len(result.edge_watch_candidates), 1)
+        self.assertEqual(result.evidence_rows[0].rule_id, "npm_registry_daily_downloads_watch")
+
     def test_two_huggingface_resources_48h_create_potential(self):
         rows = [
             {
@@ -707,6 +999,50 @@ class RulesEngineTest(unittest.TestCase):
             "hf_resources_48h",
             {row.metric_name for row in result.evidence_rows},
         )
+
+    def test_two_huggingface_resources_without_github_link_cap_at_watch(self):
+        rows = [
+            {
+                "id": 32,
+                "source": "huggingface_spaces",
+                "external_id": "user/clawdbot-demo",
+                "name": "Clawdbot Demo",
+                "url": "https://huggingface.co/spaces/user/clawdbot-demo",
+                "description": "",
+                "metadata": {
+                    "created_at": "2026-05-30T10:00:00Z",
+                    "likes": 5,
+                },
+                "fetched_at": "2026-05-31T00:00:00Z",
+            },
+            {
+                "id": 33,
+                "source": "huggingface_models",
+                "external_id": "lab/clawdbot-demo",
+                "name": "Clawdbot Demo",
+                "url": "https://huggingface.co/lab/clawdbot-demo",
+                "description": "",
+                "metadata": {
+                    "created_at": "2026-05-30T18:00:00Z",
+                    "likes": 2,
+                },
+                "fetched_at": "2026-05-31T00:00:00Z",
+            },
+        ]
+        resolution = resolve_entities(rows, first_seen="2026-05-31T00:00:00Z")
+
+        result = evaluate_entities(
+            rows,
+            resolution,
+            run_id="run-1",
+            rule_version="rules-v2",
+            now="2026-05-31T00:00:00Z",
+        )
+
+        self.assertEqual(len(resolution.entities), 1)
+        self.assertEqual(result.potential_candidates, [])
+        self.assertEqual(len(result.edge_watch_candidates), 1)
+        self.assertEqual(result.evidence_rows[0].rule_id, "huggingface_resources_48h_watch")
 
 
 if __name__ == "__main__":
