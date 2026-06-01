@@ -51,7 +51,25 @@ def score_candidate_groups(
             input_payload=payload,
             system_prompt=SCORING_SYSTEM_PROMPT,
         )
-        normalized = _validate_response(response)
+        try:
+            normalized = _validate_response(response)
+        except ValueError as exc:
+            repair_payload = {
+                **payload,
+                "validation_error": str(exc),
+                "previous_response_shape": _response_shape(response),
+                "instruction": (
+                    "Return a complete corrected scoring JSON object with axes, "
+                    "primary_reason, topic_tags, rationale_short, and caveats."
+                ),
+            }
+            response = provider.complete_json(
+                task="layer2_scoring_repair",
+                prompt_version=prompt_version,
+                input_payload=repair_payload,
+                system_prompt=SCORING_SYSTEM_PROMPT,
+            )
+            normalized = _validate_response(response)
         l2_score = aggregate_l2_score(normalized["axes"])
         cache_key = _cache_key(
             provider.provider_name, provider.model, prompt_version, payload
@@ -129,6 +147,14 @@ def _clamp_float(value: Any, minimum: float, maximum: float) -> float:
     except (TypeError, ValueError) as exc:
         raise ValueError(f"expected numeric value, got {value!r}") from exc
     return max(minimum, min(maximum, number))
+
+
+def _response_shape(response: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: type(value).__name__
+        for key, value in response.items()
+        if isinstance(key, str)
+    }
 
 
 def _cache_key(
