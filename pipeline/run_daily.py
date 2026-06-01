@@ -12,11 +12,17 @@ import datetime as dt
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any, Callable
 
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from pipeline.run_logging import JsonlRunLogger
+
 PYTHON = sys.executable or "python3"
 DEFAULT_TIMEOUT_SECONDS = 3600
 
@@ -31,10 +37,18 @@ def default_run_id(now: str | None = None) -> str:
     return f"decision_daily_{compact.rstrip('Z')}"
 
 
-def source_command(*, root: Path, python: str, only_sources: list[str] | None = None) -> list[str]:
+def source_command(
+    *,
+    root: Path,
+    python: str,
+    only_sources: list[str] | None = None,
+    log_path: Path | str | None = None,
+) -> list[str]:
     cmd = [python, str(root / "pipeline" / "run_pipeline.py")]
     if only_sources:
         cmd.extend(["--only", ",".join(only_sources)])
+    if log_path:
+        cmd.extend(["--log-path", str(log_path)])
     return cmd
 
 
@@ -52,6 +66,7 @@ def decision_command(
     resolver_research_rounds: int,
     npm_backfill_limit: int,
     enrich_readme_limit: int,
+    log_path: Path | str | None = None,
 ) -> list[str]:
     cmd = [
         python,
@@ -78,6 +93,8 @@ def decision_command(
         cmd.extend(["--npm-backfill-limit", str(npm_backfill_limit)])
     if enrich_readme_limit > 0:
         cmd.extend(["--enrich-readme-limit", str(enrich_readme_limit)])
+    if log_path:
+        cmd.extend(["--log-path", str(log_path)])
     return cmd
 
 
@@ -148,6 +165,7 @@ def _run_stage(
     cwd: Path,
     timeout: int,
 ) -> dict[str, Any]:
+    started = time.monotonic()
     result = runner(
         cmd,
         cwd=cwd,
@@ -161,7 +179,38 @@ def _run_stage(
         "returncode": int(result.returncode),
         "stdout": str(result.stdout or "")[-4000:],
         "stderr": str(result.stderr or "")[-8000:],
+        "duration_seconds": round(time.monotonic() - started, 3),
     }
+
+
+def _run_logged_stage(
+    *,
+    logger: JsonlRunLogger,
+    name: str,
+    runner: Callable[..., subprocess.CompletedProcess[str]],
+    cmd: list[str],
+    cwd: Path,
+    timeout: int,
+) -> dict[str, Any]:
+    logger.event("stage_started", stage=name, cmd=cmd, timeout=timeout)
+    try:
+        stage = {
+            "name": name,
+            **_run_stage(runner=runner, cmd=cmd, cwd=cwd, timeout=timeout),
+        }
+    except Exception as exc:
+        logger.event("stage_failed", stage=name, error=type(exc).__name__, message=str(exc))
+        raise
+    event = "stage_completed" if stage["returncode"] == 0 else "stage_failed"
+    logger.event(
+        event,
+        stage=name,
+        returncode=stage["returncode"],
+        duration_seconds=stage["duration_seconds"],
+        stdout_tail=stage["stdout"],
+        stderr_tail=stage["stderr"],
+    )
+    return stage
 
 
 def run_daily(
@@ -204,89 +253,136 @@ def run_daily(
     active_now = now or utc_now()
     active_run_id = run_id or default_run_id(active_now)
     lock_path = active_root / "data" / "run_daily.lock"
+    log_path = active_root / "data" / "logs" / "run_daily" / f"{active_run_id}.jsonl"
+    sources_log_path = log_path.parent / f"{active_run_id}.sources.jsonl"
+    decision_log_path = log_path.parent / f"{active_run_id}.decision.jsonl"
+    logger = JsonlRunLogger(log_path, run_id=active_run_id)
     if lock_path.exists():
         raise RuntimeError(f"daily pipeline lock exists: {lock_path}")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     lock_path.write_text(json.dumps({"run_id": active_run_id, "started_at": active_now}) + "\n")
     stages: list[dict[str, Any]] = []
+    logger.event(
+        "run_started",
+        now=active_now,
+        skip_sources=skip_sources,
+        skip_decision=skip_decision,
+        run_layer2=run_layer2,
+        only_sources=only_sources or [],
+    )
     try:
         if not skip_sources:
             stages.append(
-                {
-                    "name": "sources",
-                    **_run_stage(
-                        runner=runner,
-                        cmd=source_command(root=active_root, python=python, only_sources=only_sources),
-                        cwd=active_root,
-                        timeout=timeout,
+                _run_logged_stage(
+                    logger=logger,
+                    name="sources",
+                    runner=runner,
+                    cmd=source_command(
+                        root=active_root,
+                        python=python,
+                        only_sources=only_sources,
+                        log_path=sources_log_path,
                     ),
-                }
+                    cwd=active_root,
+                    timeout=timeout,
+                )
             )
             if stages[-1]["returncode"] != 0:
-                return {"ok": False, "returncode": stages[-1]["returncode"], "run_id": active_run_id, "stages": stages}
+                summary = {
+                    "ok": False,
+                    "returncode": stages[-1]["returncode"],
+                    "run_id": active_run_id,
+                    "stages": stages,
+                    "log_path": str(log_path),
+                }
+                logger.event("run_failed", returncode=summary["returncode"], failed_stage="sources")
+                return summary
 
         if not skip_decision:
             stages.append(
-                {
-                    "name": "decision",
-                    **_run_stage(
-                        runner=runner,
-                        cmd=decision_command(
-                            python=python,
-                            run_id=active_run_id,
-                            now=active_now,
-                            backfill=backfill,
-                            classify_hn_limit=classify_hn_limit,
-                            classify_x_limit=classify_x_limit,
-                            llm_concurrency=llm_concurrency,
-                            resolver_search_limit=resolver_search_limit,
-                            resolver_research_limit=resolver_research_limit,
-                            resolver_research_rounds=resolver_research_rounds,
-                            npm_backfill_limit=npm_backfill_limit if backfill else 0,
-                            enrich_readme_limit=enrich_readme_limit,
-                        ),
-                        cwd=active_root,
-                        timeout=timeout,
+                _run_logged_stage(
+                    logger=logger,
+                    name="decision",
+                    runner=runner,
+                    cmd=decision_command(
+                        python=python,
+                        run_id=active_run_id,
+                        now=active_now,
+                        backfill=backfill,
+                        classify_hn_limit=classify_hn_limit,
+                        classify_x_limit=classify_x_limit,
+                        llm_concurrency=llm_concurrency,
+                        resolver_search_limit=resolver_search_limit,
+                        resolver_research_limit=resolver_research_limit,
+                        resolver_research_rounds=resolver_research_rounds,
+                        npm_backfill_limit=npm_backfill_limit if backfill else 0,
+                        enrich_readme_limit=enrich_readme_limit,
+                        log_path=decision_log_path,
                     ),
-                }
+                    cwd=active_root,
+                    timeout=timeout,
+                )
             )
             if stages[-1]["returncode"] != 0:
-                return {"ok": False, "returncode": stages[-1]["returncode"], "run_id": active_run_id, "stages": stages}
+                summary = {
+                    "ok": False,
+                    "returncode": stages[-1]["returncode"],
+                    "run_id": active_run_id,
+                    "stages": stages,
+                    "log_path": str(log_path),
+                }
+                logger.event("run_failed", returncode=summary["returncode"], failed_stage="decision")
+                return summary
 
         if run_layer2:
             stages.append(
-                {
-                    "name": "layer2",
-                    **_run_stage(
-                        runner=runner,
-                        cmd=layer2_command(
-                            python=python,
-                            decision_run_id=active_run_id,
-                            now=active_now,
-                            scout_limit=layer2_scout_limit,
-                            scoring_limit=layer2_scoring_limit,
-                            deepdive_limit=layer2_deepdive_limit,
-                            deepdive_min_l2_score=layer2_deepdive_min_l2_score,
-                            scout_model=layer2_scout_model,
-                            scoring_model=layer2_scoring_model,
-                            deepdive_model=layer2_deepdive_model,
-                            enable_kimi_web_search=layer2_enable_kimi_web_search,
-                            max_tool_calls=layer2_max_tool_calls,
-                            max_web_search_calls=layer2_max_web_search_calls,
-                            max_repo_files=layer2_max_repo_files,
-                            max_pages=layer2_max_pages,
-                            max_hn_thread_fetches=layer2_max_hn_thread_fetches,
-                            max_x_context_fetches=layer2_max_x_context_fetches,
-                        ),
-                        cwd=active_root,
-                        timeout=timeout,
+                _run_logged_stage(
+                    logger=logger,
+                    name="layer2",
+                    runner=runner,
+                    cmd=layer2_command(
+                        python=python,
+                        decision_run_id=active_run_id,
+                        now=active_now,
+                        scout_limit=layer2_scout_limit,
+                        scoring_limit=layer2_scoring_limit,
+                        deepdive_limit=layer2_deepdive_limit,
+                        deepdive_min_l2_score=layer2_deepdive_min_l2_score,
+                        scout_model=layer2_scout_model,
+                        scoring_model=layer2_scoring_model,
+                        deepdive_model=layer2_deepdive_model,
+                        enable_kimi_web_search=layer2_enable_kimi_web_search,
+                        max_tool_calls=layer2_max_tool_calls,
+                        max_web_search_calls=layer2_max_web_search_calls,
+                        max_repo_files=layer2_max_repo_files,
+                        max_pages=layer2_max_pages,
+                        max_hn_thread_fetches=layer2_max_hn_thread_fetches,
+                        max_x_context_fetches=layer2_max_x_context_fetches,
                     ),
-                }
+                    cwd=active_root,
+                    timeout=timeout,
+                )
             )
             if stages[-1]["returncode"] != 0:
-                return {"ok": False, "returncode": stages[-1]["returncode"], "run_id": active_run_id, "stages": stages}
+                summary = {
+                    "ok": False,
+                    "returncode": stages[-1]["returncode"],
+                    "run_id": active_run_id,
+                    "stages": stages,
+                    "log_path": str(log_path),
+                }
+                logger.event("run_failed", returncode=summary["returncode"], failed_stage="layer2")
+                return summary
 
-        return {"ok": True, "returncode": 0, "run_id": active_run_id, "stages": stages}
+        summary = {
+            "ok": True,
+            "returncode": 0,
+            "run_id": active_run_id,
+            "stages": stages,
+            "log_path": str(log_path),
+        }
+        logger.event("run_completed", ok=True, returncode=0)
+        return summary
     finally:
         try:
             lock_path.unlink()

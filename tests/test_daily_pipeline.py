@@ -1,6 +1,9 @@
 import subprocess
+import sys
 import tempfile
 import unittest
+import json
+import os
 from pathlib import Path
 
 
@@ -46,7 +49,15 @@ class DailyPipelineTest(unittest.TestCase):
 
         self.assertTrue(summary["ok"])
         self.assertEqual(len(runner.calls), 2)
-        self.assertEqual(runner.calls[0]["cmd"], ["py", str(root / "pipeline" / "run_pipeline.py")])
+        self.assertEqual(
+            runner.calls[0]["cmd"],
+            [
+                "py",
+                str(root / "pipeline" / "run_pipeline.py"),
+                "--log-path",
+                str(root / "data" / "logs" / "run_daily" / "decision_daily_test.sources.jsonl"),
+            ],
+        )
         self.assertEqual(
             runner.calls[1]["cmd"],
             [
@@ -74,6 +85,8 @@ class DailyPipelineTest(unittest.TestCase):
                 "40",
                 "--enrich-readme-limit",
                 "100",
+                "--log-path",
+                str(root / "data" / "logs" / "run_daily" / "decision_daily_test.decision.jsonl"),
             ],
         )
 
@@ -122,6 +135,71 @@ class DailyPipelineTest(unittest.TestCase):
         self.assertEqual(summary["returncode"], 7)
         self.assertEqual(len(runner.calls), 1)
 
+    def test_daily_pipeline_writes_structured_run_log(self):
+        from pipeline.run_daily import run_daily
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            runner = FakeRunner()
+
+            summary = run_daily(
+                root=root,
+                python="py",
+                run_id="decision_daily_test",
+                now="2026-05-31T12:00:00Z",
+                runner=runner,
+            )
+
+            log_path = Path(summary["log_path"])
+            events = [json.loads(line) for line in log_path.read_text().splitlines()]
+
+        self.assertEqual(log_path.name, "decision_daily_test.jsonl")
+        self.assertEqual(events[0]["event"], "run_started")
+        self.assertEqual(events[0]["run_id"], "decision_daily_test")
+        self.assertEqual([event["event"] for event in events], [
+            "run_started",
+            "stage_started",
+            "stage_completed",
+            "stage_started",
+            "stage_completed",
+            "run_completed",
+        ])
+        self.assertEqual(events[1]["stage"], "sources")
+        self.assertEqual(events[2]["returncode"], 0)
+        self.assertIn("duration_seconds", events[2])
+        self.assertEqual(events[3]["stage"], "decision")
+        self.assertIn("--log-path", runner.calls[1]["cmd"])
+        self.assertIn(str(log_path.parent / "decision_daily_test.decision.jsonl"), runner.calls[1]["cmd"])
+        self.assertEqual(events[-1]["ok"], True)
+
+    def test_daily_pipeline_logs_failed_stage_before_returning(self):
+        from pipeline.run_daily import run_daily
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            runner = FakeRunner(returncodes=[7])
+
+            summary = run_daily(
+                root=root,
+                python="py",
+                run_id="decision_daily_failed",
+                now="2026-05-31T12:00:00Z",
+                runner=runner,
+            )
+
+            log_path = Path(summary["log_path"])
+            events = [json.loads(line) for line in log_path.read_text().splitlines()]
+
+        self.assertEqual([event["event"] for event in events], [
+            "run_started",
+            "stage_started",
+            "stage_failed",
+            "run_failed",
+        ])
+        self.assertEqual(events[2]["stage"], "sources")
+        self.assertEqual(events[2]["returncode"], 7)
+        self.assertEqual(events[-1]["returncode"], 7)
+
     def test_daily_pipeline_lock_prevents_overlapping_runs(self):
         from pipeline.run_daily import run_daily
 
@@ -133,6 +211,34 @@ class DailyPipelineTest(unittest.TestCase):
 
             with self.assertRaises(RuntimeError):
                 run_daily(root=root, python="py", runner=FakeRunner())
+
+    def test_run_daily_script_can_be_invoked_by_file_path(self):
+        run_id = "test_direct_cli_run_daily"
+        log_path = Path("data/logs/run_daily") / f"{run_id}.jsonl"
+        try:
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "pipeline/run_daily.py",
+                    "--run-id",
+                    run_id,
+                    "--now",
+                    "2026-05-31T12:00:00Z",
+                    "--skip-sources",
+                    "--skip-decision",
+                    "--timeout",
+                    "5",
+                ],
+                cwd=Path(__file__).resolve().parents[1],
+                capture_output=True,
+                text=True,
+                check=False,
+                env={key: value for key, value in os.environ.items() if key != "PYTHONPATH"},
+            )
+        finally:
+            log_path.unlink(missing_ok=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_daily_pipeline_can_run_layer2_after_decision(self):
         from pipeline.run_daily import run_daily

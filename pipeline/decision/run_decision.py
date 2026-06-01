@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import time
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +28,7 @@ from pipeline.decision.schema import (
     to_json,
     utc_now,
 )
+from pipeline.run_logging import JsonlRunLogger
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -39,6 +41,24 @@ RUN_SCOPED_TABLES = [
     "entity_mentions",
     "evidence_rows",
 ]
+
+
+def _stage_started(logger: JsonlRunLogger, stage: str, **fields: Any) -> float:
+    logger.event("decision_stage_started", stage=stage, **fields)
+    return time.monotonic()
+
+
+def _stage_completed(logger: JsonlRunLogger, stage: str, started: float, **fields: Any) -> None:
+    logger.event(
+        "decision_stage_completed",
+        stage=stage,
+        duration_seconds=round(time.monotonic() - started, 3),
+        **fields,
+    )
+
+
+def _stage_skipped(logger: JsonlRunLogger, stage: str, **fields: Any) -> None:
+    logger.event("decision_stage_skipped", stage=stage, **fields)
 CLASSIFIER_EVIDENCE_SOURCES = {"hn_llm_classifier", "x_tweets", "npm_registry"}
 
 
@@ -544,10 +564,23 @@ def run_decision(
     resolver_research_rounds: int = 0,
     readme_client: Any | None = None,
     enrich_readme_limit: int = 0,
+    log_path: Path | None = None,
 ) -> dict[str, int | str]:
     rules = load_rules()
+    logger = JsonlRunLogger(log_path, run_id=run_id)
+    logger.event(
+        "decision_run_started",
+        now=now,
+        hn_classifier_limit=hn_classifier_limit,
+        x_classifier_limit=x_classifier_limit,
+        npm_backfill_limit=npm_backfill_limit,
+        resolver_search_limit=resolver_search_limit,
+        resolver_research_limit=resolver_research_limit,
+        enrich_readme_limit=enrich_readme_limit,
+    )
     conn = sqlite3.connect(db_path)
     try:
+        started = _stage_started(logger, "init_db")
         init_decision_db(conn)
         begin_decision_run(
             conn,
@@ -557,19 +590,38 @@ def run_decision(
             rule_version=str(rules.get("version", "rules-v1")),
         )
         reset_decision_stage(conn, run_id=run_id, tables=RUN_SCOPED_TABLES)
+        _stage_completed(logger, "init_db", started)
         from pipeline.decision.classifier_preflight import classifier_preflight_summary
 
+        started = _stage_started(
+            logger,
+            "classifier_preflight",
+            x_limit=x_classifier_limit,
+            hn_limit=hn_classifier_limit,
+        )
         preflight_summary = classifier_preflight_summary(
             conn,
             now=now,
             x_limit=x_classifier_limit,
             hn_limit=hn_classifier_limit,
         )
+        _stage_completed(logger, "classifier_preflight", started, **preflight_summary)
+        started = _stage_started(logger, "read_latest_items")
         rows = read_latest_items(conn)
+        _stage_completed(logger, "read_latest_items", started, rows=len(rows))
+        started = _stage_started(logger, "entity_resolution", rows=len(rows))
         resolution = resolve_entities(rows, first_seen=now)
         reconciled_ids = reconcile_entity_ids(conn, resolution)
         resolution = remap_resolution_ids(resolution, reconciled_ids)
+        _stage_completed(
+            logger,
+            "entity_resolution",
+            started,
+            entities=len(resolution.entities),
+            reconciled=len(reconciled_ids),
+        )
 
+        started = _stage_started(logger, "evaluate_pass1", rows=len(rows))
         pass1 = evaluate_entities(
             rows,
             resolution,
@@ -578,28 +630,59 @@ def run_decision(
             now=now,
             rules=rules,
         )
+        _stage_completed(
+            logger,
+            "evaluate_pass1",
+            started,
+            potential_candidates=len(pass1.potential_candidates),
+            edge_watch_candidates=len(pass1.edge_watch_candidates),
+            backfill_jobs=len(pass1.backfill_jobs),
+        )
         extra_github_signals: dict[str, dict[str, float]] = {}
         if (github_client is not None or npm_client is not None) and pass1.backfill_jobs:
+            started = _stage_started(
+                logger,
+                "persist_backfill_shortlist",
+                backfill_jobs=len(pass1.backfill_jobs),
+            )
             # Persist the shortlist before the bounded external runner reads pending jobs.
             referenced = referenced_entity_ids(pass1)
             write_entities(conn, resolution, referenced, now)
             persist_pending_backfill_jobs(conn, pass1.backfill_jobs)
+            _stage_completed(logger, "persist_backfill_shortlist", started, entities=len(referenced))
 
         if github_client is not None and pass1.backfill_jobs:
             from pipeline.decision.backfill import run_backfill_jobs
 
+            started = _stage_started(logger, "github_backfill", jobs=len(pass1.backfill_jobs))
             extra_github_signals = run_backfill_jobs(
                 conn,
                 run_id=run_id,
                 github_client=github_client,
                 now=now,
             ).get("signals", {})
+            _stage_completed(logger, "github_backfill", started, signals=len(extra_github_signals))
+        else:
+            _stage_skipped(
+                logger,
+                "github_backfill",
+                reason="client_or_jobs_missing",
+                client_enabled=github_client is not None,
+                jobs=len(pass1.backfill_jobs),
+            )
 
         hn_summary: dict[str, Any] = {"classified": 0}
         if hn_llm_provider is not None and hn_classifier_limit > 0:
             from pipeline.decision.hn_classifier import run_hn_classifier
 
             potential_item_ids, edge_item_ids = candidate_impact_item_ids(pass1, resolution)
+            started = _stage_started(
+                logger,
+                "hn_classifier",
+                limit=hn_classifier_limit,
+                potential_item_ids=len(potential_item_ids),
+                edge_item_ids=len(edge_item_ids),
+            )
             hn_summary = run_hn_classifier(
                 conn,
                 run_id=run_id,
@@ -610,12 +693,33 @@ def run_decision(
                 potential_item_ids=potential_item_ids,
                 edge_item_ids=edge_item_ids,
             )
+            _stage_completed(
+                logger,
+                "hn_classifier",
+                started,
+                classified=int(hn_summary.get("classified") or 0),
+            )
+        else:
+            _stage_skipped(
+                logger,
+                "hn_classifier",
+                reason="limit_or_provider_disabled",
+                limit=hn_classifier_limit,
+                provider_enabled=hn_llm_provider is not None,
+            )
 
         x_stage1_summary: dict[str, Any] = {"mentions": 0}
         x_stage2_summary: dict[str, Any] = {"tiered": 0}
         if x_llm_provider is not None and x_classifier_limit > 0:
             from pipeline.decision.x_classifier import run_x_stage1, run_x_stage2
 
+            started = _stage_started(
+                logger,
+                "x_stage1",
+                limit=x_classifier_limit,
+                batch_size=x_stage1_batch_size,
+                credible_handles=len(x_credible_handles or set()),
+            )
             x_stage1_summary = run_x_stage1(
                 conn,
                 run_id=run_id,
@@ -625,6 +729,13 @@ def run_decision(
                 limit=x_classifier_limit,
                 batch_size=x_stage1_batch_size,
             )
+            _stage_completed(
+                logger,
+                "x_stage1",
+                started,
+                mentions=int(x_stage1_summary.get("mentions") or 0),
+            )
+            started = _stage_started(logger, "x_stage2", limit=x_classifier_limit)
             x_stage2_summary = run_x_stage2(
                 conn,
                 run_id=run_id,
@@ -632,17 +743,47 @@ def run_decision(
                 now=now,
                 limit=x_classifier_limit,
             )
+            _stage_completed(
+                logger,
+                "x_stage2",
+                started,
+                tiered=int(x_stage2_summary.get("tiered") or 0),
+            )
+        else:
+            _stage_skipped(
+                logger,
+                "x_classifier",
+                reason="limit_or_provider_disabled",
+                limit=x_classifier_limit,
+                provider_enabled=x_llm_provider is not None,
+            )
 
         npm_summary: dict[str, Any] = {"completed": 0, "failed": 0}
         if npm_client is not None and npm_backfill_limit > 0:
             from pipeline.decision.npm_backfill import run_npm_backfill
 
+            started = _stage_started(logger, "npm_backfill", limit=npm_backfill_limit)
             npm_summary = run_npm_backfill(
                 conn,
                 run_id=run_id,
                 client=npm_client,
                 now=now,
                 limit=npm_backfill_limit,
+            )
+            _stage_completed(
+                logger,
+                "npm_backfill",
+                started,
+                completed=int(npm_summary.get("completed") or 0),
+                failed=int(npm_summary.get("failed") or 0),
+            )
+        else:
+            _stage_skipped(
+                logger,
+                "npm_backfill",
+                reason="limit_or_client_disabled",
+                limit=npm_backfill_limit,
+                client_enabled=npm_client is not None,
             )
 
         resolver_summary: dict[str, Any] = {
@@ -654,6 +795,13 @@ def run_decision(
         if hn_summary.get("classified") or x_stage2_summary.get("tiered"):
             from pipeline.decision.resolver import enrich_classifier_candidates
 
+            started = _stage_started(
+                logger,
+                "classifier_resolver",
+                search_limit=resolver_search_limit,
+                research_limit=resolver_research_limit,
+                research_rounds=resolver_research_rounds,
+            )
             resolver_summary = enrich_classifier_candidates(
                 conn,
                 run_id=run_id,
@@ -665,8 +813,28 @@ def run_decision(
                 max_research_rounds=resolver_research_rounds,
                 now=now,
             )
+            _stage_completed(
+                logger,
+                "classifier_resolver",
+                started,
+                enriched=int(resolver_summary.get("enriched") or 0),
+                aliases=int(resolver_summary.get("aliases") or 0),
+                proposals=int(resolver_summary.get("proposals") or 0),
+                researched=int(resolver_summary.get("researched") or 0),
+            )
+        else:
+            _stage_skipped(
+                logger,
+                "classifier_resolver",
+                reason="no_classifier_output",
+                hn_classified=int(hn_summary.get("classified") or 0),
+                x_tiered=int(x_stage2_summary.get("tiered") or 0),
+            )
 
+        started = _stage_started(logger, "read_classifier_evidence")
         classifier_evidence = read_classifier_evidence(conn, run_id)
+        _stage_completed(logger, "read_classifier_evidence", started, rows=len(classifier_evidence))
+        started = _stage_started(logger, "final_evaluation", classifier_evidence=len(classifier_evidence))
         resolution = add_classifier_entities_to_resolution(conn, resolution, classifier_evidence)
         final_result = (
             evaluate_entities(
@@ -682,7 +850,16 @@ def run_decision(
             if extra_github_signals or classifier_evidence
             else pass1
         )
+        _stage_completed(
+            logger,
+            "final_evaluation",
+            started,
+            potential_candidates=len(final_result.potential_candidates),
+            edge_watch_candidates=len(final_result.edge_watch_candidates),
+            backfill_jobs=len(final_result.backfill_jobs),
+        )
 
+        started = _stage_started(logger, "persist_results")
         referenced = referenced_entity_ids(final_result)
         write_entities(conn, resolution, referenced, now)
         write_evidence(conn, final_result.evidence_rows)
@@ -692,17 +869,43 @@ def run_decision(
             edge_watch_candidates=final_result.edge_watch_candidates,
             backfill_jobs=final_result.backfill_jobs,
         )
+        _stage_completed(
+            logger,
+            "persist_results",
+            started,
+            entities=len(referenced),
+            evidence_rows=len(final_result.evidence_rows),
+        )
         readme_summary: dict[str, Any] = {"fetched": 0, "cached": 0, "skipped": 0}
         if readme_client is not None and enrich_readme_limit > 0:
             from pipeline.decision.readme_enrichment import enrich_candidate_readmes
 
+            started = _stage_started(logger, "readme_enrichment", limit=enrich_readme_limit)
             readme_summary = enrich_candidate_readmes(
                 conn,
                 run_id=run_id,
                 client=readme_client,
                 limit=enrich_readme_limit,
             )
+            _stage_completed(
+                logger,
+                "readme_enrichment",
+                started,
+                fetched=int(readme_summary.get("fetched") or 0),
+                cached=int(readme_summary.get("cached") or 0),
+                skipped=int(readme_summary.get("skipped") or 0),
+            )
+        else:
+            _stage_skipped(
+                logger,
+                "readme_enrichment",
+                reason="limit_or_client_disabled",
+                limit=enrich_readme_limit,
+                client_enabled=readme_client is not None,
+            )
+        started = _stage_started(logger, "export_candidates", export=str(export_json_path))
         export_candidates(conn, run_id, export_json_path)
+        _stage_completed(logger, "export_candidates", started, export=str(export_json_path))
         finish_decision_run(conn, run_id=run_id, status="ok", note="done")
 
         summary: dict[str, int | str] = {
@@ -723,8 +926,10 @@ def run_decision(
             "export": str(export_json_path),
         }
         summary.update(preflight_summary)
+        logger.event("decision_run_completed", ok=True, **summary)
         return summary
     except Exception as exc:
+        logger.event("decision_run_failed", ok=False, error=type(exc).__name__, message=str(exc))
         finish_decision_run(conn, run_id=run_id, status="failed", note=str(exc))
         raise
     finally:
@@ -827,6 +1032,7 @@ def run_from_args(
             github_readme_client_builder(args) if enrich_readme_limit > 0 else None
         ),
         enrich_readme_limit=enrich_readme_limit,
+        log_path=getattr(args, "log_path", None),
     )
 
 
@@ -848,6 +1054,7 @@ def main() -> None:
     parser.add_argument("--resolver-research-rounds", type=int, default=3)
     parser.add_argument("--npm-backfill-limit", type=int, default=0)
     parser.add_argument("--enrich-readme-limit", type=int, default=0)
+    parser.add_argument("--log-path", type=Path, default=None)
     args = parser.parse_args()
 
     summary = run_from_args(args)

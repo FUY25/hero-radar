@@ -29,6 +29,11 @@ from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from pipeline.run_logging import JsonlRunLogger
+
 CONFIG_PATH = ROOT / "pipeline" / "config.json"
 DATA_DIR = ROOT / "data"
 RAW_DIR = DATA_DIR / "raw"
@@ -4975,12 +4980,23 @@ def pipeline_adapters() -> list[tuple[str, Any]]:
     ]
 
 
-def run_pipeline(only_sources: set[str] | None = None, *, export_only: bool = False) -> int:
+def run_pipeline(
+    only_sources: set[str] | None = None,
+    *,
+    export_only: bool = False,
+    log_path: Path | str | None = None,
+) -> int:
     load_dotenv()
     ensure_dirs()
     config = read_config()
     fetched_at = iso(utc_now())
     run_id = fetched_at.replace(":", "").replace("-", "")
+    logger = JsonlRunLogger(log_path, run_id=run_id)
+    logger.event(
+        "sources_run_started",
+        export_only=export_only,
+        only_sources=sorted(only_sources or []),
+    )
     conn = sqlite3.connect(DB_PATH)
     init_db(conn)
 
@@ -4989,6 +5005,7 @@ def run_pipeline(only_sources: set[str] | None = None, *, export_only: bool = Fa
         export_latest(scored, run_id, fetched_at, latest_source_errors(conn))
         print(f"Exported {len(scored)} scored rows from latest snapshots.", file=sys.stderr)
         print(EXPORT_DIR / "latest_scores.md")
+        logger.event("sources_run_completed", export_only=True, inserted=0, exported=len(scored))
         return 0
 
     adapters = pipeline_adapters()
@@ -4998,6 +5015,7 @@ def run_pipeline(only_sources: set[str] | None = None, *, export_only: bool = Fa
         if unknown:
             print(f"Unknown source(s): {', '.join(unknown)}", file=sys.stderr)
             print(f"Known sources: {', '.join(sorted(known))}", file=sys.stderr)
+            logger.event("sources_run_failed", error="unknown_sources", unknown_sources=unknown)
             return 2
         adapters = [(name, adapter) for name, adapter in adapters if name in only_sources]
 
@@ -5005,6 +5023,8 @@ def run_pipeline(only_sources: set[str] | None = None, *, export_only: bool = Fa
     total_inserted = 0
     for source_name, adapter in adapters:
         print(f"[{source_name}] collecting...", file=sys.stderr)
+        started = time.monotonic()
+        logger.event("source_started", source=source_name)
         try:
             items, error = adapter(config, fetched_at)
         except Exception as exc:  # noqa: BLE001
@@ -5014,6 +5034,13 @@ def run_pipeline(only_sources: set[str] | None = None, *, export_only: bool = Fa
         ids = insert_source_items(conn, run_id=run_id, source=source_name, fetched_at=fetched_at, items=items, error=error)
         total_inserted += len(ids)
         print(f"[{source_name}] inserted {len(ids)} items" + (f" ({error})" if error else ""), file=sys.stderr)
+        logger.event(
+            "source_completed",
+            source=source_name,
+            items=len(ids),
+            error=error,
+            duration_seconds=round(time.monotonic() - started, 3),
+        )
 
     if only_sources:
         scored = rank_latest_by_item_source(conn, run_id)
@@ -5024,6 +5051,7 @@ def run_pipeline(only_sources: set[str] | None = None, *, export_only: bool = Fa
     export_latest(scored, run_id, fetched_at, export_errors)
     print(f"Inserted {total_inserted} items. Exported {len(scored)} scored rows.", file=sys.stderr)
     print(EXPORT_DIR / "latest_scores.md")
+    logger.event("sources_run_completed", inserted=total_inserted, exported=len(scored))
     return 0
 
 
@@ -5037,11 +5065,12 @@ def main() -> int:
         help="Collect only named adapter(s), comma-separated or repeatable. Dashboard is exported from latest snapshot per item source.",
     )
     parser.add_argument("--export-only", action="store_true", help="Do not collect; export dashboard from latest snapshot per item source.")
+    parser.add_argument("--log-path", type=Path, default=None)
     args = parser.parse_args()
     only: set[str] = set()
     for value in args.only:
         only.update(part.strip() for part in value.split(",") if part.strip())
-    return run_pipeline(only or None, export_only=args.export_only)
+    return run_pipeline(only or None, export_only=args.export_only, log_path=args.log_path)
 
 
 if __name__ == "__main__":

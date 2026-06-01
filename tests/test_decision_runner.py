@@ -740,6 +740,7 @@ class DecisionRunnerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "hero.sqlite"
             export_path = Path(tmpdir) / "candidates.json"
+            log_path = Path(tmpdir) / "decision.jsonl"
             conn = sqlite3.connect(db_path)
             seed_aggregate_child_source_tables(conn)
             init_decision_db(conn)
@@ -813,6 +814,7 @@ class DecisionRunnerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "hero.sqlite"
             export_path = Path(tmpdir) / "candidates.json"
+            log_path = Path(tmpdir) / "decision.jsonl"
             conn = sqlite3.connect(db_path)
             seed_source_tables(conn)
             init_decision_db(conn)
@@ -1051,6 +1053,7 @@ class DecisionRunnerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "hero.sqlite"
             export_path = Path(tmpdir) / "candidates.json"
+            log_path = Path(tmpdir) / "decision.jsonl"
             conn = sqlite3.connect(db_path)
             seed_x_source_tables(conn)
             init_decision_db(conn)
@@ -1117,6 +1120,7 @@ class DecisionRunnerTest(unittest.TestCase):
                 x_llm_provider=provider,
                 x_classifier_limit=10,
                 x_credible_handles={"credible1", "credible2"},
+                log_path=log_path,
             )
 
             self.assertEqual(summary["x_stage1_mentions"], 2)
@@ -1131,6 +1135,42 @@ class DecisionRunnerTest(unittest.TestCase):
             ).fetchone()
             conn.close()
             self.assertEqual(resolver_alias, ("github:owner/repo",))
+            events = [json.loads(line) for line in log_path.read_text().splitlines()]
+            event_pairs = [(event["event"], event.get("stage")) for event in events]
+            self.assertIn(("decision_stage_started", "x_stage1"), event_pairs)
+            self.assertIn(("decision_stage_completed", "x_stage1"), event_pairs)
+            self.assertIn(("decision_stage_started", "x_stage2"), event_pairs)
+            self.assertIn(("decision_stage_completed", "x_stage2"), event_pairs)
+
+    def test_runner_logs_skipped_x_classifier_when_disabled(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "hero.sqlite"
+            export_path = Path(tmpdir) / "candidates.json"
+            log_path = Path(tmpdir) / "decision.jsonl"
+            conn = sqlite3.connect(db_path)
+            seed_x_source_tables(conn)
+            init_decision_db(conn)
+            conn.close()
+
+            run_decision(
+                db_path=db_path,
+                run_id="decision-run-x-skip",
+                export_json_path=export_path,
+                now="2026-05-31T04:00:00Z",
+                x_llm_provider=object(),
+                x_classifier_limit=0,
+                log_path=log_path,
+            )
+
+            events = [json.loads(line) for line in log_path.read_text().splitlines()]
+            skipped = [
+                event
+                for event in events
+                if event["event"] == "decision_stage_skipped" and event.get("stage") == "x_classifier"
+            ]
+            self.assertEqual(len(skipped), 1)
+            self.assertEqual(skipped[0]["reason"], "limit_or_provider_disabled")
+            self.assertEqual(skipped[0]["limit"], 0)
 
     def test_runner_promotes_name_only_x_candidate_with_resolver_link(self):
         from pipeline.decision.candidate_context import context_bundle_for_entity
