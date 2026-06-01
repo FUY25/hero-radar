@@ -18,10 +18,16 @@ from pipeline.decision.layer2_deepdive import (
     DeepdiveLimits,
     default_deepdive_tools,
     run_deepdives,
+    select_deepdives,
 )
 from pipeline.decision.layer2_grouping import (
     build_candidate_groups,
     persist_candidate_groups,
+)
+from pipeline.decision.layer2_harness import (
+    final_run_status,
+    record_stage_event,
+    stage_summary,
 )
 from pipeline.decision.layer2_scheduler import schedule_layer2_work
 from pipeline.decision.layer2_scoring import score_candidate_groups
@@ -151,22 +157,75 @@ def run_layer2_feed(
                 cfg.get("max_scored_candidates", cfg.get("scoring_limit", 150))
             ),
         )
-        scouted = (
-            scout_edge_watch_groups(
+        for skipped in schedule.skipped:
+            record_stage_event(
                 conn,
                 feed_run_id=active_feed_run_id,
-                groups=schedule.scout_edge_watch,
-                provider=scout_provider,
+                group_id=skipped["group_id"],
+                stage="schedule",
+                status="skipped_unchanged",
+                metadata=skipped,
             )
-            if schedule.scout_edge_watch
-            else []
-        )
-        scored = score_candidate_groups(
-            conn,
-            feed_run_id=active_feed_run_id,
-            groups=[*schedule.score_now, *scouted],
-            provider=scoring_provider,
-        )
+        for group in schedule.pending:
+            record_stage_event(
+                conn,
+                feed_run_id=active_feed_run_id,
+                group_id=group.group_id,
+                stage="schedule",
+                status="pending_budget",
+            )
+        scouted = []
+        for group in schedule.scout_edge_watch:
+            try:
+                result = scout_edge_watch_groups(
+                    conn,
+                    feed_run_id=active_feed_run_id,
+                    groups=[group],
+                    provider=scout_provider,
+                )
+                record_stage_event(
+                    conn,
+                    feed_run_id=active_feed_run_id,
+                    group_id=group.group_id,
+                    stage="scout",
+                    status="scout_ok" if result else "scout_filtered",
+                )
+                scouted.extend(result)
+            except Exception as exc:
+                record_stage_event(
+                    conn,
+                    feed_run_id=active_feed_run_id,
+                    group_id=group.group_id,
+                    stage="scout",
+                    status="scout_error",
+                    error=exc,
+                )
+        scored = []
+        for group in [*schedule.score_now, *scouted]:
+            try:
+                result = score_candidate_groups(
+                    conn,
+                    feed_run_id=active_feed_run_id,
+                    groups=[group],
+                    provider=scoring_provider,
+                )
+                scored.extend(result)
+                record_stage_event(
+                    conn,
+                    feed_run_id=active_feed_run_id,
+                    group_id=group.group_id,
+                    stage="scoring",
+                    status="scoring_ok",
+                )
+            except Exception as exc:
+                record_stage_event(
+                    conn,
+                    feed_run_id=active_feed_run_id,
+                    group_id=group.group_id,
+                    stage="scoring",
+                    status="scoring_error",
+                    error=exc,
+                )
         for rank, row in enumerate(
             sorted(scored, key=lambda item: -float(item["l2_score"])), start=1
         ):
@@ -190,43 +249,85 @@ def run_layer2_feed(
             if bool(cfg.get("enable_kimi_web_search", False))
             else None
         )
-        reports = run_deepdives(
+        active_tools = default_deepdive_tools(
             conn,
-            feed_run_id=active_feed_run_id,
-            scored=scored,
-            provider=active_deepdive_provider,
+            decision_run_id=active_decision_run_id,
+            enable_kimi_web_search=bool(cfg.get("enable_kimi_web_search", False)),
+            web_search_client=web_search_client,
+        )
+        active_limits = DeepdiveLimits(
+            max_tool_calls=int(
+                cfg.get(
+                    "max_tool_calls_per_candidate",
+                    (
+                        int(cfg.get("max_web_search_calls_per_candidate", 3))
+                        + int(cfg.get("max_repo_files_per_candidate", 8))
+                        + int(cfg.get("max_pages_per_candidate", 6))
+                    ),
+                )
+            ),
+            max_web_search_calls=int(cfg.get("max_web_search_calls_per_candidate", 3)),
+            max_repo_file_calls=int(cfg.get("max_repo_files_per_candidate", 8)),
+            max_page_fetch_calls=int(cfg.get("max_pages_per_candidate", 6)),
+            max_hn_thread_calls=int(
+                cfg.get("max_hn_thread_fetches_per_candidate", 3)
+            ),
+            max_x_context_calls=int(cfg.get("max_x_context_fetches_per_candidate", 5)),
+        )
+        selected_for_deepdive = select_deepdives(
+            scored,
             max_deepdives=int(cfg.get("max_deepdives_per_run", 10)),
             min_l2_score=float(cfg.get("deepdive_min_l2_score", 70)),
-            tools=default_deepdive_tools(
-                conn,
-                decision_run_id=active_decision_run_id,
-                enable_kimi_web_search=bool(cfg.get("enable_kimi_web_search", False)),
-                web_search_client=web_search_client,
-            ),
-            limits=DeepdiveLimits(
-                max_tool_calls=int(
-                    cfg.get(
-                        "max_tool_calls_per_candidate",
-                        (
-                            int(cfg.get("max_web_search_calls_per_candidate", 3))
-                            + int(cfg.get("max_repo_files_per_candidate", 8))
-                            + int(cfg.get("max_pages_per_candidate", 6))
-                        ),
-                    )
-                ),
-                max_web_search_calls=int(
-                    cfg.get("max_web_search_calls_per_candidate", 3)
-                ),
-                max_repo_file_calls=int(cfg.get("max_repo_files_per_candidate", 8)),
-                max_page_fetch_calls=int(cfg.get("max_pages_per_candidate", 6)),
-                max_hn_thread_calls=int(
-                    cfg.get("max_hn_thread_fetches_per_candidate", 3)
-                ),
-                max_x_context_calls=int(
-                    cfg.get("max_x_context_fetches_per_candidate", 5)
-                ),
-            ),
         )
+        reports = []
+        for row in selected_for_deepdive:
+            group = row["group"]
+            record_stage_event(
+                conn,
+                feed_run_id=active_feed_run_id,
+                group_id=group.group_id,
+                stage="deepdive",
+                status="deepdive_selected",
+            )
+            try:
+                reports.extend(
+                    run_deepdives(
+                        conn,
+                        feed_run_id=active_feed_run_id,
+                        scored=[row],
+                        provider=active_deepdive_provider,
+                        max_deepdives=1,
+                        min_l2_score=0,
+                        tools=active_tools,
+                        limits=active_limits,
+                    )
+                )
+                record_stage_event(
+                    conn,
+                    feed_run_id=active_feed_run_id,
+                    group_id=group.group_id,
+                    stage="deepdive",
+                    status="deepdive_ok",
+                )
+            except Exception as exc:
+                record_stage_event(
+                    conn,
+                    feed_run_id=active_feed_run_id,
+                    group_id=group.group_id,
+                    stage="deepdive",
+                    status="deepdive_error",
+                    error=exc,
+                )
+        telemetry = stage_summary(conn, active_feed_run_id)
+        status = final_run_status(telemetry)
+        note = {
+            "scored": len(scored),
+            "deepdives": len(reports),
+            "stage_counts": telemetry["stage_counts"],
+            "error_counts": telemetry["error_counts"],
+            "success_total": telemetry["success_total"],
+            "error_total": telemetry["error_total"],
+        }
         conn.execute(
             """
             update l2_feed_runs
@@ -235,8 +336,8 @@ def run_layer2_feed(
             """,
             (
                 utc_now(),
-                "ok",
-                to_json({"scored": len(scored), "deepdives": len(reports)}),
+                status,
+                to_json(note),
                 active_feed_run_id,
             ),
         )
@@ -248,6 +349,8 @@ def run_layer2_feed(
             "groups": len(groups),
             "scored": len(scored),
             "deepdives": len(reports),
+            "status": status,
+            "errors": telemetry["error_total"],
         }
     except Exception as exc:
         conn.execute(
