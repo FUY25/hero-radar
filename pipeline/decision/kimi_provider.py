@@ -35,6 +35,12 @@ def load_local_kimi_config(path: Path | None = None) -> dict[str, str]:
     }
 
 
+def kimi_temperature(model: str, requested: float) -> float:
+    if str(model or "").lower().startswith("kimi-k2"):
+        return 1
+    return requested
+
+
 class KimiProvider:
     provider_name = "kimi"
 
@@ -146,7 +152,7 @@ class KimiProvider:
                     ),
                 },
             ],
-            "temperature": temperature,
+            "temperature": kimi_temperature(self.model, temperature),
         }
         if json_mode:
             payload["response_format"] = {"type": "json_object"}

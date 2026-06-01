@@ -21,7 +21,7 @@ class FakeHttpResponse:
 
 
 class KimiProviderTest(unittest.TestCase):
-    def test_kimi_provider_builds_openai_json_payload_without_secret_in_repr(self):
+    def test_kimi_provider_builds_json_payload_with_k2_accepted_temperature(self):
         from pipeline.decision.kimi_provider import KimiProvider
 
         provider = KimiProvider(
@@ -37,7 +37,7 @@ class KimiProviderTest(unittest.TestCase):
 
         self.assertEqual(payload["model"], "kimi-k2.5")
         self.assertEqual(payload["response_format"]["type"], "json_object")
-        self.assertEqual(payload["temperature"], 0)
+        self.assertEqual(payload["temperature"], 1)
         self.assertIn('"candidate": "owner/repo"', payload["messages"][1]["content"])
         self.assertNotIn("secret-value", repr(provider))
 
