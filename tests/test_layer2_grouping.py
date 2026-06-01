@@ -96,6 +96,54 @@ class Layer2GroupingTest(unittest.TestCase):
             1,
         )
 
+    def test_groups_same_repo_source_link_when_canonical_keys_are_weak(self):
+        from pipeline.decision.layer2_grouping import build_candidate_groups
+
+        conn = self.make_conn()
+        conn.execute(
+            "insert into items(id, source, name, url, description, metadata_json, raw_json) values (?, ?, ?, ?, ?, ?, ?)",
+            (
+                1,
+                "hn_search",
+                "Repo discussion",
+                "https://github.com/Owner/Repo",
+                "",
+                "{}",
+                "{}",
+            ),
+        )
+        conn.execute(
+            "insert into items(id, source, name, url, description, metadata_json, raw_json) values (?, ?, ?, ?, ?, ?, ?)",
+            (
+                2,
+                "x_tweets",
+                "Repo mention",
+                "https://github.com/owner/repo/",
+                "",
+                "{}",
+                "{}",
+            ),
+        )
+        self.insert_entity(conn, "entity:a", "Repo A", "name:repo-a", [1])
+        self.insert_entity(conn, "entity:b", "Repo B", "name:repo-b", [2])
+        for entity_id in ["entity:a", "entity:b"]:
+            conn.execute(
+                "insert into potential_candidates(entity_id, run_id, level, fired_families_json, first_trigger_at) values (?, ?, ?, ?, ?)",
+                (
+                    entity_id,
+                    "decision-run",
+                    "potential",
+                    '["github"]',
+                    "2026-05-31T00:00:00Z",
+                ),
+            )
+
+        groups = build_candidate_groups(conn, decision_run_id="decision-run")
+
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0].member_entity_ids, ["entity:a", "entity:b"])
+        self.assertEqual(groups[0].grouping_reason["key"], "github:owner/repo")
+
     def test_keeps_unrelated_name_matches_separate_without_strong_key(self):
         from pipeline.decision.layer2_grouping import build_candidate_groups
 
