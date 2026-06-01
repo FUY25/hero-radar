@@ -30,6 +30,20 @@ class Layer2EvalTest(unittest.TestCase):
         self.assertEqual(result["top"]["expected"], "project")
         self.assertGreaterEqual(result["metrics"]["project_cases"], 2)
 
+    def test_default_eval_cases_cover_scout_v2_strong_gate(self) -> None:
+        from pipeline.decision.run_layer2_evals import (
+            default_scout_v2_eval_cases,
+            evaluate_scout_v2_cases,
+        )
+
+        result = evaluate_scout_v2_cases(default_scout_v2_eval_cases())
+
+        self.assertTrue(result["ok"])
+        self.assertGreaterEqual(result["metrics"]["positive_cases"], 3)
+        self.assertGreaterEqual(result["metrics"]["negative_cases"], 4)
+        self.assertGreaterEqual(result["metrics"]["medium_only_failures"], 1)
+        self.assertEqual(result["mismatches"], [])
+
     def test_run_handshake_uses_provider_handshake_without_completion(self) -> None:
         from pipeline.decision.run_layer2_evals import run_handshake
 
