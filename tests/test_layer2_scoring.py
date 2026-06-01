@@ -17,6 +17,22 @@ class Layer2ScoringTest(unittest.TestCase):
                 "momentum": 80,
                 "workflow_shift": 90,
                 "technical_substance": 70,
+                "product_market_fit": 60,
+                "confidence": 75,
+                "derivative_news_penalty": 10,
+            }
+        )
+
+        self.assertEqual(score, 66.75)
+
+    def test_aggregate_score_accepts_legacy_adoption_path_axis(self):
+        from pipeline.decision.layer2_scoring import aggregate_l2_score
+
+        score = aggregate_l2_score(
+            {
+                "momentum": 80,
+                "workflow_shift": 90,
+                "technical_substance": 70,
                 "adoption_path": 60,
                 "confidence": 75,
                 "derivative_news_penalty": 10,
@@ -37,7 +53,7 @@ class Layer2ScoringTest(unittest.TestCase):
                         "momentum": 80,
                         "workflow_shift": 90,
                         "technical_substance": 70,
-                        "adoption_path": 60,
+                        "product_market_fit": 60,
                         "confidence": 75,
                         "derivative_news_penalty": 10,
                     },
@@ -84,7 +100,7 @@ class Layer2ScoringTest(unittest.TestCase):
                         "momentum": 80,
                         "workflow_shift": 80,
                         "technical_substance": 80,
-                        "adoption_path": 80,
+                        "product_market_fit": 80,
                         "confidence": 80,
                         "derivative_news_penalty": 0,
                     },

@@ -14,7 +14,7 @@ DEFAULT_SCORING_PROMPT_VERSION = "layer2-scoring-v1"
 SCORING_SYSTEM_PROMPT = """
 You score Hero Radar candidates for today's Feed.
 Return strict JSON with axes object:
-momentum, workflow_shift, technical_substance, adoption_path, confidence,
+momentum, workflow_shift, technical_substance, product_market_fit, confidence,
 derivative_news_penalty.
 Positive axes are 0..100. derivative_news_penalty is 0..25.
 Also return primary_reason, topic_tags, rationale_short, caveats.
@@ -27,7 +27,7 @@ def aggregate_l2_score(axes: dict[str, Any]) -> float:
         0.25 * _axis(axes, "momentum")
         + 0.25 * _axis(axes, "workflow_shift")
         + 0.20 * _axis(axes, "technical_substance")
-        + 0.15 * _axis(axes, "adoption_path")
+        + 0.15 * _axis_with_fallback(axes, "product_market_fit", "adoption_path")
         + 0.15 * _axis(axes, "confidence")
         - _penalty(axes, "derivative_news_penalty")
     )
@@ -112,7 +112,9 @@ def _validate_response(response: dict[str, Any]) -> dict[str, Any]:
         "momentum": _axis(response["axes"], "momentum"),
         "workflow_shift": _axis(response["axes"], "workflow_shift"),
         "technical_substance": _axis(response["axes"], "technical_substance"),
-        "adoption_path": _axis(response["axes"], "adoption_path"),
+        "product_market_fit": _axis_with_fallback(
+            response["axes"], "product_market_fit", "adoption_path"
+        ),
         "confidence": _axis(response["axes"], "confidence"),
         "derivative_news_penalty": _penalty(
             response["axes"], "derivative_news_penalty"
@@ -137,6 +139,13 @@ def _validate_response(response: dict[str, Any]) -> dict[str, Any]:
 
 def _axis(axes: dict[str, Any], key: str) -> float:
     return _clamp_float(axes.get(key), 0, 100)
+
+
+def _axis_with_fallback(axes: dict[str, Any], key: str, fallback_key: str) -> float:
+    value = axes.get(key)
+    if value is None:
+        value = axes.get(fallback_key)
+    return _clamp_float(value, 0, 100)
 
 
 def _penalty(axes: dict[str, Any], key: str) -> float:
