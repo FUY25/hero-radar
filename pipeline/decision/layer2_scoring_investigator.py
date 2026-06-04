@@ -12,6 +12,20 @@ from pipeline.decision.schema import to_json, utc_now
 DEFAULT_INVESTIGATOR_PROMPT_VERSION = "layer2-scoring-investigator-v1"
 DEFAULT_BRIEF_PROMPT_VERSION = "layer2-scoring-investigator-brief-v2"
 
+ROUTE_SCORE_ONLY = "score_only"
+ROUTE_SCORE_PLUS_DEEPDIVE = "score_plus_deepdive"
+ROUTE_SUPPRESS_OR_LOW = "suppress_or_low"
+ROUTE_CANDIDATE_ERROR = "candidate_error"
+
+DEEPDIVE_BLOCKED_OBJECT_TYPES = {
+    "article",
+    "funding",
+    "model_release",
+    "news",
+    "resource_list",
+    "tutorial",
+}
+
 
 SCORING_INVESTIGATOR_SYSTEM_PROMPT = """
 You are the Layer 2 Scoring Investigator for Hero Radar.
@@ -158,8 +172,7 @@ def select_deepdive_brief_candidates(
     eligible = [
         row
         for row in scored
-        if float(row.get("l2_score") or 0) >= float(min_score)
-        and bool(row.get("should_print", True))
+        if _is_deepdive_eligible(row, min_score=float(min_score))
     ]
     ordered = sorted(
         eligible,
@@ -178,6 +191,44 @@ def select_deepdive_brief_candidates(
                 break
             selected.append(row)
     return selected
+
+
+def classify_scored_route(
+    row: dict[str, Any],
+    *,
+    selected_group_ids: set[str] | None = None,
+    min_score: float = 70,
+    low_score_threshold: float = 50,
+) -> str:
+    if row.get("error") or row.get("status") in {"candidate_error", "scoring_error"}:
+        return ROUTE_CANDIDATE_ERROR
+    if not bool(row.get("should_print", True)):
+        return ROUTE_SUPPRESS_OR_LOW
+    if not _is_product_or_repo_row(row):
+        return ROUTE_SUPPRESS_OR_LOW
+    score = float(row.get("l2_score") or 0)
+    if score < float(low_score_threshold):
+        return ROUTE_SUPPRESS_OR_LOW
+    group = row.get("group")
+    group_id = str(getattr(group, "group_id", row.get("group_id", "")))
+    if selected_group_ids and group_id in selected_group_ids:
+        return ROUTE_SCORE_PLUS_DEEPDIVE
+    if score >= float(min_score):
+        return ROUTE_SCORE_ONLY
+    return ROUTE_SUPPRESS_OR_LOW
+
+
+def _is_deepdive_eligible(row: dict[str, Any], *, min_score: float) -> bool:
+    if float(row.get("l2_score") or 0) < min_score:
+        return False
+    return classify_scored_route(row, min_score=min_score) == ROUTE_SCORE_ONLY
+
+
+def _is_product_or_repo_row(row: dict[str, Any]) -> bool:
+    object_type = str(row.get("object_type") or "unknown").strip().lower()
+    if object_type in DEEPDIVE_BLOCKED_OBJECT_TYPES:
+        return False
+    return bool(row.get("is_product_or_repo", False))
 
 
 def generate_deepdive_briefs(
