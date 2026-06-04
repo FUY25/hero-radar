@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import sqlite3
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -348,6 +350,59 @@ class Layer2RunnerTest(unittest.TestCase):
         self.assertEqual(summary["scored"], 1)
         self.assertIn(("scoring", "pending_budget"), stage_rows)
 
+    def test_run_layer2_scores_with_configured_concurrency_from_factory(self):
+        from pipeline.decision.run_layer2_feed import run_layer2_feed
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "hero.sqlite"
+            self.make_db_with_potentials(
+                db_path,
+                [
+                    "one/repo",
+                    "two/repo",
+                    "three/repo",
+                    "four/repo",
+                    "five/repo",
+                    "six/repo",
+                ],
+            )
+            lock = threading.Lock()
+            active = 0
+            max_active = 0
+            response = self.valid_score_response("Concurrent")
+
+            class ConcurrentProvider:
+                provider_name = "fake"
+                model = "fake-json"
+
+                def complete_json(self, **kwargs):
+                    nonlocal active, max_active
+                    with lock:
+                        active += 1
+                        max_active = max(max_active, active)
+                    try:
+                        time.sleep(0.05)
+                        return response
+                    finally:
+                        with lock:
+                            active -= 1
+
+            summary = run_layer2_feed(
+                db_path=db_path,
+                decision_run_id="decision-run",
+                feed_run_id="l2-concurrent",
+                now="2026-06-01T12:00:00Z",
+                scoring_provider_factory=ConcurrentProvider,
+                config={
+                    "max_scored_candidates": 6,
+                    "scoring_concurrency": 3,
+                    "enable_deepdive_briefs": False,
+                },
+            )
+
+        self.assertEqual(summary["scored"], 6)
+        self.assertGreaterEqual(max_active, 2)
+
     def test_run_layer2_disables_edge_scout_by_default(self):
         from pipeline.decision.llm_provider import FakeLLMProvider
         from pipeline.decision.run_layer2_feed import run_layer2_feed
@@ -501,3 +556,4 @@ class Layer2RunnerTest(unittest.TestCase):
         default_config = config_from_args(parse_args([]))
         self.assertEqual(default_config["max_deepdives_per_run"], 0)
         self.assertEqual(default_config["brief_target_count"], 8)
+        self.assertEqual(default_config["scoring_concurrency"], 5)

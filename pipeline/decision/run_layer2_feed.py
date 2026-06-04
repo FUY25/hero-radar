@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import sqlite3
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from pipeline.decision.kimi_provider import (
     DEFAULT_KIMI_DEEPDIVE_MODEL,
@@ -133,6 +134,7 @@ def run_layer2_feed(
     now: str | None = None,
     provider: Any | None = None,
     deepdive_provider: Any | None = None,
+    scoring_provider_factory: Callable[[], Any] | None = None,
     config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     cfg = config or {}
@@ -153,8 +155,12 @@ def run_layer2_feed(
         scout_provider = provider or KimiProvider(
             model=str(cfg.get("edge_scout_model") or DEFAULT_KIMI_SCORING_MODEL)
         )
-        scoring_provider = provider or KimiProvider(
-            model=str(cfg.get("scoring_model") or DEFAULT_KIMI_SCORING_MODEL)
+        scoring_provider = provider or (
+            scoring_provider_factory()
+            if scoring_provider_factory
+            else KimiProvider(
+                model=str(cfg.get("scoring_model") or DEFAULT_KIMI_SCORING_MODEL)
+            )
         )
         active_deepdive_provider = deepdive_provider or provider or KimiProvider(
             model=str(cfg.get("deepdive_model") or DEFAULT_KIMI_DEEPDIVE_MODEL)
@@ -280,89 +286,79 @@ def run_layer2_feed(
                     status="pending_budget",
                     metadata={"reason": "max_total_scoring_candidates"},
                 )
-        scoring_web_search_timeout = _optional_int(
-            cfg.get("web_search_timeout_seconds")
+        conn.commit()
+        scoring_concurrency = _active_scoring_concurrency(
+            provider_injected=provider is not None,
+            cfg=cfg,
         )
-        if scoring_web_search_timeout is not None and hasattr(
-            scoring_provider, "timeout"
-        ):
-            setattr(scoring_provider, "timeout", scoring_web_search_timeout)
-        scoring_web_search_client = (
-            KimiWebSearchClient(provider=scoring_provider)
-            if bool(cfg.get("enable_kimi_web_search", False))
-            else None
-        )
-        investigator_tools = ScoringInvestigatorTools(
-            conn,
-            decision_run_id=active_decision_run_id,
-            readme_client=GitHubReadmeClient(),
-            github_file_client=GitHubFileClient(),
-            page_client=PageFetchClient(),
-            web_search_client=scoring_web_search_client,
-            limits=InvestigatorToolLimits(
-                max_evidence_rows=int(cfg.get("max_evidence_rows_per_candidate", 80)),
-                max_github_file_chars=int(cfg.get("max_github_file_chars", 6000)),
-                max_homepage_chars=int(cfg.get("max_homepage_chars", 6000)),
-                max_web_results=int(cfg.get("max_web_results", 5)),
-            ),
-        )
-        investigator_limits = InvestigatorLimits(
-            max_investigation_turns=int(cfg.get("max_investigation_turns", 3)),
-            max_scoring_attempts=int(cfg.get("max_scoring_attempts", 3)),
-            max_tool_calls_per_candidate=int(
-                cfg.get("max_tool_calls_per_candidate", 8)
-            ),
-            max_web_search_calls_per_candidate=int(
-                cfg.get("max_web_search_calls_per_candidate", 1)
-            ),
-            max_github_file_calls_per_candidate=int(
-                cfg.get(
-                    "max_github_file_calls_per_candidate",
-                    cfg.get("max_repo_files_per_candidate", 3),
+        if scoring_concurrency > 1 and scoring_candidates:
+            worker_factory = scoring_provider_factory or (
+                lambda: KimiProvider(
+                    model=str(cfg.get("scoring_model") or DEFAULT_KIMI_SCORING_MODEL)
                 )
-            ),
-            max_homepage_fetches_per_candidate=int(
-                cfg.get(
-                    "max_homepage_fetches_per_candidate",
-                    cfg.get("max_pages_per_candidate", 1),
-                )
-            ),
-        )
-        for group in scoring_candidates:
-            try:
-                active_scoring_provider = CachedTelemetryLLMProvider(
-                    scoring_provider,
-                    conn=conn,
-                    feed_run_id=active_feed_run_id,
-                    group_id=group.group_id,
-                    stage="scoring",
-                    timeout_seconds=_optional_int(cfg.get("scoring_timeout_seconds")),
-                )
-                result = score_with_investigator(
-                    conn,
-                    feed_run_id=active_feed_run_id,
-                    groups=[group],
-                    provider=active_scoring_provider,
-                    tools=investigator_tools.available_tools(),
-                    limits=investigator_limits,
-                )
-                scored.extend(result)
-                record_stage_event(
-                    conn,
-                    feed_run_id=active_feed_run_id,
-                    group_id=group.group_id,
-                    stage="scoring",
-                    status="scoring_ok",
-                )
-            except Exception as exc:
-                record_stage_event(
-                    conn,
-                    feed_run_id=active_feed_run_id,
-                    group_id=group.group_id,
-                    stage="scoring",
-                    status="scoring_error",
-                    error=exc,
-                )
+            )
+            with ThreadPoolExecutor(max_workers=scoring_concurrency) as executor:
+                futures = [
+                    executor.submit(
+                        _score_group_worker,
+                        db_path,
+                        active_decision_run_id,
+                        active_feed_run_id,
+                        group,
+                        cfg,
+                        worker_factory,
+                    )
+                    for group in scoring_candidates
+                ]
+                for future in as_completed(futures):
+                    result = future.result()
+                    if result.get("result"):
+                        scored.append(result["result"])
+        else:
+            investigator_tools = _investigator_tools_for(
+                conn,
+                decision_run_id=active_decision_run_id,
+                scoring_provider=scoring_provider,
+                cfg=cfg,
+            )
+            investigator_limits = _investigator_limits_from_config(cfg)
+            for group in scoring_candidates:
+                try:
+                    active_scoring_provider = CachedTelemetryLLMProvider(
+                        scoring_provider,
+                        conn=conn,
+                        feed_run_id=active_feed_run_id,
+                        group_id=group.group_id,
+                        stage="scoring",
+                        timeout_seconds=_optional_int(
+                            cfg.get("scoring_timeout_seconds")
+                        ),
+                    )
+                    result = score_with_investigator(
+                        conn,
+                        feed_run_id=active_feed_run_id,
+                        groups=[group],
+                        provider=active_scoring_provider,
+                        tools=investigator_tools.available_tools(),
+                        limits=investigator_limits,
+                    )
+                    scored.extend(result)
+                    record_stage_event(
+                        conn,
+                        feed_run_id=active_feed_run_id,
+                        group_id=group.group_id,
+                        stage="scoring",
+                        status="scoring_ok",
+                    )
+                except Exception as exc:
+                    record_stage_event(
+                        conn,
+                        feed_run_id=active_feed_run_id,
+                        group_id=group.group_id,
+                        stage="scoring",
+                        status="scoring_error",
+                        error=exc,
+                    )
         for rank, row in enumerate(
             sorted(scored, key=lambda item: -float(item["l2_score"])), start=1
         ):
@@ -588,6 +584,125 @@ def _optional_int(value: Any) -> int | None:
     return int(value)
 
 
+def _active_scoring_concurrency(
+    *, provider_injected: bool, cfg: dict[str, Any]
+) -> int:
+    if provider_injected:
+        return 1
+    return max(1, int(cfg.get("scoring_concurrency", 5)))
+
+
+def _investigator_limits_from_config(cfg: dict[str, Any]) -> InvestigatorLimits:
+    return InvestigatorLimits(
+        max_investigation_turns=int(cfg.get("max_investigation_turns", 3)),
+        max_scoring_attempts=int(cfg.get("max_scoring_attempts", 3)),
+        max_tool_calls_per_candidate=int(cfg.get("max_tool_calls_per_candidate", 8)),
+        max_web_search_calls_per_candidate=int(
+            cfg.get("max_web_search_calls_per_candidate", 1)
+        ),
+        max_github_file_calls_per_candidate=int(
+            cfg.get(
+                "max_github_file_calls_per_candidate",
+                cfg.get("max_repo_files_per_candidate", 3),
+            )
+        ),
+        max_homepage_fetches_per_candidate=int(
+            cfg.get(
+                "max_homepage_fetches_per_candidate",
+                cfg.get("max_pages_per_candidate", 1),
+            )
+        ),
+    )
+
+
+def _investigator_tools_for(
+    conn: sqlite3.Connection,
+    *,
+    decision_run_id: str,
+    scoring_provider: Any,
+    cfg: dict[str, Any],
+) -> ScoringInvestigatorTools:
+    scoring_web_search_timeout = _optional_int(cfg.get("web_search_timeout_seconds"))
+    if scoring_web_search_timeout is not None and hasattr(scoring_provider, "timeout"):
+        setattr(scoring_provider, "timeout", scoring_web_search_timeout)
+    scoring_web_search_client = (
+        KimiWebSearchClient(provider=scoring_provider)
+        if bool(cfg.get("enable_kimi_web_search", False))
+        else None
+    )
+    return ScoringInvestigatorTools(
+        conn,
+        decision_run_id=decision_run_id,
+        readme_client=GitHubReadmeClient(),
+        github_file_client=GitHubFileClient(),
+        page_client=PageFetchClient(),
+        web_search_client=scoring_web_search_client,
+        limits=InvestigatorToolLimits(
+            max_evidence_rows=int(cfg.get("max_evidence_rows_per_candidate", 80)),
+            max_github_file_chars=int(cfg.get("max_github_file_chars", 6000)),
+            max_homepage_chars=int(cfg.get("max_homepage_chars", 6000)),
+            max_web_results=int(cfg.get("max_web_results", 5)),
+        ),
+    )
+
+
+def _score_group_worker(
+    db_path: Path,
+    decision_run_id: str,
+    feed_run_id: str,
+    group: Any,
+    cfg: dict[str, Any],
+    scoring_provider_factory: Callable[[], Any],
+) -> dict[str, Any]:
+    conn = sqlite3.connect(db_path, timeout=30)
+    init_decision_db(conn)
+    try:
+        scoring_provider = scoring_provider_factory()
+        active_scoring_provider = CachedTelemetryLLMProvider(
+            scoring_provider,
+            conn=conn,
+            feed_run_id=feed_run_id,
+            group_id=group.group_id,
+            stage="scoring",
+            timeout_seconds=_optional_int(cfg.get("scoring_timeout_seconds")),
+        )
+        result = score_with_investigator(
+            conn,
+            feed_run_id=feed_run_id,
+            groups=[group],
+            provider=active_scoring_provider,
+            tools=_investigator_tools_for(
+                conn,
+                decision_run_id=decision_run_id,
+                scoring_provider=scoring_provider,
+                cfg=cfg,
+            ).available_tools(),
+            limits=_investigator_limits_from_config(cfg),
+        )[0]
+        record_stage_event(
+            conn,
+            feed_run_id=feed_run_id,
+            group_id=group.group_id,
+            stage="scoring",
+            status="scoring_ok",
+        )
+        conn.commit()
+        return {"result": result}
+    except Exception as exc:
+        record_stage_event(
+            conn,
+            feed_run_id=feed_run_id,
+            group_id=group.group_id,
+            stage="scoring",
+            status="scoring_error",
+            error=exc,
+        )
+        conn.commit()
+        return {"result": None, "error": str(exc)[:800]}
+    finally:
+        conn.close()
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run Layer 2 Kimi Feed")
     parser.add_argument("--decision-run-id", default=None)
@@ -609,6 +724,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--deepdive-model", default=DEFAULT_KIMI_DEEPDIVE_MODEL)
     parser.add_argument("--enable-kimi-web-search", action="store_true")
     parser.add_argument("--max-total-scoring-candidates", type=int, default=None)
+    parser.add_argument("--scoring-concurrency", type=int, default=5)
     parser.add_argument("--scout-timeout-seconds", type=int, default=None)
     parser.add_argument("--scoring-timeout-seconds", type=int, default=None)
     parser.add_argument("--deepdive-timeout-seconds", type=int, default=None)
@@ -647,6 +763,7 @@ def config_from_args(args: argparse.Namespace) -> dict[str, Any]:
         "deepdive_model": args.deepdive_model,
         "enable_kimi_web_search": args.enable_kimi_web_search,
         "max_total_scoring_candidates": args.max_total_scoring_candidates,
+        "scoring_concurrency": args.scoring_concurrency,
         "scout_timeout_seconds": args.scout_timeout_seconds,
         "scoring_timeout_seconds": args.scoring_timeout_seconds,
         "deepdive_timeout_seconds": args.deepdive_timeout_seconds,
