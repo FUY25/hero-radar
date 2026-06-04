@@ -499,7 +499,49 @@ def default_scoring_investigator_eval_cases() -> list[dict[str, Any]]:
                 "summary": (
                     "Self-improving agent framework with persistent memory, "
                     "skill creation, cross-session recall, automations, and "
-                    "terminal, messaging, and IDE surfaces."
+                    "terminal, messaging, and IDE surfaces. Treat this as a "
+                    "self-improving workspace, not a generic chatbot: the agent "
+                    "can create reusable skills, remember project context across "
+                    "sessions, and curate the right tools/skills for a task."
+                ),
+                "readme_context": (
+                    "Workflow evidence: persistent memory stores durable user and "
+                    "project context; skill creation converts repeated procedures "
+                    "into reusable capabilities; a self-improving workspace can "
+                    "schedule automations and recover context across terminal, "
+                    "messaging, and IDE sessions; curator capability selects and "
+                    "organizes relevant tools and skills for the active job."
+                ),
+                "evidence_rows": [
+                    {
+                        "family": "github",
+                        "metric": "workflow_surface",
+                        "value": "terminal, messaging, and IDE surfaces with persistent memory",
+                        "label": "cross-session agent workspace",
+                    },
+                    {
+                        "family": "github",
+                        "metric": "skill_creation",
+                        "value": "agent creates reusable skills from repeated workflows",
+                        "label": "skill creation workflow unlock",
+                    },
+                    {
+                        "family": "github",
+                        "metric": "curator_capability",
+                        "value": "curates and invokes task-relevant skills/tools in the workspace",
+                        "label": "curator capability",
+                    },
+                ],
+                "source_context": [
+                    {
+                        "source": "github",
+                        "title": "NousResearch/hermes-agent",
+                        "url": "https://github.com/NousResearch/hermes-agent",
+                    }
+                ],
+                "known_scope_note": (
+                    "Do not downscore merely because live browsing is disabled in "
+                    "this smoke: the supplied workflow evidence is the context to use."
                 ),
             },
             object_type="repo",
@@ -523,9 +565,48 @@ def default_scoring_investigator_eval_cases() -> list[dict[str, Any]]:
                 "name": "HeyClicky",
                 "canonical_link": "https://www.heyclicky.com/",
                 "summary": (
-                    "Mac-native screen-aware assistant near the cursor that "
-                    "listens to voice, observes the active app, teaches creative "
-                    "and developer workflows, and can dispatch background agents."
+                    "Mac-native cursor-adjacent, screen-aware assistant for "
+                    "desktop workflows. It sits near the cursor, listens to voice, "
+                    "observes the active app/screen, teaches creative and developer "
+                    "workflows, and can dispatch background agents."
+                ),
+                "homepage_context": (
+                    "Workflow evidence: cursor-adjacent overlay uses current "
+                    "screen/application context instead of a separate chat pane; "
+                    "voice interaction lets users ask for help while staying inside "
+                    "desktop tools; screen-aware guidance targets design, creative, "
+                    "and developer apps where the next action depends on visible UI."
+                ),
+                "evidence_rows": [
+                    {
+                        "family": "homepage",
+                        "metric": "interaction_model",
+                        "value": "cursor-adjacent screen-aware voice desktop assistant",
+                        "label": "screen-aware desktop interaction",
+                    },
+                    {
+                        "family": "homepage",
+                        "metric": "workflow_unlock",
+                        "value": "helps users act inside active desktop software rather than copy context into chat",
+                        "label": "desktop workflow evidence",
+                    },
+                    {
+                        "family": "homepage",
+                        "metric": "target_users",
+                        "value": "creative, developer, and advanced desktop-tool users",
+                        "label": "specific end-user jobs",
+                    },
+                ],
+                "source_context": [
+                    {
+                        "source": "homepage",
+                        "title": "HeyClicky screen-aware desktop assistant",
+                        "url": "https://www.heyclicky.com/",
+                    }
+                ],
+                "known_scope_note": (
+                    "Do not treat low public momentum as low product value when "
+                    "the interaction model itself is the evaluated workflow wedge."
                 ),
             },
             object_type="product",
@@ -674,9 +755,19 @@ def default_scoring_investigator_eval_cases() -> list[dict[str, Any]]:
                 "name": "Screen-aware spreadsheet operator",
                 "canonical_link": "https://example.com/sheet-operator",
                 "summary": (
-                    "Gray-zone utility that watches the current spreadsheet, "
-                    "understands selected cells, plans multi-step cleanup, and "
-                    "executes formulas and edits with user confirmation."
+                    "Gray-zone utility with explicit workflow unlock evidence: it "
+                    "watches the current spreadsheet, understands selected cells, "
+                    "plans multi-step cleanup, and executes formulas and edits with "
+                    "user confirmation."
+                ),
+                "workflow_evidence": [
+                    "Screen-aware spreadsheet context identifies selected cells and visible table structure.",
+                    "Multi-step cleanup plan can normalize values, add formulas, and apply edits in sequence.",
+                    "User confirmation gates execution so it is an operator workflow, not an unguided macro.",
+                ],
+                "negative_control": (
+                    "Without this explicit workflow unlock, an ordinary dashboard, "
+                    "editor, or calculator should remain low or score_only."
                 ),
             },
             object_type="product",
@@ -866,7 +957,11 @@ def run_scoring_investigator_kimi_eval(
                         "without explicit workflow unlock. Treat candidate "
                         "evidence_rows, source_context, aliases, and readme_context "
                         "as available eval evidence; do not mark gaps solely because "
-                        "live browsing is disabled."
+                        "live browsing is disabled. Do not require public adoption "
+                        "momentum for a high or medium score when the supplied "
+                        "context already gives a concrete workflow unlock, technical "
+                        "mechanism, and product/tool wedge; reflect limited adoption "
+                        "as momentum/caveat rather than collapsing confidence."
                     ),
                     "schema": _scoring_eval_schema(),
                     "rubric": {

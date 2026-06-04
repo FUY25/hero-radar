@@ -265,6 +265,38 @@ class Layer2EvalTest(unittest.TestCase):
         self.assertIn("npm", context)
         self.assertIn("HN", context)
 
+    def test_scoring_smoke_context_has_required_positive_evidence(self) -> None:
+        import json
+
+        from pipeline.decision.run_layer2_evals import (
+            default_scoring_investigator_eval_cases,
+        )
+
+        cases = {
+            case["name"]: json.dumps(case["candidate"], sort_keys=True)
+            for case in default_scoring_investigator_eval_cases()
+        }
+
+        hermes = cases["Hermes Agent"].lower()
+        self.assertIn("persistent memory", hermes)
+        self.assertIn("skill creation", hermes)
+        self.assertIn("self-improving workspace", hermes)
+        self.assertIn("curator", hermes)
+        self.assertIn("workflow evidence", hermes)
+
+        heyclicky = cases["HeyClicky"].lower()
+        self.assertIn("cursor-adjacent", heyclicky)
+        self.assertIn("screen-aware", heyclicky)
+        self.assertIn("voice", heyclicky)
+        self.assertIn("desktop", heyclicky)
+        self.assertIn("workflow evidence", heyclicky)
+
+        gray_zone = cases["Screen-aware spreadsheet operator"].lower()
+        self.assertIn("explicit workflow unlock", gray_zone)
+        self.assertIn("selected cells", gray_zone)
+        self.assertIn("multi-step cleanup", gray_zone)
+        self.assertIn("user confirmation", gray_zone)
+
     def test_gray_zone_utility_needs_explicit_workflow_unlock(self) -> None:
         from pipeline.decision.run_layer2_evals import (
             default_scoring_investigator_eval_cases,
