@@ -703,7 +703,11 @@ def _default_scoring_investigator_smoke_cases() -> list[dict[str, Any]]:
     }
     return [
         cases_by_name["OpenClaw"],
+        cases_by_name["Hermes Agent"],
+        cases_by_name["HeyClicky"],
         cases_by_name["Generic AI chatbot"],
+        cases_by_name["Standalone model release"],
+        cases_by_name["Screen-aware spreadsheet operator"],
     ]
 
 
@@ -832,7 +836,7 @@ def run_scoring_investigator_kimi_eval(
     provider: Any | None = None,
     model: str = "kimi-k2.5",
     cases: list[dict[str, Any]] | None = None,
-    limit: int = 2,
+    limit: int = 6,
 ) -> dict[str, Any]:
     active_provider = provider or KimiProvider(model=model, timeout=90, max_retries=0)
     if not getattr(active_provider, "api_key", ""):
@@ -1233,7 +1237,7 @@ def main() -> int:
     parser.add_argument("--scout-v2-kimi-eval", action="store_true")
     parser.add_argument("--wide-scout-kimi-eval", action="store_true")
     parser.add_argument("--model", default="kimi-k2.5")
-    parser.add_argument("--limit", type=int, default=2)
+    parser.add_argument("--limit", type=int, default=6)
     args = parser.parse_args()
     if args.handshake:
         result = run_handshake(model=args.model)

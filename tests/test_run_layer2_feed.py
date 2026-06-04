@@ -119,6 +119,33 @@ class Layer2RunnerTest(unittest.TestCase):
             "l2_20260531T123456",
         )
 
+    def test_pre_full_run_helpers_create_explicit_ids_and_backup_db(self):
+        from pipeline.decision.run_layer2_feed import (
+            backup_sqlite_db,
+            bounded_layer2_run_id,
+            route_react_smoke_run_id,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "hero_radar.sqlite"
+            db_path.write_bytes(b"sqlite-bytes")
+
+            backup_path = backup_sqlite_db(
+                db_path=db_path, now="2026-06-04T12:34:56Z"
+            )
+
+            self.assertEqual(
+                route_react_smoke_run_id("2026-06-04T12:34:56Z"),
+                "l2_route_react_smoke_20260604T123456Z",
+            )
+            self.assertEqual(
+                bounded_layer2_run_id(30, "2026-06-04T12:34:56Z"),
+                "l2_bounded_30_20260604T123456Z",
+            )
+            self.assertEqual(backup_path.name, "hero_radar.sqlite.20260604T123456Z.bak")
+            self.assertEqual(backup_path.read_bytes(), b"sqlite-bytes")
+            self.assertEqual(db_path.read_bytes(), b"sqlite-bytes")
+
     def test_run_layer2_with_fake_provider_writes_feed_run(self):
         from pipeline.decision.llm_provider import FakeLLMProvider
         from pipeline.decision.run_layer2_feed import run_layer2_feed

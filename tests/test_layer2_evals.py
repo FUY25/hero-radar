@@ -398,20 +398,27 @@ class Layer2EvalTest(unittest.TestCase):
             def complete_json(self, **kwargs):
                 name = kwargs["input_payload"]["candidate"]["name"]
                 self.names.append(name)
-                is_high = name == "OpenClaw"
+                is_high = name in {"OpenClaw", "Hermes Agent", "HeyClicky"}
+                is_medium = name == "Screen-aware spreadsheet operator"
                 return {
                     "action": "final",
                     "score": {
-                        "object_type": "repo" if is_high else "product",
-                        "is_product_or_repo": True,
+                        "object_type": (
+                            "repo"
+                            if name in {"OpenClaw", "Hermes Agent"}
+                            else "product"
+                            if name != "Standalone model release"
+                            else "model_release"
+                        ),
+                        "is_product_or_repo": name != "Standalone model release",
                         "axes": {
-                            "workflow_shift": 88 if is_high else 30,
-                            "technical_substance": 86 if is_high else 25,
-                            "product_market_fit": 82 if is_high else 40,
-                            "momentum": 72 if is_high else 35,
-                            "confidence": 82 if is_high else 74,
-                            "risk_penalty": 4 if is_high else 2,
-                            "derivative_news_penalty": 0 if is_high else 8,
+                            "workflow_shift": 88 if is_high else 84 if is_medium else 30,
+                            "technical_substance": 86 if is_high else 65 if is_medium else 25,
+                            "product_market_fit": 82 if is_high else 78 if is_medium else 40,
+                            "momentum": 72 if is_high else 60 if is_medium else 35,
+                            "confidence": 82 if is_high else 80 if is_medium else 74,
+                            "risk_penalty": 4 if is_high else 5 if is_medium else 2,
+                            "derivative_news_penalty": 0 if is_high or is_medium else 8,
                         },
                         "supporting_evidence": ["Eval evidence"],
                         "negative_evidence": [],
@@ -420,7 +427,7 @@ class Layer2EvalTest(unittest.TestCase):
                         "rationale_short": "Eval rationale",
                         "topic_tags": ["eval"],
                         "caveats": [],
-                        "should_print": is_high,
+                        "should_print": is_high or is_medium,
                     },
                 }
 
@@ -429,7 +436,17 @@ class Layer2EvalTest(unittest.TestCase):
         result = run_scoring_investigator_kimi_eval(provider=provider)
 
         self.assertTrue(result["ok"])
-        self.assertEqual(provider.names, ["OpenClaw", "Generic AI chatbot"])
+        self.assertEqual(
+            provider.names,
+            [
+                "OpenClaw",
+                "Hermes Agent",
+                "HeyClicky",
+                "Generic AI chatbot",
+                "Standalone model release",
+                "Screen-aware spreadsheet operator",
+            ],
+        )
 
 
 if __name__ == "__main__":

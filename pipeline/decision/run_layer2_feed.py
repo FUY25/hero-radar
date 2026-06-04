@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
+import shutil
 import sqlite3
 import sys
 from pathlib import Path
@@ -63,6 +64,34 @@ def default_feed_run_id(now: str | None = None) -> str:
     value = now or utc_now()
     compact = value.replace("-", "").replace(":", "").rstrip("Z")
     return f"l2_{compact}"
+
+
+def route_react_smoke_run_id(now: str | None = None) -> str:
+    return f"l2_route_react_smoke_{_compact_utc_timestamp(now)}"
+
+
+def bounded_layer2_run_id(candidate_count: int = 30, now: str | None = None) -> str:
+    return f"l2_bounded_{int(candidate_count)}_{_compact_utc_timestamp(now)}"
+
+
+def backup_sqlite_db(*, db_path: Path = DB_PATH, now: str | None = None) -> Path:
+    if not db_path.exists():
+        raise FileNotFoundError(f"SQLite database not found: {db_path}")
+    backup_path = db_path.with_name(
+        f"{db_path.name}.{_compact_utc_timestamp(now)}.bak"
+    )
+    shutil.copy2(db_path, backup_path)
+    return backup_path
+
+
+def _compact_utc_timestamp(now: str | None = None) -> str:
+    value = now or utc_now()
+    compact = value.replace("-", "").replace(":", "")
+    if compact.endswith("+0000"):
+        compact = f"{compact[:-5]}Z"
+    if not compact.endswith("Z"):
+        compact = f"{compact.rstrip('Z')}Z"
+    return compact
 
 
 def latest_decision_run(conn: sqlite3.Connection) -> str:
