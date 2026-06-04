@@ -286,7 +286,16 @@ class Layer2RunnerTest(unittest.TestCase):
             provider = FakeLLMProvider(
                 [
                     self.valid_score_response("Focus"),
-                    self.valid_score_response("Backlog"),
+                    self.valid_score_response(
+                        "Backlog",
+                        axes={
+                            "workflow_shift": 60,
+                            "technical_substance": 60,
+                            "product_market_fit": 60,
+                            "momentum": 60,
+                            "confidence": 60,
+                        },
+                    ),
                     self.valid_score_response(
                         "Weak",
                         should_print=False,
@@ -325,6 +334,7 @@ class Layer2RunnerTest(unittest.TestCase):
                 config={
                     "max_scored_candidates": 4,
                     "brief_min_score": 70,
+                    "score_only_min_score": 50,
                     "brief_target_count": 1,
                     "brief_max_count": 1,
                 },
@@ -348,6 +358,17 @@ class Layer2RunnerTest(unittest.TestCase):
                     ("l2-routes",),
                 ).fetchone()[0]
             )
+            route_rows = conn.execute(
+                """
+                select g.canonical_name, e.metadata_json
+                from l2_stage_events e
+                join l2_candidate_groups g
+                  on g.feed_run_id = e.feed_run_id and g.group_id = e.group_id
+                where e.feed_run_id = ? and e.stage = ? and e.status = ?
+                order by g.canonical_name
+                """,
+                ("l2-routes", "route", "route_decision"),
+            ).fetchall()
             conn.close()
 
         self.assertEqual(summary["scored"], 4)
@@ -368,6 +389,15 @@ class Layer2RunnerTest(unittest.TestCase):
                 "score_only": 1,
                 "suppress_or_low": 2,
                 "candidate_error": 0,
+            },
+        )
+        self.assertEqual(
+            {name: json.loads(metadata)["route"] for name, metadata in route_rows},
+            {
+                "a-focus/repo": "score_plus_deepdive",
+                "b-score-only/repo": "score_only",
+                "c-weak/repo": "suppress_or_low",
+                "d-news/repo": "suppress_or_low",
             },
         )
 
@@ -509,6 +539,15 @@ class Layer2RunnerTest(unittest.TestCase):
                 """,
                 ("l2-errors", "diagnostics", "candidate_error"),
             ).fetchone()[0]
+            route_errors = conn.execute(
+                """
+                select count(*)
+                from l2_stage_events
+                where feed_run_id = ? and stage = ? and status = ?
+                  and metadata_json like ?
+                """,
+                ("l2-errors", "route", "route_decision", "%candidate_error%"),
+            ).fetchone()[0]
             conn.close()
 
             self.assertEqual(run_row[0], "ok_with_errors")
@@ -516,6 +555,7 @@ class Layer2RunnerTest(unittest.TestCase):
             self.assertIn("scoring_ok", statuses)
             self.assertIn("error_counts", run_row[1])
             self.assertEqual(diagnostic_count, 1)
+            self.assertEqual(route_errors, 1)
 
     def test_run_layer2_applies_total_scoring_cap(self):
         from pipeline.decision.llm_provider import FakeLLMProvider
@@ -745,6 +785,8 @@ class Layer2RunnerTest(unittest.TestCase):
                 "7",
                 "--max-total-scoring-candidates",
                 "2",
+                "--score-only-min-score",
+                "55",
             ]
         )
         config = config_from_args(args)
@@ -754,10 +796,12 @@ class Layer2RunnerTest(unittest.TestCase):
         self.assertTrue(config["enable_deepdive_briefs"])
         self.assertEqual(config["scout_timeout_seconds"], 7)
         self.assertEqual(config["max_total_scoring_candidates"], 2)
+        self.assertEqual(config["score_only_min_score"], 55)
 
         enabled = config_from_args(parse_args(["--enable-edge-scout"]))
         self.assertTrue(enabled["enable_edge_scout"])
         default_config = config_from_args(parse_args([]))
         self.assertEqual(default_config["max_deepdives_per_run"], 0)
         self.assertEqual(default_config["brief_target_count"], 8)
+        self.assertEqual(default_config["score_only_min_score"], 50)
         self.assertEqual(default_config["scoring_concurrency"], 5)

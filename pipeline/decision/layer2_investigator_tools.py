@@ -106,13 +106,15 @@ class ScoringInvestigatorTools:
         self.limits = limits or InvestigatorToolLimits()
 
     def available_tools(self) -> dict[str, ToolFn]:
-        return {
+        tools = {
             "read_evidence_rows": self.read_evidence_rows,
             "fetch_github_readme": self.fetch_github_readme,
             "fetch_github_file": self.fetch_github_file,
             "fetch_homepage_or_docs": self.fetch_homepage_or_docs,
-            "web_search": self.web_search,
         }
+        if self.web_search_client is not None:
+            tools["web_search"] = self.web_search
+        return tools
 
     def read_evidence_rows(self, arguments: dict[str, Any]) -> dict[str, Any]:
         entity_id = str(arguments.get("entity_id") or "")
@@ -147,7 +149,7 @@ class ScoringInvestigatorTools:
         }
 
     def fetch_github_readme(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        repo_key = github_repo_key_from_link(f"github:{arguments.get('repo_key')}")
+        repo_key = _repo_key_from_arguments(arguments)
         if not repo_key:
             return {"status": "rejected", "error": "valid repo_key is required"}
         if self.readme_client is None:
@@ -158,7 +160,7 @@ class ScoringInvestigatorTools:
         return {"status": "ok", **response}
 
     def fetch_github_file(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        repo_key = github_repo_key_from_link(f"github:{arguments.get('repo_key')}")
+        repo_key = _repo_key_from_arguments(arguments)
         path = str(arguments.get("path") or "").strip().strip("/")
         if not repo_key:
             return {"status": "rejected", "error": "valid repo_key is required"}
@@ -304,6 +306,29 @@ def validate_public_http_url(url: str) -> tuple[bool, str]:
     ):
         return False, "private or local IP addresses are not allowed"
     return True, ""
+
+
+def _repo_key_from_arguments(arguments: dict[str, Any]) -> str | None:
+    candidates: list[str] = []
+    owner = str(arguments.get("owner") or "").strip()
+    repo = str(arguments.get("repo") or "").strip()
+    if owner and repo and "/" not in repo:
+        candidates.append(f"{owner}/{repo}")
+    for key in ["repo_key", "repo_full_name", "full_name", "repo"]:
+        value = str(arguments.get(key) or "").strip()
+        if value:
+            candidates.append(value)
+    for key in ["url", "github_url", "html_url"]:
+        value = str(arguments.get(key) or "").strip()
+        if value:
+            candidates.append(value)
+    for candidate in candidates:
+        repo_key = github_repo_key_from_link(candidate)
+        if not repo_key:
+            repo_key = github_repo_key_from_link(f"github:{candidate}")
+        if repo_key:
+            return repo_key
+    return None
 
 
 def _tool_cache_key(

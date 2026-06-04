@@ -53,13 +53,18 @@ class InvestigatorToolsTest(unittest.TestCase):
         self.addCleanup(conn.close)
         return conn
 
-    def test_tool_registry_exposes_only_primitive_tools(self) -> None:
+    def test_tool_registry_exposes_only_configured_primitive_tools(self) -> None:
         from pipeline.decision.layer2_investigator_tools import (
             ScoringInvestigatorTools,
         )
 
         conn = self.make_conn()
         tools = ScoringInvestigatorTools(conn, decision_run_id="decision-run")
+        with_search = ScoringInvestigatorTools(
+            conn,
+            decision_run_id="decision-run",
+            web_search_client=FakeSearchClient([]),
+        )
 
         self.assertEqual(
             sorted(tools.available_tools()),
@@ -68,9 +73,9 @@ class InvestigatorToolsTest(unittest.TestCase):
                 "fetch_github_readme",
                 "fetch_homepage_or_docs",
                 "read_evidence_rows",
-                "web_search",
             ],
         )
+        self.assertIn("web_search", with_search.available_tools())
 
     def test_read_evidence_rows_returns_bounded_rows(self) -> None:
         from pipeline.decision.layer2_investigator_tools import (
@@ -143,6 +148,27 @@ class InvestigatorToolsTest(unittest.TestCase):
         self.assertLessEqual(len(first["excerpt"]), 8000)
         self.assertEqual(client.calls, ["owner/repo"])
 
+    def test_fetch_github_readme_accepts_common_repo_argument_shapes(self) -> None:
+        from pipeline.decision.layer2_investigator_tools import (
+            ScoringInvestigatorTools,
+        )
+
+        conn = self.make_conn()
+        client = FakeReadmeClient("README")
+        tools = ScoringInvestigatorTools(
+            conn, decision_run_id="decision-run", readme_client=client
+        )
+        fetch = tools.available_tools()["fetch_github_readme"]
+
+        self.assertEqual(fetch({"owner": "Owner", "repo": "Repo"})["status"], "ok")
+        self.assertEqual(fetch({"repo": "Other/Project"})["status"], "ok")
+        self.assertEqual(fetch({"repo_full_name": "Third/Repo"})["status"], "ok")
+
+        self.assertEqual(
+            client.calls,
+            ["owner/repo", "other/project", "third/repo"],
+        )
+
     def test_fetch_github_file_is_path_bounded_and_cached(self) -> None:
         from pipeline.decision.layer2_investigator_tools import (
             ScoringInvestigatorTools,
@@ -169,6 +195,44 @@ class InvestigatorToolsTest(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertLessEqual(len(first["excerpt"]), 6000)
         self.assertEqual(client.calls, [("owner/repo", "package.json")])
+
+    def test_fetch_github_file_accepts_common_repo_argument_shapes(self) -> None:
+        from pipeline.decision.layer2_investigator_tools import (
+            ScoringInvestigatorTools,
+        )
+
+        conn = self.make_conn()
+        client = FakeGitHubFileClient("package json")
+        tools = ScoringInvestigatorTools(
+            conn, decision_run_id="decision-run", github_file_client=client
+        )
+        fetch = tools.available_tools()["fetch_github_file"]
+
+        self.assertEqual(
+            fetch({"owner": "Owner", "repo": "Repo", "path": "package.json"})[
+                "status"
+            ],
+            "ok",
+        )
+        self.assertEqual(
+            fetch({"repo": "Other/Project", "path": "package.json"})["status"],
+            "ok",
+        )
+        self.assertEqual(
+            fetch({"repo_full_name": "Third/Repo", "path": "package.json"})[
+                "status"
+            ],
+            "ok",
+        )
+
+        self.assertEqual(
+            client.calls,
+            [
+                ("owner/repo", "package.json"),
+                ("other/project", "package.json"),
+                ("third/repo", "package.json"),
+            ],
+        )
 
     def test_fetch_homepage_rejects_private_urls_and_caches_public_pages(self) -> None:
         from pipeline.decision.layer2_investigator_tools import (

@@ -42,6 +42,11 @@ You have at most 3 investigation turns. Prefer final scoring when enough
 evidence exists. If evidence remains weak after the budget, score with lower
 confidence and list known gaps.
 
+Use exact primitive tool argument names when requesting tools. For GitHub tools,
+prefer {"repo_key":"owner/repo"}; compatible aliases may be normalized, but
+repo_key is the stable contract. For fetch_github_file also include a safe
+relative path such as package.json, README.md, docs/index.md, or examples/readme.md.
+
 Reward real workflow unlocks, non-obvious technical mechanisms, concrete
 product/repo/tool wedges, and credible momentum attached to substance. Do not
 dismiss messy or gray-zone utilities solely because the category looks
@@ -199,7 +204,7 @@ def classify_scored_route(
     *,
     selected_group_ids: set[str] | None = None,
     min_score: float = 70,
-    low_score_threshold: float = 50,
+    score_only_min_score: float = 50,
 ) -> str:
     if row.get("error") or row.get("status") in {"candidate_error", "scoring_error"}:
         return ROUTE_CANDIDATE_ERROR
@@ -208,13 +213,13 @@ def classify_scored_route(
     if not _is_product_or_repo_row(row):
         return ROUTE_SUPPRESS_OR_LOW
     score = float(row.get("l2_score") or 0)
-    if score < float(low_score_threshold):
-        return ROUTE_SUPPRESS_OR_LOW
     group = row.get("group")
     group_id = str(getattr(group, "group_id", row.get("group_id", "")))
     if selected_group_ids and group_id in selected_group_ids:
         return ROUTE_SCORE_PLUS_DEEPDIVE
     if score >= float(min_score):
+        return ROUTE_SCORE_ONLY
+    if score >= float(score_only_min_score):
         return ROUTE_SCORE_ONLY
     return ROUTE_SUPPRESS_OR_LOW
 
@@ -375,63 +380,96 @@ def _score_one_group(
     total_tool_calls = 0
     final_response: dict[str, Any] | None = None
 
-    for turn_index in range(1, max(1, limits.max_investigation_turns) + 1):
-        payload = {
-            "group_id": group.group_id,
-            "candidate": group.context,
-            "candidate_identity": _candidate_identity(group),
-            "state": state,
-            "available_tools": sorted(tools),
-            "limits": _limits_payload(limits),
-            "turn_index": turn_index,
-            "schema": _turn_schema(),
-        }
-        response = provider.complete_json(
-            task="layer2_scoring_investigator_turn",
-            prompt_version=prompt_version,
-            input_payload=payload,
-            system_prompt=SCORING_INVESTIGATOR_SYSTEM_PROMPT,
-        )
-        action = str(response.get("action") or "").strip()
-        turn_trace.append(
-            {
-                "turn": turn_index,
-                "action": action,
-                "information_need": str(response.get("information_need") or ""),
+    try:
+        for turn_index in range(1, max(1, limits.max_investigation_turns) + 1):
+            payload = {
+                "group_id": group.group_id,
+                "candidate": group.context,
+                "candidate_identity": _candidate_identity(group),
+                "state": state,
+                "available_tools": sorted(tools),
+                "limits": _limits_payload(limits),
+                "turn_index": turn_index,
+                "schema": _turn_schema(),
             }
-        )
-        if action == "final":
-            final_response = response
-            break
-        if action != "use_tools":
-            final_response = response
-            break
-        requests = response.get("tool_requests")
-        if not isinstance(requests, list):
-            requests = []
-        for request in requests:
-            trace_row, total_tool_calls = _run_tool_request(
-                request if isinstance(request, dict) else {},
-                tools=tools,
-                limits=limits,
-                tool_counts=tool_counts,
-                total_tool_calls=total_tool_calls,
+            response = provider.complete_json(
+                task="layer2_scoring_investigator_turn",
+                prompt_version=prompt_version,
+                input_payload=payload,
+                system_prompt=SCORING_INVESTIGATOR_SYSTEM_PROMPT,
             )
-            tool_trace.append(trace_row)
-        state["tool_trace"] = tool_trace
+            action = str(response.get("action") or "").strip()
+            turn_trace.append(
+                {
+                    "turn": turn_index,
+                    "action": action,
+                    "information_need": str(response.get("information_need") or ""),
+                }
+            )
+            if action == "final":
+                final_response = response
+                break
+            if action != "use_tools":
+                final_response = response
+                break
+            requests = response.get("tool_requests")
+            if not isinstance(requests, list):
+                requests = []
+            for request in requests:
+                trace_row, total_tool_calls = _run_tool_request(
+                    request if isinstance(request, dict) else {},
+                    tools=tools,
+                    limits=limits,
+                    tool_counts=tool_counts,
+                    total_tool_calls=total_tool_calls,
+                )
+                tool_trace.append(trace_row)
+            state["tool_trace"] = tool_trace
 
-    if final_response is None:
-        raise ValueError("scoring investigator did not produce final score")
-    normalized = _validate_or_repair_final(
-        provider,
-        prompt_version=prompt_version,
-        group=group,
-        state=state,
-        turn_trace=turn_trace,
-        tool_trace=tool_trace,
-        response=final_response,
-        limits=limits,
-    )
+        if final_response is None:
+            final_response = {
+                "action": "final",
+                "score": {},
+                "information_need": (
+                    "Investigation turn budget exhausted without final score."
+                ),
+            }
+        normalized = _validate_or_repair_final(
+            provider,
+            prompt_version=prompt_version,
+            group=group,
+            state=state,
+            turn_trace=turn_trace,
+            tool_trace=tool_trace,
+            response=final_response,
+            limits=limits,
+        )
+    except Exception as exc:
+        cache_payload = {
+            "group_id": group.group_id,
+            "evidence_hash": group.evidence_hash,
+            "turn_trace": turn_trace,
+            "tool_trace": tool_trace,
+            "status": "error",
+            "error_type": type(exc).__name__,
+            "error": sanitize_text(exc),
+        }
+        cache_key = _cache_key(
+            provider.provider_name, provider.model, prompt_version, cache_payload
+        )
+        _persist_scoring_investigation(
+            conn,
+            feed_run_id=feed_run_id,
+            group_id=group.group_id,
+            status="error",
+            turn_trace=turn_trace,
+            tool_trace=tool_trace,
+            provider=provider,
+            prompt_version=prompt_version,
+            cache_key=cache_key,
+        )
+        conn.commit()
+        raise
     cache_payload = {
         "group_id": group.group_id,
         "evidence_hash": group.evidence_hash,
@@ -464,6 +502,32 @@ def _score_one_group(
             cache_key,
         ),
     )
+    _persist_scoring_investigation(
+        conn,
+        feed_run_id=feed_run_id,
+        group_id=group.group_id,
+        status="ok",
+        turn_trace=turn_trace,
+        tool_trace=tool_trace,
+        provider=provider,
+        prompt_version=prompt_version,
+        cache_key=cache_key,
+    )
+    return {"group": group, **normalized, "tool_trace": tool_trace, "trace": turn_trace}
+
+
+def _persist_scoring_investigation(
+    conn: sqlite3.Connection,
+    *,
+    feed_run_id: str,
+    group_id: str,
+    status: str,
+    turn_trace: list[dict[str, Any]],
+    tool_trace: list[dict[str, Any]],
+    provider: Any,
+    prompt_version: str,
+    cache_key: str,
+) -> None:
     conn.execute(
         """
         insert or replace into l2_scoring_investigations(
@@ -474,8 +538,8 @@ def _score_one_group(
         """,
         (
             feed_run_id,
-            group.group_id,
-            "ok",
+            group_id,
+            status,
             to_json(turn_trace),
             to_json(tool_trace),
             provider.provider_name,
@@ -485,7 +549,6 @@ def _score_one_group(
             utc_now(),
         ),
     )
-    return {"group": group, **normalized, "tool_trace": tool_trace, "trace": turn_trace}
 
 
 def _validate_or_repair_final(

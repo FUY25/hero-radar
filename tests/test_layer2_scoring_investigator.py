@@ -233,6 +233,89 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
             ],
         )
 
+    def test_last_tool_turn_repairs_to_final_score(self):
+        from pipeline.decision.layer2_scoring_investigator import (
+            InvestigatorLimits,
+            score_with_investigator,
+        )
+
+        conn = self.make_conn()
+        provider = FakeLLMProvider(
+            [
+                {
+                    "action": "use_tools",
+                    "information_need": "Need README but out of turns.",
+                    "tool_requests": [
+                        {
+                            "name": "fetch_github_readme",
+                            "arguments": {"repo_key": "owner/repo"},
+                        }
+                    ],
+                },
+                final_response(confidence=55),
+            ]
+        )
+
+        results = score_with_investigator(
+            conn,
+            feed_run_id="l2-run",
+            groups=[make_group()],
+            provider=provider,
+            tools={"fetch_github_readme": CountingTool({"status": "ok"})},
+            limits=InvestigatorLimits(max_investigation_turns=1),
+        )
+
+        self.assertGreater(results[0]["l2_score"], 0)
+        self.assertEqual(
+            [call["task"] for call in provider.calls],
+            [
+                "layer2_scoring_investigator_turn",
+                "layer2_scoring_investigator_repair",
+            ],
+        )
+
+    def test_failed_investigation_persists_error_trace(self):
+        from pipeline.decision.layer2_scoring_investigator import (
+            InvestigatorLimits,
+            score_with_investigator,
+        )
+
+        conn = self.make_conn()
+        provider = FakeLLMProvider(
+            [
+                {
+                    "action": "use_tools",
+                    "information_need": "Need README but cannot finalize.",
+                    "tool_requests": [
+                        {
+                            "name": "fetch_github_readme",
+                            "arguments": {"repo_key": "owner/repo"},
+                        }
+                    ],
+                }
+            ]
+        )
+
+        with self.assertRaises(RuntimeError):
+            score_with_investigator(
+                conn,
+                feed_run_id="l2-run",
+                groups=[make_group()],
+                provider=provider,
+                tools={"fetch_github_readme": CountingTool({"status": "ok"})},
+                limits=InvestigatorLimits(
+                    max_investigation_turns=1,
+                    max_scoring_attempts=2,
+                ),
+            )
+
+        row = conn.execute(
+            "select status, trace_json, tool_trace_json from l2_scoring_investigations"
+        ).fetchone()
+        self.assertEqual(row[0], "error")
+        self.assertIn("cannot finalize", row[1])
+        self.assertIn("fetch_github_readme", row[2])
+
     def test_score_caps_weak_core_axes_and_news_objects(self):
         from pipeline.decision.layer2_scoring_investigator import (
             aggregate_investigator_score,
@@ -334,6 +417,14 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
         )
         self.assertEqual(
             classify_scored_route(scored_row(score=74, group_id="score-only")),
+            "score_only",
+        )
+        self.assertEqual(
+            classify_scored_route(
+                scored_row(score=60, group_id="medium"),
+                min_score=70,
+                score_only_min_score=50,
+            ),
             "score_only",
         )
         self.assertEqual(

@@ -429,6 +429,17 @@ def run_layer2_feed(
         }
         for rank, row in enumerate(selected_for_brief, start=1):
             route_counts[ROUTE_SCORE_PLUS_DEEPDIVE] += 1
+            _record_route_decision(
+                conn,
+                feed_run_id=active_feed_run_id,
+                group_id=row["group"].group_id,
+                route=ROUTE_SCORE_PLUS_DEEPDIVE,
+                row=row,
+                metadata={
+                    "brief_min_score": cfg.get("brief_min_score", 70),
+                    "brief_rank": rank,
+                },
+            )
             _insert_feed_item(
                 conn,
                 feed_run_id=active_feed_run_id,
@@ -444,10 +455,22 @@ def run_layer2_feed(
                 row,
                 selected_group_ids=selected_group_ids,
                 min_score=float(cfg.get("brief_min_score", 70)),
+                score_only_min_score=float(cfg.get("score_only_min_score", 50)),
             )
             if route == ROUTE_SCORE_PLUS_DEEPDIVE:
                 continue
             route_counts[route] = route_counts.get(route, 0) + 1
+            _record_route_decision(
+                conn,
+                feed_run_id=active_feed_run_id,
+                group_id=row["group"].group_id,
+                route=route,
+                row=row,
+                metadata={
+                    "brief_min_score": cfg.get("brief_min_score", 70),
+                    "score_only_min_score": cfg.get("score_only_min_score", 50),
+                },
+            )
             if route == ROUTE_SCORE_ONLY:
                 _insert_feed_item(
                     conn,
@@ -469,6 +492,14 @@ def run_layer2_feed(
                 )
                 diagnostics_rank += 1
         for error_row in candidate_errors:
+            _record_route_decision(
+                conn,
+                feed_run_id=active_feed_run_id,
+                group_id=error_row["group"].group_id,
+                route=ROUTE_CANDIDATE_ERROR,
+                row=error_row,
+                metadata={"error": error_row.get("error", "")},
+            )
             _insert_feed_item(
                 conn,
                 feed_run_id=active_feed_run_id,
@@ -708,6 +739,37 @@ def _insert_feed_item(
     )
 
 
+def _record_route_decision(
+    conn: sqlite3.Connection,
+    *,
+    feed_run_id: str,
+    group_id: str,
+    route: str,
+    row: dict[str, Any] | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    route_metadata: dict[str, Any] = {"route": route}
+    if row:
+        route_metadata.update(
+            {
+                "l2_score": row.get("l2_score"),
+                "object_type": row.get("object_type"),
+                "is_product_or_repo": row.get("is_product_or_repo"),
+                "should_print": row.get("should_print"),
+            }
+        )
+    if metadata:
+        route_metadata.update(metadata)
+    record_stage_event(
+        conn,
+        feed_run_id=feed_run_id,
+        group_id=group_id,
+        stage="route",
+        status="route_decision",
+        metadata=route_metadata,
+    )
+
+
 def _update_feed_item_status(
     conn: sqlite3.Connection,
     *,
@@ -858,6 +920,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--deepdive-min-l2-score", type=float, default=70)
     parser.add_argument("--no-briefs", action="store_true")
     parser.add_argument("--brief-min-score", type=float, default=70)
+    parser.add_argument("--score-only-min-score", type=float, default=50)
     parser.add_argument("--brief-target-count", type=int, default=8)
     parser.add_argument("--brief-max-count", type=int, default=10)
     parser.add_argument("--enable-edge-scout", action="store_true")
@@ -897,6 +960,7 @@ def config_from_args(args: argparse.Namespace) -> dict[str, Any]:
         "deepdive_min_l2_score": args.deepdive_min_l2_score,
         "enable_deepdive_briefs": not args.no_briefs,
         "brief_min_score": args.brief_min_score,
+        "score_only_min_score": args.score_only_min_score,
         "brief_target_count": args.brief_target_count,
         "brief_max_count": args.brief_max_count,
         "enable_edge_scout": args.enable_edge_scout,
