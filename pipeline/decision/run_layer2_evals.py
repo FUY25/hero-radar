@@ -860,7 +860,7 @@ def run_wide_scout_kimi_eval(
     cases: list[dict[str, Any]] | None = None,
     batch_size: int = 30,
 ) -> dict[str, Any]:
-    active_provider = provider or KimiProvider(model=model, timeout=90, max_retries=0)
+    active_provider = provider or KimiProvider(model=model, timeout=180, max_retries=0)
     if not getattr(active_provider, "api_key", ""):
         return {"ok": False, "skipped": True, "reason": "Kimi key not configured"}
     active_cases = cases or default_wide_scout_eval_cases()
@@ -961,7 +961,16 @@ def run_scoring_investigator_kimi_eval(
                         "momentum for a high or medium score when the supplied "
                         "context already gives a concrete workflow unlock, technical "
                         "mechanism, and product/tool wedge; reflect limited adoption "
-                        "as momentum/caveat rather than collapsing confidence."
+                        "as momentum/caveat rather than collapsing confidence. "
+                        "Axis calibration: strong workflow unlock evidence should "
+                        "usually be 80-95, concrete technical mechanism 75-95, and "
+                        "clear product/tool wedge 75-90. Use risk_penalty above 8 "
+                        "only for concrete abuse, legal, safety, reliability, or "
+                        "permission-boundary risk, not for missing live browsing or "
+                        "ordinary uncertainty. Use derivative_news_penalty only for "
+                        "pure news, tutorials/resource lists, standalone model "
+                        "releases, generic wrappers, or ordinary tools without an "
+                        "explicit workflow unlock."
                     ),
                     "schema": _scoring_eval_schema(),
                     "rubric": {

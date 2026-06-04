@@ -402,6 +402,14 @@ class Layer2EvalTest(unittest.TestCase):
             "Use 0-100 numeric axis values",
             provider.calls[0]["input_payload"]["instruction"],
         )
+        self.assertIn(
+            "risk_penalty above 8",
+            provider.calls[0]["input_payload"]["instruction"],
+        )
+        self.assertIn(
+            "derivative_news_penalty only",
+            provider.calls[0]["input_payload"]["instruction"],
+        )
 
     def test_run_scoring_investigator_kimi_eval_skips_without_key(self) -> None:
         from pipeline.decision.run_layer2_evals import run_scoring_investigator_kimi_eval
