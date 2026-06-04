@@ -463,6 +463,163 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
         self.assertEqual(results[0]["tool_trace"][0]["error_type"], "TimeoutError")
         self.assertGreater(results[0]["l2_score"], 0)
 
+    def test_all_primitive_tool_results_flow_to_next_turn_state(self):
+        from pipeline.decision.layer2_scoring_investigator import (
+            score_with_investigator,
+        )
+
+        conn = self.make_conn()
+        provider = FakeLLMProvider(
+            [
+                {
+                    "action": "use_tools",
+                    "information_need": "Need narrow missing context.",
+                    "tool_requests": [
+                        {
+                            "name": "read_evidence_rows",
+                            "arguments": {"entity_id": "entity:repo"},
+                        },
+                        {
+                            "name": "fetch_github_file",
+                            "arguments": {
+                                "repo_key": "owner/repo",
+                                "path": "package.json",
+                            },
+                        },
+                        {
+                            "name": "fetch_homepage_or_docs",
+                            "arguments": {"url": "https://example.com/docs"},
+                        },
+                        {
+                            "name": "web_search",
+                            "arguments": {"query": "owner repo memory agent"},
+                        },
+                    ],
+                },
+                final_response(confidence=77),
+            ]
+        )
+        tools = {
+            "read_evidence_rows": CountingTool(
+                {"status": "ok", "rows": [{"metric_name": "stars_today"}]}
+            ),
+            "fetch_github_file": CountingTool(
+                {"status": "ok", "excerpt": "package exposes CLI entrypoint"}
+            ),
+            "fetch_homepage_or_docs": CountingTool(
+                {"status": "ok", "excerpt": "docs describe persistent memory"}
+            ),
+            "web_search": CountingTool(
+                {"status": "ok", "results": [{"title": "Launch discussion"}]}
+            ),
+        }
+
+        score_with_investigator(
+            conn,
+            feed_run_id="l2-run",
+            groups=[make_group()],
+            provider=provider,
+            tools=tools,
+        )
+
+        tool_trace = provider.calls[1]["input_payload"]["state"]["tool_trace"]
+        self.assertEqual(
+            [row["tool"] for row in tool_trace],
+            [
+                "read_evidence_rows",
+                "fetch_github_file",
+                "fetch_homepage_or_docs",
+                "web_search",
+            ],
+        )
+        self.assertEqual(tool_trace[0]["result"]["rows"][0]["metric_name"], "stars_today")
+        self.assertIn("CLI entrypoint", tool_trace[1]["result"]["excerpt"])
+        self.assertIn("persistent memory", tool_trace[2]["result"]["excerpt"])
+        self.assertEqual(tool_trace[3]["result"]["results"][0]["title"], "Launch discussion")
+
+    def test_unavailable_tool_records_trace_and_allows_fallback_final(self):
+        from pipeline.decision.layer2_scoring_investigator import (
+            score_with_investigator,
+        )
+
+        conn = self.make_conn()
+        provider = FakeLLMProvider(
+            [
+                {
+                    "action": "use_tools",
+                    "information_need": "Need package metadata.",
+                    "tool_requests": [
+                        {
+                            "name": "fetch_github_file",
+                            "arguments": {
+                                "repo_key": "owner/repo",
+                                "path": "package.json",
+                            },
+                        }
+                    ],
+                },
+                final_response(confidence=60),
+            ]
+        )
+
+        results = score_with_investigator(
+            conn,
+            feed_run_id="l2-run",
+            groups=[make_group()],
+            provider=provider,
+            tools={},
+        )
+
+        self.assertEqual(results[0]["tool_trace"][0]["status"], "unavailable")
+        self.assertEqual(
+            provider.calls[1]["input_payload"]["state"]["tool_trace"][0]["status"],
+            "unavailable",
+        )
+
+    def test_tool_trace_redacts_secret_like_values(self):
+        from pipeline.decision.layer2_scoring_investigator import (
+            score_with_investigator,
+        )
+
+        conn = self.make_conn()
+        provider = FakeLLMProvider(
+            [
+                {
+                    "action": "use_tools",
+                    "information_need": "Need docs page.",
+                    "tool_requests": [
+                        {
+                            "name": "fetch_homepage_or_docs",
+                            "arguments": {
+                                "url": "https://example.com/docs?api_key=secret-token"
+                            },
+                        }
+                    ],
+                },
+                final_response(confidence=58),
+            ]
+        )
+        secret_tool = CountingTool(
+            {
+                "status": "ok",
+                "excerpt": "Authorization: Bearer secret-token; sk-secret-token",
+            }
+        )
+
+        score_with_investigator(
+            conn,
+            feed_run_id="l2-run",
+            groups=[make_group()],
+            provider=provider,
+            tools={"fetch_homepage_or_docs": secret_tool},
+        )
+
+        persisted = conn.execute(
+            "select tool_trace_json from l2_scoring_investigations"
+        ).fetchone()[0]
+        self.assertNotIn("secret-token", persisted)
+        self.assertIn("[redacted]", persisted)
+
 
 if __name__ == "__main__":
     unittest.main()

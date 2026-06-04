@@ -5,6 +5,7 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from pipeline.decision.layer2_harness import sanitize_text
 from pipeline.decision.layer2_models import LEVEL_RANK, CandidateGroup
 from pipeline.decision.schema import to_json, utc_now
 
@@ -583,7 +584,7 @@ def _run_tool_request(
             {
                 **_trace_row(name, arguments, family, "error", {}),
                 "error_type": type(exc).__name__,
-                "error": str(exc)[:800],
+                "error": sanitize_text(exc),
             },
             total_tool_calls,
         )
@@ -634,11 +635,23 @@ def _trace_row(
 ) -> dict[str, Any]:
     return {
         "tool": name,
-        "arguments": arguments,
+        "arguments": _sanitize_trace_value(arguments),
         "family": family,
         "status": status,
-        "result": result,
+        "result": _sanitize_trace_value(result),
     }
+
+
+def _sanitize_trace_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _sanitize_trace_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_trace_value(item) for item in value]
+    if isinstance(value, tuple):
+        return [_sanitize_trace_value(item) for item in value]
+    if isinstance(value, str):
+        return sanitize_text(value, max_chars=6000)
+    return value
 
 
 def _normalize_axes(axes: dict[str, Any]) -> dict[str, float]:
