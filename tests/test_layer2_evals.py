@@ -218,6 +218,219 @@ class Layer2EvalTest(unittest.TestCase):
         self.assertFalse(result["skipped"])
         self.assertEqual(result["error"], "TimeoutError")
 
+    def test_default_eval_cases_cover_scoring_investigator_alignment(self) -> None:
+        from pipeline.decision.run_layer2_evals import (
+            default_scoring_investigator_eval_cases,
+            evaluate_scoring_investigator_cases,
+        )
+
+        result = evaluate_scoring_investigator_cases(
+            default_scoring_investigator_eval_cases()
+        )
+        names_by_expectation = {
+            row["name"]: row["expected_band"] for row in result["cases"]
+        }
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["mismatches"], [])
+        self.assertEqual(names_by_expectation["OpenClaw"], "high")
+        self.assertEqual(names_by_expectation["Hermes Agent"], "high")
+        self.assertEqual(names_by_expectation["HeyClicky"], "high")
+        self.assertEqual(names_by_expectation["Generic AI chatbot"], "low")
+        self.assertEqual(names_by_expectation["Funding acquisition news"], "low")
+        self.assertEqual(names_by_expectation["Standalone model release"], "low")
+        self.assertEqual(names_by_expectation["Tutorial resource list"], "low")
+        self.assertGreaterEqual(result["metrics"]["high_expected"], 3)
+        self.assertGreaterEqual(result["metrics"]["low_expected"], 5)
+
+    def test_openclaw_scoring_eval_context_has_alias_and_cross_source_evidence(
+        self,
+    ) -> None:
+        import json
+
+        from pipeline.decision.run_layer2_evals import (
+            default_scoring_investigator_eval_cases,
+        )
+
+        openclaw = next(
+            case
+            for case in default_scoring_investigator_eval_cases()
+            if case["name"] == "OpenClaw"
+        )
+        context = json.dumps(openclaw["candidate"], sort_keys=True)
+
+        self.assertIn("clawdbot", context)
+        self.assertIn("redirect", context)
+        self.assertIn("Product Hunt", context)
+        self.assertIn("npm", context)
+        self.assertIn("HN", context)
+
+    def test_gray_zone_utility_needs_explicit_workflow_unlock(self) -> None:
+        from pipeline.decision.run_layer2_evals import (
+            default_scoring_investigator_eval_cases,
+            evaluate_scoring_investigator_cases,
+        )
+
+        result = evaluate_scoring_investigator_cases(
+            default_scoring_investigator_eval_cases()
+        )
+        scores = {row["name"]: row["l2_score"] for row in result["cases"]}
+
+        self.assertLess(scores["Ordinary dashboard utility"], 60)
+        self.assertGreaterEqual(scores["Screen-aware spreadsheet operator"], 60)
+        self.assertGreater(
+            scores["Screen-aware spreadsheet operator"],
+            scores["Ordinary dashboard utility"] + 15,
+        )
+
+    def test_run_scoring_investigator_kimi_eval_uses_provider(self) -> None:
+        from pipeline.decision.run_layer2_evals import run_scoring_investigator_kimi_eval
+
+        class Provider:
+            provider_name = "kimi"
+            model = "kimi-k2.5"
+            api_key = "configured"
+
+            def __init__(self) -> None:
+                self.calls = []
+
+            def complete_json(self, **kwargs):
+                self.calls.append(kwargs)
+                name = kwargs["input_payload"]["candidate"]["name"]
+                if name == "OpenClaw":
+                    axes = {
+                        "workflow_shift": 88,
+                        "technical_substance": 88,
+                        "product_market_fit": 84,
+                        "momentum": 72,
+                        "confidence": 84,
+                        "risk_penalty": 4,
+                        "derivative_news_penalty": 0,
+                    }
+                    should_print = True
+                else:
+                    axes = {
+                        "workflow_shift": 32,
+                        "technical_substance": 28,
+                        "product_market_fit": 42,
+                        "momentum": 35,
+                        "confidence": 76,
+                        "risk_penalty": 2,
+                        "derivative_news_penalty": 8,
+                    }
+                    should_print = False
+                return {
+                    "action": "final",
+                    "score": {
+                        "object_type": "repo" if should_print else "product",
+                        "is_product_or_repo": True,
+                        "axes": axes,
+                        "supporting_evidence": ["Eval evidence"],
+                        "negative_evidence": [],
+                        "known_gaps": [],
+                        "primary_reason": "Eval",
+                        "rationale_short": "Eval rationale",
+                        "topic_tags": ["eval"],
+                        "caveats": [],
+                        "should_print": should_print,
+                    },
+                }
+
+        cases = [
+            {
+                "name": "OpenClaw",
+                "expected_band": "high",
+                "candidate": {"name": "OpenClaw", "context": "Local agent repo"},
+            },
+            {
+                "name": "Generic AI chatbot",
+                "expected_band": "low",
+                "candidate": {
+                    "name": "Generic AI chatbot",
+                    "context": "Ordinary chatbot wrapper",
+                },
+            },
+        ]
+        provider = Provider()
+
+        result = run_scoring_investigator_kimi_eval(
+            provider=provider, cases=cases, limit=2
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["skipped"])
+        self.assertEqual(result["mismatches"], [])
+        self.assertEqual(len(provider.calls), 2)
+        self.assertEqual(provider.calls[0]["task"], "layer2_scoring_investigator_eval")
+        self.assertIn(
+            "Layer 2 Scoring Investigator", provider.calls[0]["system_prompt"]
+        )
+        self.assertNotIn("expected_band_for_eval", provider.calls[0]["input_payload"])
+        self.assertIn(
+            "Use 0-100 numeric axis values",
+            provider.calls[0]["input_payload"]["instruction"],
+        )
+
+    def test_run_scoring_investigator_kimi_eval_skips_without_key(self) -> None:
+        from pipeline.decision.run_layer2_evals import run_scoring_investigator_kimi_eval
+
+        class Provider:
+            api_key = ""
+
+        result = run_scoring_investigator_kimi_eval(provider=Provider(), cases=[])
+
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["skipped"])
+
+    def test_run_scoring_investigator_kimi_eval_defaults_to_small_high_low_smoke(
+        self,
+    ) -> None:
+        from pipeline.decision.run_layer2_evals import run_scoring_investigator_kimi_eval
+
+        class Provider:
+            provider_name = "kimi"
+            model = "kimi-k2.5"
+            api_key = "configured"
+
+            def __init__(self) -> None:
+                self.names = []
+
+            def complete_json(self, **kwargs):
+                name = kwargs["input_payload"]["candidate"]["name"]
+                self.names.append(name)
+                is_high = name == "OpenClaw"
+                return {
+                    "action": "final",
+                    "score": {
+                        "object_type": "repo" if is_high else "product",
+                        "is_product_or_repo": True,
+                        "axes": {
+                            "workflow_shift": 88 if is_high else 30,
+                            "technical_substance": 86 if is_high else 25,
+                            "product_market_fit": 82 if is_high else 40,
+                            "momentum": 72 if is_high else 35,
+                            "confidence": 82 if is_high else 74,
+                            "risk_penalty": 4 if is_high else 2,
+                            "derivative_news_penalty": 0 if is_high else 8,
+                        },
+                        "supporting_evidence": ["Eval evidence"],
+                        "negative_evidence": [],
+                        "known_gaps": [],
+                        "primary_reason": "Eval",
+                        "rationale_short": "Eval rationale",
+                        "topic_tags": ["eval"],
+                        "caveats": [],
+                        "should_print": is_high,
+                    },
+                }
+
+        provider = Provider()
+
+        result = run_scoring_investigator_kimi_eval(provider=provider)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(provider.names, ["OpenClaw", "Generic AI chatbot"])
+
 
 if __name__ == "__main__":
     unittest.main()
