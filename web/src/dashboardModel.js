@@ -394,6 +394,17 @@ export function feedCardDescription(item, { maxChars = 96 } = {}) {
   return String(item?.context_preview || '').trim();
 }
 
+export function feedSignalDescription(item, { maxChars = 160 } = {}) {
+  const brief = item?.deepdive_brief;
+  const highlight = Array.isArray(brief?.core_highlights)
+    ? String(brief.core_highlights[0] || '').trim()
+    : '';
+  const headline = String(brief?.headline || '').trim();
+  if (highlight) return truncateText(highlight, maxChars);
+  if (headline) return truncateText(headline, maxChars);
+  return feedCardDescription(item, { maxChars });
+}
+
 function truncateText(value, maxChars) {
   const text = String(value || '').replace(/\s+/g, ' ').trim();
   const limit = Math.max(8, Number(maxChars || 96));

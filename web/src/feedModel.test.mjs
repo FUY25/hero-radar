@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   feedEmptyState,
   feedCardDescription,
+  feedSignalDescription,
   feedRows,
   feedRunSummary,
   normalizeFeedPayload,
@@ -130,6 +131,28 @@ test('feedCardDescription shortens LLM rationale but preserves original context 
   assert.equal(
     feedCardDescription({ rationale_short: '', context_preview: longContext }, { maxChars: 34 }),
     longContext,
+  );
+});
+
+test('feedSignalDescription prefers Chinese deepdive brief over scorer rationale', () => {
+  assert.equal(
+    feedSignalDescription({
+      rationale_short: 'English scorer rationale should not show in selected brief card.',
+      context_preview: 'English source preview.',
+      deepdive_brief: {
+        headline: '这是中文标题',
+        core_highlights: ['这是中文重点摘要。'],
+      },
+    }),
+    '这是中文重点摘要。',
+  );
+  assert.equal(
+    feedSignalDescription({
+      rationale_short: 'Fallback scorer rationale.',
+      context_preview: 'Original preview.',
+      deepdive_brief: null,
+    }),
+    'Fallback scorer rationale.',
   );
 });
 

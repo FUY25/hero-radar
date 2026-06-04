@@ -3,7 +3,6 @@ import {
   ArrowSquareOut,
   ChartLineUp,
   Lightning,
-  Sparkle,
   ThumbsDown,
   ThumbsUp,
 } from '@phosphor-icons/react';
@@ -24,6 +23,7 @@ import {
   feedCardDescription,
   feedEmptyState,
   feedRunSummary,
+  feedSignalDescription,
   filterCandidateRows,
   formatProjectList,
   getConfigValue,
@@ -1350,17 +1350,20 @@ function DailyFeedView({ payload, onOpenSource }) {
 
 function FeedSignalCard({ item, onOpenSource }) {
   const tone = scoreTone(item.l2_score);
+  const description = feedSignalDescription(item);
+  const scoreStyle = scoreBarStyle(item.l2_score);
   return (
     <article className={`feed-signal-card ${tone}`}>
-      <div className="signal-card-topline">
-        <span className="score-rail">{Math.round(item.l2_score)}</span>
-        <span className="signal-reason">{item.primary_reason}</span>
-        <Sparkle size={16} weight="duotone" aria-hidden="true" />
-      </div>
-      <h2>{item.title}</h2>
-      <p>{item.rationale_short || item.context_preview}</p>
-      <div className="feed-tags">
-        {(item.topic_tags || []).slice(0, 4).map((tag) => <span key={tag}>{tag}</span>)}
+      <div className="signal-card-head">
+        <div className="signal-title-block">
+          <h2>{item.title}</h2>
+          <p>{description}</p>
+        </div>
+        <div className="signal-score-card" style={scoreStyle} aria-label={`L2 score ${Math.round(item.l2_score)}`}>
+          <span>L2</span>
+          <strong>{scoreStyle.label}</strong>
+          <i aria-hidden="true" />
+        </div>
       </div>
       <FeedBrief item={item} />
       <FeedEvidence item={item} />
@@ -1388,14 +1391,20 @@ function FeedBrief({ item }) {
         <strong>{brief.headline}</strong>
         <div className="feed-brief-grid">
           {(brief.core_highlights || []).length ? (
-            <ul>
-              {brief.core_highlights.slice(0, 3).map((highlight) => <li key={highlight}>{highlight}</li>)}
-            </ul>
+            <div className="feed-brief-column">
+              <span>核心亮点</span>
+              <ul>
+                {brief.core_highlights.slice(0, 3).map((highlight) => <li key={highlight}>{highlight}</li>)}
+              </ul>
+            </div>
           ) : null}
           {(brief.use_cases || []).length ? (
-            <ul>
-              {brief.use_cases.slice(0, 4).map((useCase) => <li key={useCase}>{useCase}</li>)}
-            </ul>
+            <div className="feed-brief-column">
+              <span>使用场景</span>
+              <ul>
+                {brief.use_cases.slice(0, 4).map((useCase) => <li key={useCase}>{useCase}</li>)}
+              </ul>
+            </div>
           ) : null}
         </div>
         {brief.caveat ? <p>{brief.caveat}</p> : null}
