@@ -5,6 +5,7 @@ import {
   feedRows,
   feedRunSummary,
   normalizeFeedPayload,
+  scoreBarStyle,
   scoreTone,
 } from './dashboardModel.js';
 
@@ -12,7 +13,9 @@ const payload = {
   feed_run_id: 'l2-run',
   decision_run_id: 'decision-run',
   generated_at: '2026-05-31T12:00:00Z',
-  model_profile: { scout: 'kimi-k2.5', scoring: 'kimi-k2.5', deepdive: 'kimi-k2.6' },
+  model_profile: { scout: 'kimi-k2.5', scoring: 'kimi-k2.5', brief: 'kimi-k2.5' },
+  run_status: 'ok_with_errors',
+  telemetry: { scored: 3, briefs: 1, error_total: 2 },
   today_focus: [
     {
       group_id: 'group:repo',
@@ -27,6 +30,13 @@ const payload = {
       source_families: ['github'],
       deepdive_status: 'ok',
       deepdive: { summary: 'Deep summary' },
+      deepdive_brief: {
+        category: { primary: '开发工具', tags: ['agent', 'repo'] },
+        headline: 'owner/repo 值得今天重点看',
+        core_highlights: ['把分散开发流程压到一个工具里。'],
+        use_cases: ['开发者评估新的 agent workflow。'],
+        caveat: '还需要验证真实使用留存。',
+      },
       context: {
         members: [
           {
@@ -57,6 +67,8 @@ test('normalizeFeedPayload keeps run summary and item evidence', () => {
   assert.equal(normalized.today_focus[0].title, 'owner/repo');
   assert.equal(normalized.today_focus[0].evidence_bullets[0].display_label, 'GitHub 24 小时新增：321 stars');
   assert.equal(normalized.today_focus[0].source_links[0].channel_label, 'GitHub Trending');
+  assert.equal(normalized.today_focus[0].deepdive_brief.category.primary, '开发工具');
+  assert.equal(normalized.today_focus[0].deepdive_brief.core_highlights[0], '把分散开发流程压到一个工具里。');
 });
 
 test('normalizeFeedPayload preserves run status and telemetry', () => {
@@ -83,7 +95,8 @@ test('feedRows merges today focus and scored list with section markers', () => {
 test('feedRunSummary formats model profile without secrets', () => {
   const summary = feedRunSummary(normalizeFeedPayload(payload));
 
-  assert.equal(summary.models, 'scout kimi-k2.5 · scoring kimi-k2.5 · deepdive kimi-k2.6');
+  assert.equal(summary.models, 'scout kimi-k2.5 · scoring kimi-k2.5 · brief kimi-k2.5');
+  assert.equal(summary.health, 'ok_with_errors · scored 3 · briefs 1 · errors 2');
 });
 
 test('scoreTone maps numeric score to stable UI tone', () => {
@@ -91,6 +104,12 @@ test('scoreTone maps numeric score to stable UI tone', () => {
   assert.equal(scoreTone(75), 'warm');
   assert.equal(scoreTone(55), 'steady');
   assert.equal(scoreTone(30), 'quiet');
+});
+
+test('scoreBarStyle clamps scores for compact feed cards', () => {
+  assert.deepEqual(scoreBarStyle(88), { '--score-pct': '88%', label: '88' });
+  assert.deepEqual(scoreBarStyle(140), { '--score-pct': '100%', label: '100' });
+  assert.deepEqual(scoreBarStyle(-4), { '--score-pct': '0%', label: '0' });
 });
 
 test('feedEmptyState distinguishes missing feed from empty scored run', () => {

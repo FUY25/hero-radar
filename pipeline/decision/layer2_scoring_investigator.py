@@ -178,7 +178,7 @@ def generate_deepdive_briefs(
     prompt_version: str = DEFAULT_BRIEF_PROMPT_VERSION,
 ) -> list[dict[str, Any]]:
     briefs: list[dict[str, Any]] = []
-    for row in selected:
+    for rank, row in enumerate(selected, start=1):
         group = row["group"]
         payload = {
             "group_id": group.group_id,
@@ -246,6 +246,15 @@ def generate_deepdive_briefs(
             where feed_run_id = ? and group_id = ?
             """,
             ("briefed", feed_run_id, group.group_id),
+        )
+        conn.execute(
+            """
+            insert or replace into l2_feed_items(
+              feed_run_id, group_id, section, rank, deepdive_status
+            )
+            values (?, ?, ?, ?, ?)
+            """,
+            (feed_run_id, group.group_id, "today_focus", rank, "briefed"),
         )
         briefs.append({"group": group, "brief": brief})
     conn.commit()

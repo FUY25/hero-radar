@@ -31,6 +31,7 @@ import {
   nativeRank as modelNativeRank,
   normalizeFeedPayload,
   rowsForChannel as modelRowsForChannel,
+  scoreBarStyle,
   scoreTone,
   setConfigValue,
   settingsPanelDefs,
@@ -1313,19 +1314,35 @@ function DailyFeedView({ payload, onOpenSource }) {
         <div className="feed-run-meta">
           <span>{summary.generated}</span>
           <span>{summary.models}</span>
-          <span>pending scout {feed.pending?.edge_watch_scout || 0} · deepdive {feed.pending?.deepdive || 0}</span>
+          <span>{summary.health}</span>
         </div>
       </div>
-      <section className="today-focus-grid" aria-label="Today Focus">
-        {feed.today_focus.map((item) => (
-          <FeedSignalCard key={item.group_id} item={item} onOpenSource={onOpenSource} />
-        ))}
-      </section>
-      <section className="scored-feed-list" aria-label="Scored Feed">
-        {feed.scored_list.map((item, index) => (
-          <ScoredFeedRow key={item.group_id} item={{ ...item, rank: item.rank || index + 1 }} onOpenSource={onOpenSource} />
-        ))}
-      </section>
+      {(feed.today_focus || []).length ? (
+        <>
+          <div className="feed-section-heading">
+            <span>Selected briefs</span>
+            <strong>今日重点</strong>
+          </div>
+          <section className="today-focus-grid" aria-label="Today Focus">
+            {feed.today_focus.map((item) => (
+              <FeedSignalCard key={item.group_id} item={item} onOpenSource={onOpenSource} />
+            ))}
+          </section>
+        </>
+      ) : null}
+      {(feed.scored_list || []).length ? (
+        <>
+          <div className="feed-section-heading compact">
+            <span>Scored backlog</span>
+            <strong>候选信号</strong>
+          </div>
+          <section className="scored-feed-list" aria-label="Scored Feed">
+            {feed.scored_list.map((item, index) => (
+              <ScoredFeedRow key={item.group_id} item={{ ...item, rank: item.rank || index + 1 }} onOpenSource={onOpenSource} />
+            ))}
+          </section>
+        </>
+      ) : null}
     </section>
   );
 }
@@ -1344,7 +1361,7 @@ function FeedSignalCard({ item, onOpenSource }) {
       <div className="feed-tags">
         {(item.topic_tags || []).slice(0, 4).map((tag) => <span key={tag}>{tag}</span>)}
       </div>
-      {item.deepdive ? <p className="deepdive-summary">{item.deepdive.summary}</p> : null}
+      <FeedBrief item={item} />
       <FeedEvidence item={item} />
       <FeedLinks item={item} onOpenSource={onOpenSource} />
       <div className="feed-feedback" aria-label="Feed feedback">
@@ -1355,15 +1372,54 @@ function FeedSignalCard({ item, onOpenSource }) {
   );
 }
 
+function FeedBrief({ item }) {
+  const brief = item.deepdive_brief;
+  if (brief) {
+    const tags = [
+      brief.category?.primary,
+      ...(brief.category?.tags || []),
+    ].filter(Boolean);
+    return (
+      <section className="feed-brief" aria-label="Deepdive brief">
+        <div className="feed-brief-tags">
+          {tags.slice(0, 5).map((tag) => <span key={tag}>{tag}</span>)}
+        </div>
+        <strong>{brief.headline}</strong>
+        <div className="feed-brief-grid">
+          {(brief.core_highlights || []).length ? (
+            <ul>
+              {brief.core_highlights.slice(0, 3).map((highlight) => <li key={highlight}>{highlight}</li>)}
+            </ul>
+          ) : null}
+          {(brief.use_cases || []).length ? (
+            <ul>
+              {brief.use_cases.slice(0, 4).map((useCase) => <li key={useCase}>{useCase}</li>)}
+            </ul>
+          ) : null}
+        </div>
+        {brief.caveat ? <p>{brief.caveat}</p> : null}
+      </section>
+    );
+  }
+  return item.deepdive ? <p className="deepdive-summary">{item.deepdive.summary}</p> : null;
+}
+
 function ScoredFeedRow({ item, onOpenSource }) {
+  const bar = scoreBarStyle(item.l2_score);
   return (
     <article className={`scored-feed-row ${scoreTone(item.l2_score)}`}>
-      <span className="score-rail small">{Math.round(item.l2_score)}</span>
+      <div className="compact-score" style={bar}>
+        <span>{bar.label}</span>
+        <div aria-hidden="true" />
+      </div>
       <div className="scored-feed-main">
         <strong>{item.title}</strong>
         <p>{item.rationale_short || item.context_preview}</p>
       </div>
-      <span className="signal-reason">{item.primary_reason}</span>
+      <div className="scored-feed-meta">
+        <span>{item.primary_reason}</span>
+        {(item.topic_tags || []).slice(0, 2).map((tag) => <span key={tag}>{tag}</span>)}
+      </div>
       <FeedLinks item={item} onOpenSource={onOpenSource} />
     </article>
   );

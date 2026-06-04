@@ -168,6 +168,7 @@ def run_layer2_feed(
         model_profile = {
             "scout": getattr(scout_provider, "model", ""),
             "scoring": getattr(scoring_provider, "model", ""),
+            "brief": getattr(scoring_provider, "model", ""),
             "deepdive": getattr(active_deepdive_provider, "model", ""),
         }
         conn.execute(

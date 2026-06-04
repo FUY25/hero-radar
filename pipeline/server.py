@@ -263,7 +263,7 @@ def query_feed_payload(feed_run_id: str | None = None) -> dict[str, Any]:
                        g.source_families_json, g.context_json,
                        s.l2_score, s.axes_json, s.primary_reason,
                        s.topic_tags_json, s.rationale_short, s.caveats_json,
-                       d.summary_json, ff.vote
+                       d.summary_json, b.brief_json, ff.vote
                 from l2_feed_items fi
                 join l2_candidate_groups g
                   on g.feed_run_id = fi.feed_run_id and g.group_id = fi.group_id
@@ -271,6 +271,8 @@ def query_feed_payload(feed_run_id: str | None = None) -> dict[str, Any]:
                   on s.feed_run_id = fi.feed_run_id and s.group_id = fi.group_id
                 left join deepdive_reports d
                   on d.feed_run_id = fi.feed_run_id and d.group_id = fi.group_id
+                left join l2_deepdive_briefs b
+                  on b.feed_run_id = fi.feed_run_id and b.group_id = fi.group_id
                 left join feed_feedback ff
                   on ff.feed_run_id = fi.feed_run_id and ff.group_id = fi.group_id
                 where fi.feed_run_id = ?
@@ -334,7 +336,8 @@ def _feed_item(row: tuple[Any, ...]) -> dict[str, Any]:
         "rationale_short": row[16],
         "caveats": json_loads(row[17], []),
         "deepdive": json_loads(row[18], {}) if row[18] else None,
-        "feedback": row[19],
+        "deepdive_brief": json_loads(row[19], {}) if row[19] else None,
+        "feedback": row[20],
     }
 
 
@@ -602,7 +605,7 @@ def query_entity(conn: sqlite3.Connection, entity_id: str, run_id: str) -> dict[
 
 
 def serve_web_dist(handler: BaseHTTPRequestHandler, path: str) -> bool:
-    if path == "/app" or path.startswith("/app/"):
+    if path == "/" or path == "/app" or path.startswith("/app/"):
         index_path = WEB_DIST_PATH / "index.html"
         if not index_path.exists():
             text_response(
@@ -726,7 +729,9 @@ class HeroRadarHandler(BaseHTTPRequestHandler):
         if path.startswith("/api/"):
             json_response(self, {"ok": False, "error": "Not found"}, status=404, cors=True)
             return
-        if path in {"/", "/dashboard", "/dashboard.html"}:
+        if path == "/" and serve_web_dist(self, path):
+            return
+        if path in {"/dashboard", "/dashboard.html"}:
             if not DASHBOARD_PATH.exists():
                 text_response(self, "dashboard.html not found. Run `python3 pipeline/run_pipeline.py --export-only` first.", status=404, content_type="text/plain")
                 return

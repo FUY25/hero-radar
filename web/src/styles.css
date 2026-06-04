@@ -521,7 +521,7 @@ button:disabled {
 
 .daily-feed-shell {
   display: grid;
-  gap: 18px;
+  gap: 20px;
   padding: 2px 0 40px;
 }
 
@@ -559,37 +559,57 @@ button:disabled {
   text-align: right;
 }
 
+.feed-section-heading {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 6px;
+  padding-top: 4px;
+}
+
+.feed-section-heading strong {
+  color: var(--text);
+  font-size: 15px;
+  line-height: 1.2;
+}
+
+.feed-section-heading span {
+  color: var(--faint);
+  font-size: 11px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.feed-section-heading.compact {
+  margin-top: 2px;
+}
+
 .today-focus-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-  gap: 14px;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr));
+  gap: 16px;
 }
 
 .feed-signal-card {
   position: relative;
   overflow: hidden;
-  border: 1px solid var(--line);
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--line));
   border-radius: 8px;
-  padding: 16px;
+  padding: 18px 20px 16px;
   background:
-    linear-gradient(135deg, color-mix(in srgb, var(--panel) 96%, transparent), var(--panel)),
-    repeating-linear-gradient(90deg, transparent 0 18px, color-mix(in srgb, var(--text) 4%, transparent) 18px 19px);
-  box-shadow: 0 14px 34px color-mix(in srgb, var(--text) 7%, transparent);
+    linear-gradient(180deg, color-mix(in srgb, var(--accent) 5%, var(--panel)), var(--panel) 44%),
+    linear-gradient(90deg, color-mix(in srgb, var(--accent) 14%, transparent), transparent 62%);
+  box-shadow: 0 18px 42px color-mix(in srgb, var(--text) 9%, transparent);
 }
 
 .feed-signal-card::after {
   content: "";
   position: absolute;
-  inset: 0;
+  inset: 0 0 auto;
+  height: 3px;
   pointer-events: none;
-  background: linear-gradient(110deg, transparent 0%, color-mix(in srgb, var(--accent) 12%, transparent) 45%, transparent 70%);
-  transform: translateX(-120%);
-  animation: signal-sheen 7s ease-in-out infinite;
-}
-
-@keyframes signal-sheen {
-  0%, 70% { transform: translateX(-120%); }
-  100% { transform: translateX(120%); }
+  background: linear-gradient(90deg, var(--accent), color-mix(in srgb, var(--good) 60%, var(--accent)));
 }
 
 .feed-signal-card.hot {
@@ -618,6 +638,7 @@ button:disabled {
 .signal-card-topline {
   color: var(--muted);
   font-size: 12px;
+  justify-content: space-between;
 }
 
 .signal-reason {
@@ -627,26 +648,30 @@ button:disabled {
 }
 
 .feed-signal-card h2 {
-  margin: 12px 0 6px;
-  font-size: 18px;
-  line-height: 1.2;
+  margin: 14px 0 7px;
+  max-width: 760px;
+  font-size: 22px;
+  line-height: 1.16;
   letter-spacing: 0;
 }
 
 .feed-signal-card p {
   margin: 0 0 12px;
   color: var(--muted);
+  font-size: 14px;
+  line-height: 1.5;
 }
 
 .score-rail {
   display: inline-grid;
   place-items: center;
-  min-width: 42px;
-  height: 42px;
+  min-width: 52px;
+  height: 52px;
   border-radius: 999px;
   color: var(--text);
   background: color-mix(in srgb, var(--accent) 14%, var(--panel));
   border: 1px solid color-mix(in srgb, var(--accent) 32%, var(--line));
+  box-shadow: inset 0 0 0 4px color-mix(in srgb, var(--panel) 72%, transparent);
   font-weight: 700;
   font-variant-numeric: tabular-nums;
 }
@@ -669,6 +694,74 @@ button:disabled {
 
 .deepdive-summary {
   color: var(--text);
+}
+
+.feed-brief {
+  display: grid;
+  gap: 12px;
+  margin: 13px 0 16px;
+  padding-top: 12px;
+  border-top: 1px solid color-mix(in srgb, var(--accent) 22%, var(--line));
+}
+
+.feed-brief strong {
+  color: var(--text);
+  font-size: 16px;
+  line-height: 1.32;
+}
+
+.feed-brief p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.feed-brief-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.feed-brief-tags span {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 3px 7px;
+  color: color-mix(in srgb, var(--accent) 68%, var(--text));
+  background: color-mix(in srgb, var(--accent) 9%, var(--panel));
+  font-size: 11px;
+}
+
+.feed-brief-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+}
+
+.feed-brief ul {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.feed-brief li {
+  position: relative;
+  padding-left: 14px;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.feed-brief li::before {
+  content: "";
+  position: absolute;
+  top: .62em;
+  left: 0;
+  width: 5px;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--accent);
 }
 
 .feed-links a,
@@ -695,16 +788,57 @@ button:disabled {
 
 .scored-feed-list {
   display: grid;
-  border-top: 1px solid var(--line);
+  gap: 10px;
 }
 
 .scored-feed-row {
   display: grid;
-  grid-template-columns: auto minmax(220px, 1fr) minmax(120px, auto) auto;
+  grid-template-columns: 64px minmax(220px, 1fr) minmax(150px, 260px) auto;
   gap: 12px;
   align-items: center;
-  border-bottom: 1px solid var(--line);
-  padding: 12px 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 11px 12px;
+  background: color-mix(in srgb, var(--panel) 96%, var(--head));
+  box-shadow: 0 8px 20px color-mix(in srgb, var(--text) 4%, transparent);
+}
+
+.scored-feed-row.hot {
+  border-color: color-mix(in srgb, var(--accent) 36%, var(--line));
+}
+
+.scored-feed-row.warm {
+  border-color: color-mix(in srgb, var(--good) 24%, var(--line));
+}
+
+.compact-score {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+}
+
+.compact-score span {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.compact-score div {
+  width: 100%;
+  height: 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--line) 72%, var(--panel));
+}
+
+.compact-score div::before {
+  content: "";
+  display: block;
+  width: var(--score-pct);
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--accent), color-mix(in srgb, var(--good) 58%, var(--accent)));
 }
 
 .scored-feed-main {
@@ -721,6 +855,27 @@ button:disabled {
 .scored-feed-row p {
   margin: 3px 0 0;
   color: var(--muted);
+  line-height: 1.42;
+}
+
+.scored-feed-meta {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.scored-feed-meta span {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 4px 8px;
+  color: var(--muted);
+  background: var(--panel);
+  font-size: 11px;
 }
 
 .candidate-panel {
@@ -1686,6 +1841,10 @@ th:nth-last-child(-n+2) .hint::after {
   .feed-run-meta {
     justify-items: start;
     text-align: left;
+  }
+
+  .feed-brief-grid {
+    grid-template-columns: 1fr;
   }
 
   .scored-feed-main strong {

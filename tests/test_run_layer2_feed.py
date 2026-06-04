@@ -210,6 +210,13 @@ class Layer2RunnerTest(unittest.TestCase):
                 1,
             )
             self.assertEqual(
+                conn.execute(
+                    "select count(*) from l2_feed_items where section = ?",
+                    ("today_focus",),
+                ).fetchone()[0],
+                1,
+            )
+            self.assertEqual(
                 conn.execute("select count(*) from deepdive_reports").fetchone()[0],
                 0,
             )

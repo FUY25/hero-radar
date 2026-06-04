@@ -295,6 +295,7 @@ export function normalizeFeedPayload(payload = {}) {
       source_links: sourceLinks,
       context_preview: members.find((member) => member.context_preview)?.context_preview || '',
       deepdive: item?.deepdive || null,
+      deepdive_brief: normalizeDeepdiveBrief(item?.deepdive_brief),
     };
   };
   return {
@@ -326,6 +327,7 @@ export function feedEmptyState(feed) {
 
 export function feedRunSummary(feed) {
   const profile = feed?.model_profile || {};
+  const telemetry = feed?.telemetry || {};
   return {
     run: feed?.feed_run_id || '',
     decision: feed?.decision_run_id || '',
@@ -333,8 +335,30 @@ export function feedRunSummary(feed) {
     models: [
       profile.scout ? `scout ${profile.scout}` : '',
       profile.scoring ? `scoring ${profile.scoring}` : '',
+      profile.brief ? `brief ${profile.brief}` : '',
       profile.deepdive ? `deepdive ${profile.deepdive}` : '',
     ].filter(Boolean).join(' · '),
+    health: [
+      feed?.run_status || '',
+      `scored ${Number(telemetry.scored || 0)}`,
+      `briefs ${Number(telemetry.briefs || 0)}`,
+      `errors ${Number(telemetry.error_total || 0)}`,
+    ].filter(Boolean).join(' · '),
+  };
+}
+
+function normalizeDeepdiveBrief(brief) {
+  if (!brief || typeof brief !== 'object') return null;
+  const category = brief.category && typeof brief.category === 'object' ? brief.category : {};
+  return {
+    category: {
+      primary: String(category.primary || ''),
+      tags: Array.isArray(category.tags) ? category.tags.map((tag) => String(tag)).filter(Boolean) : [],
+    },
+    headline: String(brief.headline || ''),
+    core_highlights: Array.isArray(brief.core_highlights) ? brief.core_highlights.map((item) => String(item)).filter(Boolean) : [],
+    use_cases: Array.isArray(brief.use_cases) ? brief.use_cases.map((item) => String(item)).filter(Boolean) : [],
+    caveat: brief.caveat ? String(brief.caveat) : '',
   };
 }
 
@@ -344,6 +368,14 @@ export function scoreTone(score) {
   if (value >= 70) return 'warm';
   if (value >= 50) return 'steady';
   return 'quiet';
+}
+
+export function scoreBarStyle(score) {
+  const value = Math.max(0, Math.min(100, Math.round(Number(score || 0))));
+  return {
+    '--score-pct': `${value}%`,
+    label: String(value),
+  };
 }
 
 export function candidateRowsForFeed(candidates) {

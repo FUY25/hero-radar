@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import sqlite3
 import tempfile
+import threading
 import unittest
+import urllib.request
 from pathlib import Path
 from unittest import mock
 
@@ -79,8 +81,34 @@ class FeedApiTest(unittest.TestCase):
             ),
         )
         conn.execute(
+            "insert into l2_deepdive_briefs(feed_run_id, group_id, status, brief_json, language, provider, model, prompt_version, cache_key, created_at) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "l2-run",
+                "group:repo",
+                "ok",
+                json.dumps(
+                    {
+                        "category": {
+                            "primary": "开发工具",
+                            "tags": ["agent", "repo"],
+                        },
+                        "headline": "owner/repo 值得今天重点看",
+                        "core_highlights": ["把分散开发流程压到一个工具里。"],
+                        "use_cases": ["开发者评估新的 agent workflow。"],
+                        "caveat": "还需要验证真实使用留存。",
+                    }
+                ),
+                "zh",
+                "kimi",
+                "kimi-k2.5",
+                "v1",
+                "brief-cache",
+                "2026-05-31T00:02:00Z",
+            ),
+        )
+        conn.execute(
             "insert into l2_feed_items(feed_run_id, group_id, section, rank, deepdive_status) values (?, ?, ?, ?, ?)",
-            ("l2-run", "group:repo", "today_focus", 1, "ok"),
+            ("l2-run", "group:repo", "today_focus", 1, "briefed"),
         )
         conn.commit()
         conn.close()
@@ -99,6 +127,14 @@ class FeedApiTest(unittest.TestCase):
         self.assertEqual(payload["today_focus"][0]["l2_score"], 88)
         self.assertEqual(
             payload["today_focus"][0]["deepdive"]["summary"], "Deep summary"
+        )
+        self.assertEqual(
+            payload["today_focus"][0]["deepdive_brief"]["category"]["primary"],
+            "开发工具",
+        )
+        self.assertEqual(
+            payload["today_focus"][0]["deepdive_brief"]["headline"],
+            "owner/repo 值得今天重点看",
         )
 
     def test_query_feed_payload_exposes_run_status_and_stage_telemetry(self):
@@ -166,3 +202,34 @@ class FeedApiTest(unittest.TestCase):
         row = conn.execute("select vote from feed_feedback").fetchone()
         conn.close()
         self.assertEqual(row[0], "down")
+
+    def test_root_serves_react_dist_when_available(self):
+        import pipeline.server as server
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            dist = root / "dist"
+            dist.mkdir()
+            (dist / "index.html").write_text("<html>React Feed App</html>")
+            legacy = root / "dashboard.html"
+            legacy.write_text("<html>Legacy Dashboard</html>")
+            with (
+                mock.patch.object(server, "WEB_DIST_PATH", dist),
+                mock.patch.object(server, "DASHBOARD_PATH", legacy),
+            ):
+                httpd = server.ThreadingHTTPServer(
+                    ("127.0.0.1", 0),
+                    server.HeroRadarHandler,
+                )
+                self.addCleanup(httpd.server_close)
+                thread = threading.Thread(target=httpd.handle_request)
+                thread.start()
+                url = (
+                    f"http://127.0.0.1:{httpd.server_port}/"
+                    "?section=feed&feed=daily"
+                )
+                body = urllib.request.urlopen(url, timeout=5).read().decode("utf-8")
+                thread.join(timeout=5)
+
+        self.assertIn("React Feed App", body)
+        self.assertNotIn("Legacy Dashboard", body)
