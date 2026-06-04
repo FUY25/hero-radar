@@ -5,6 +5,11 @@ import sqlite3
 import time
 from typing import Any
 
+from pipeline.decision.llm_cache import (
+    cache_key_for,
+    get_cached_response,
+    store_cached_response,
+)
 from pipeline.decision.schema import to_json, utc_now
 
 
@@ -29,6 +34,8 @@ SUCCESS_STATUSES = {
 }
 
 OBSERVATION_STATUSES = {
+    "llm_cache_hit",
+    "llm_cache_miss",
     "llm_call_started",
     "llm_call_ok",
     "llm_call_error",
@@ -224,4 +231,89 @@ class TelemetryLLMProvider:
             },
         )
         self._conn.commit()
+        return response
+
+
+class CachedTelemetryLLMProvider(TelemetryLLMProvider):
+    def complete_json(
+        self,
+        *,
+        task: str,
+        prompt_version: str,
+        input_payload: dict[str, Any],
+        system_prompt: str = "",
+    ) -> dict[str, Any]:
+        cache_key = cache_key_for(
+            provider=self.provider_name,
+            model=self.model,
+            prompt_version=prompt_version,
+            task=task,
+            input_payload=input_payload,
+        )
+        metadata = {
+            "task": task,
+            "prompt_version": prompt_version,
+            "provider": self.provider_name,
+            "model": self.model,
+            "cache_key": cache_key,
+        }
+        cached = get_cached_response(self._conn, cache_key)
+        if cached and cached.get("status") == "ok":
+            record_stage_event(
+                self._conn,
+                feed_run_id=self._feed_run_id,
+                group_id=self._group_id,
+                stage=self._stage,
+                status="llm_cache_hit",
+                metadata=metadata,
+            )
+            self._conn.commit()
+            return cached["response_json"]
+        record_stage_event(
+            self._conn,
+            feed_run_id=self._feed_run_id,
+            group_id=self._group_id,
+            stage=self._stage,
+            status="llm_cache_miss",
+            metadata=metadata,
+        )
+        self._conn.commit()
+        try:
+            response = super().complete_json(
+                task=task,
+                prompt_version=prompt_version,
+                input_payload=input_payload,
+                system_prompt=system_prompt,
+            )
+        except Exception as exc:
+            store_cached_response(
+                self._conn,
+                provider=self.provider_name,
+                model=self.model,
+                prompt_version=prompt_version,
+                task=task,
+                input_payload=input_payload,
+                request_payload={
+                    "input_payload": input_payload,
+                    "system_prompt": system_prompt,
+                },
+                response_payload={},
+                status="error",
+                error=sanitize_text(exc),
+            )
+            raise
+        store_cached_response(
+            self._conn,
+            provider=self.provider_name,
+            model=self.model,
+            prompt_version=prompt_version,
+            task=task,
+            input_payload=input_payload,
+            request_payload={
+                "input_payload": input_payload,
+                "system_prompt": system_prompt,
+            },
+            response_payload=response,
+            status="ok",
+        )
         return response

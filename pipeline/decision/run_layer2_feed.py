@@ -25,6 +25,7 @@ from pipeline.decision.layer2_grouping import (
     persist_candidate_groups,
 )
 from pipeline.decision.layer2_harness import (
+    CachedTelemetryLLMProvider,
     TelemetryLLMProvider,
     final_run_status,
     record_stage_event,
@@ -329,7 +330,7 @@ def run_layer2_feed(
         )
         for group in scoring_candidates:
             try:
-                active_scoring_provider = TelemetryLLMProvider(
+                active_scoring_provider = CachedTelemetryLLMProvider(
                     scoring_provider,
                     conn=conn,
                     feed_run_id=active_feed_run_id,
@@ -398,7 +399,7 @@ def run_layer2_feed(
                     status="brief_selected",
                 )
                 try:
-                    active_brief_provider = TelemetryLLMProvider(
+                    active_brief_provider = CachedTelemetryLLMProvider(
                         scoring_provider,
                         conn=conn,
                         feed_run_id=active_feed_run_id,

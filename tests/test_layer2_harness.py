@@ -133,6 +133,69 @@ class Layer2HarnessTest(unittest.TestCase):
         self.assertNotIn("secret-token", rows[1][1])
         self.assertEqual(stage_summary(conn, "l2-run")["error_total"], 0)
 
+    def test_cached_telemetry_provider_reuses_json_response_and_records_hit(self):
+        from pipeline.decision.layer2_harness import CachedTelemetryLLMProvider
+
+        class Provider:
+            provider_name = "fake"
+            model = "fake-json"
+
+            def __init__(self):
+                self.calls = 0
+
+            def complete_json(self, **kwargs):
+                self.calls += 1
+                return {"ok": True, "score": 88}
+
+        conn = sqlite3.connect(":memory:")
+        init_decision_db(conn)
+        first_provider = Provider()
+        first = CachedTelemetryLLMProvider(
+            first_provider,
+            conn=conn,
+            feed_run_id="l2-run",
+            group_id="group:repo",
+            stage="scoring",
+        )
+        second_provider = Provider()
+        second = CachedTelemetryLLMProvider(
+            second_provider,
+            conn=conn,
+            feed_run_id="l2-run-2",
+            group_id="group:repo",
+            stage="scoring",
+        )
+
+        payload = {"group_id": "group:repo", "evidence_hash": "hash"}
+        self.assertEqual(
+            first.complete_json(
+                task="layer2_scoring_investigator_turn",
+                prompt_version="v1",
+                input_payload=payload,
+            ),
+            {"ok": True, "score": 88},
+        )
+        self.assertEqual(
+            second.complete_json(
+                task="layer2_scoring_investigator_turn",
+                prompt_version="v1",
+                input_payload=payload,
+            ),
+            {"ok": True, "score": 88},
+        )
+
+        statuses = [
+            row[0]
+            for row in conn.execute(
+                "select status from l2_stage_events order by id"
+            ).fetchall()
+        ]
+        self.assertEqual(first_provider.calls, 1)
+        self.assertEqual(second_provider.calls, 0)
+        self.assertIn("llm_cache_miss", statuses)
+        self.assertIn("llm_cache_hit", statuses)
+        self.assertEqual(conn.execute("select count(*) from llm_cache").fetchone()[0], 1)
+
 
 if __name__ == "__main__":
     unittest.main()
