@@ -75,6 +75,31 @@ def final_response(**axis_overrides):
     }
 
 
+def scored_row(
+    *,
+    score: float,
+    level: str = "potential",
+    should_print: bool = True,
+    group_id: str = "group:repo",
+) -> dict:
+    group = make_group(level=level)
+    group = CandidateGroup(
+        **{
+            **group.__dict__,
+            "group_id": group_id,
+        }
+    )
+    return {
+        "group": group,
+        "l2_score": score,
+        "should_print": should_print,
+        "primary_reason": "Signal",
+        "rationale_short": "Short rationale",
+        "topic_tags": [],
+        "caveats": [],
+    }
+
+
 class Layer2ScoringInvestigatorTest(unittest.TestCase):
     def make_conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(":memory:")
@@ -238,6 +263,25 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
 
         self.assertEqual(weak_core, 69)
         self.assertEqual(news, 55)
+
+    def test_selects_brief_candidates_by_score_and_high_potential_tiebreaker(self):
+        from pipeline.decision.layer2_scoring_investigator import (
+            select_deepdive_brief_candidates,
+        )
+
+        selected = select_deepdive_brief_candidates(
+            [
+                scored_row(score=88, level="potential", group_id="g1"),
+                scored_row(score=88, level="high_potential", group_id="g2"),
+                scored_row(score=69, level="high_potential", group_id="g3"),
+                scored_row(score=95, should_print=False, group_id="g4"),
+            ],
+            min_score=70,
+            target_count=8,
+            max_count=10,
+        )
+
+        self.assertEqual([row["group"].group_id for row in selected], ["g2", "g1"])
 
 
 if __name__ == "__main__":

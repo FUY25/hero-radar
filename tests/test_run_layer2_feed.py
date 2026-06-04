@@ -59,20 +59,47 @@ class Layer2RunnerTest(unittest.TestCase):
         conn.commit()
         conn.close()
 
-    def valid_score_response(self, reason: str = "Workflow Shift") -> dict:
+    def valid_score_response(
+        self,
+        reason: str = "Workflow Shift",
+        *,
+        should_print: bool = True,
+    ) -> dict:
         return {
-            "axes": {
-                "momentum": 80,
-                "workflow_shift": 80,
-                "technical_substance": 80,
-                "adoption_path": 80,
-                "confidence": 80,
-                "derivative_news_penalty": 0,
+            "action": "final",
+            "score": {
+                "object_type": "repo",
+                "is_product_or_repo": True,
+                "axes": {
+                    "momentum": 80,
+                    "workflow_shift": 80,
+                    "technical_substance": 80,
+                    "product_market_fit": 80,
+                    "confidence": 80,
+                    "risk_penalty": 0,
+                    "derivative_news_penalty": 0,
+                },
+                "supporting_evidence": ["README shows a concrete workflow."],
+                "negative_evidence": [],
+                "known_gaps": [],
+                "primary_reason": reason,
+                "topic_tags": ["agent workflow"],
+                "rationale_short": "Worth reading.",
+                "caveats": [],
+                "should_print": should_print,
             },
-            "primary_reason": reason,
-            "topic_tags": ["agent workflow"],
-            "rationale_short": "Worth reading.",
-            "caveats": [],
+        }
+
+    def valid_brief_response(self) -> dict:
+        return {
+            "category": {"primary": "开发工具", "tags": ["agent", "repo"]},
+            "headline": "owner/repo 值得今天重点看",
+            "core_highlights": [
+                "把原本分散的开发流程压到一个可执行工具里。",
+                "README 给出了明确的使用入口和技术机制。",
+            ],
+            "use_cases": ["开发者评估新的 agent workflow。"],
+            "caveat": "还需要验证真实使用留存。",
         }
 
     def test_default_feed_run_id_is_stable_prefix(self):
@@ -144,31 +171,8 @@ class Layer2RunnerTest(unittest.TestCase):
 
             provider = FakeLLMProvider(
                 [
-                    {
-                        "axes": {
-                            "momentum": 80,
-                            "workflow_shift": 80,
-                            "technical_substance": 80,
-                            "adoption_path": 80,
-                            "confidence": 80,
-                            "derivative_news_penalty": 0,
-                        },
-                        "primary_reason": "Workflow Shift",
-                        "topic_tags": ["agent workflow"],
-                        "rationale_short": "Worth reading.",
-                        "caveats": [],
-                    },
-                    {"tool_requests": []},
-                    {
-                        "summary": "Summary",
-                        "why_now": "Now",
-                        "what_changed": "Changed",
-                        "evidence": ["Evidence"],
-                        "adoption_path": "Path",
-                        "risks": [],
-                        "open_questions": [],
-                        "recommended_action": "read",
-                    },
+                    self.valid_score_response(),
+                    self.valid_brief_response(),
                 ]
             )
             summary = run_layer2_feed(
@@ -177,11 +181,13 @@ class Layer2RunnerTest(unittest.TestCase):
                 feed_run_id="l2-test",
                 now="2026-05-31T12:00:00Z",
                 provider=provider,
-                config={"max_deepdives_per_run": 1, "deepdive_min_l2_score": 0},
+                config={"brief_min_score": 0, "brief_target_count": 1},
             )
 
             self.assertTrue(summary["ok"])
             self.assertEqual(summary["feed_run_id"], "l2-test")
+            self.assertEqual(summary["briefs"], 1)
+            self.assertEqual(summary["deepdives"], 0)
             conn = sqlite3.connect(db_path)
             self.assertEqual(
                 conn.execute("select count(*) from l2_feed_runs").fetchone()[0], 1
@@ -189,6 +195,27 @@ class Layer2RunnerTest(unittest.TestCase):
             self.assertEqual(
                 conn.execute("select count(*) from l2_scores").fetchone()[0], 1
             )
+            self.assertEqual(
+                conn.execute(
+                    "select count(*) from l2_scoring_investigations"
+                ).fetchone()[0],
+                1,
+            )
+            self.assertEqual(
+                conn.execute(
+                    "select count(*) from l2_deepdive_briefs"
+                ).fetchone()[0],
+                1,
+            )
+            self.assertEqual(
+                conn.execute("select count(*) from deepdive_reports").fetchone()[0],
+                0,
+            )
+            brief_json, status = conn.execute(
+                "select brief_json, status from l2_deepdive_briefs"
+            ).fetchone()
+            self.assertEqual(status, "ok")
+            self.assertIn("开发工具", brief_json)
             conn.close()
 
     def test_run_layer2_continues_when_one_scoring_candidate_fails(self):
@@ -243,32 +270,8 @@ class Layer2RunnerTest(unittest.TestCase):
 
             provider = FakeLLMProvider(
                 [
-                    {"axes": {"momentum": "not-a-number"}},
-                    {
-                        "axes": {
-                            "momentum": 80,
-                            "workflow_shift": 80,
-                            "technical_substance": 80,
-                            "adoption_path": 80,
-                            "confidence": 80,
-                            "derivative_news_penalty": 0,
-                        },
-                        "primary_reason": "Workflow Shift",
-                        "topic_tags": ["agent workflow"],
-                        "rationale_short": "Worth reading.",
-                        "caveats": [],
-                    },
-                    {"tool_requests": []},
-                    {
-                        "summary": "Summary",
-                        "why_now": "Now",
-                        "what_changed": "Changed",
-                        "evidence": ["Evidence"],
-                        "adoption_path": "Path",
-                        "risks": [],
-                        "open_questions": [],
-                        "recommended_action": "read",
-                    },
+                    {"action": "use_tools", "tool_requests": []},
+                    self.valid_score_response(),
                 ]
             )
 
@@ -278,7 +281,10 @@ class Layer2RunnerTest(unittest.TestCase):
                 feed_run_id="l2-errors",
                 now="2026-06-01T12:00:00Z",
                 provider=provider,
-                config={"max_deepdives_per_run": 1, "deepdive_min_l2_score": 0},
+                config={
+                    "max_investigation_turns": 1,
+                    "enable_deepdive_briefs": False,
+                },
             )
 
             self.assertTrue(summary["ok"])
@@ -328,7 +334,7 @@ class Layer2RunnerTest(unittest.TestCase):
                 config={
                     "max_scored_candidates": 2,
                     "max_total_scoring_candidates": 1,
-                    "max_deepdives_per_run": 0,
+                    "enable_deepdive_briefs": False,
                 },
             )
 
@@ -357,7 +363,7 @@ class Layer2RunnerTest(unittest.TestCase):
                 feed_run_id="l2-scout-disabled",
                 now="2026-06-01T12:00:00Z",
                 provider=provider,
-                config={"max_deepdives_per_run": 0},
+                config={"enable_deepdive_briefs": False},
             )
 
             conn = sqlite3.connect(db_path)
@@ -413,14 +419,14 @@ class Layer2RunnerTest(unittest.TestCase):
                 provider=provider,
                 config={
                     "enable_edge_scout": True,
-                    "max_deepdives_per_run": 0,
+                    "enable_deepdive_briefs": False,
                 },
             )
 
         self.assertEqual(summary["scored"], 1)
         self.assertEqual(
             [call["task"] for call in provider.calls],
-            ["layer2_edge_scout", "layer2_scoring"],
+            ["layer2_edge_scout", "layer2_scoring_investigator_turn"],
         )
 
     def test_run_layer2_marks_stale_running_runs_before_starting(self):
@@ -455,7 +461,7 @@ class Layer2RunnerTest(unittest.TestCase):
                 now="2026-06-01T12:00:00Z",
                 provider=provider,
                 config={
-                    "max_deepdives_per_run": 0,
+                    "enable_deepdive_briefs": False,
                     "finalize_stale_running_before": "2026-06-01T01:00:00Z",
                 },
             )
@@ -486,8 +492,12 @@ class Layer2RunnerTest(unittest.TestCase):
 
         self.assertFalse(config["enable_edge_scout"])
         self.assertEqual(config["max_deepdives_per_run"], 0)
+        self.assertTrue(config["enable_deepdive_briefs"])
         self.assertEqual(config["scout_timeout_seconds"], 7)
         self.assertEqual(config["max_total_scoring_candidates"], 2)
 
         enabled = config_from_args(parse_args(["--enable-edge-scout"]))
         self.assertTrue(enabled["enable_edge_scout"])
+        default_config = config_from_args(parse_args([]))
+        self.assertEqual(default_config["max_deepdives_per_run"], 0)
+        self.assertEqual(default_config["brief_target_count"], 8)

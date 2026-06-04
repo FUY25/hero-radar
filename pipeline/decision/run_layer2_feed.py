@@ -30,9 +30,21 @@ from pipeline.decision.layer2_harness import (
     record_stage_event,
     stage_summary,
 )
+from pipeline.decision.layer2_investigator_tools import (
+    GitHubFileClient,
+    InvestigatorToolLimits,
+    PageFetchClient,
+    ScoringInvestigatorTools,
+)
 from pipeline.decision.layer2_scheduler import schedule_layer2_work
-from pipeline.decision.layer2_scoring import score_candidate_groups
+from pipeline.decision.layer2_scoring_investigator import (
+    InvestigatorLimits,
+    generate_deepdive_briefs,
+    score_with_investigator,
+    select_deepdive_brief_candidates,
+)
 from pipeline.decision.layer2_scout import scout_edge_watch_groups
+from pipeline.decision.readme_enrichment import GitHubReadmeClient
 from pipeline.decision.schema import init_decision_db, to_json, utc_now
 
 
@@ -267,6 +279,54 @@ def run_layer2_feed(
                     status="pending_budget",
                     metadata={"reason": "max_total_scoring_candidates"},
                 )
+        scoring_web_search_timeout = _optional_int(
+            cfg.get("web_search_timeout_seconds")
+        )
+        if scoring_web_search_timeout is not None and hasattr(
+            scoring_provider, "timeout"
+        ):
+            setattr(scoring_provider, "timeout", scoring_web_search_timeout)
+        scoring_web_search_client = (
+            KimiWebSearchClient(provider=scoring_provider)
+            if bool(cfg.get("enable_kimi_web_search", False))
+            else None
+        )
+        investigator_tools = ScoringInvestigatorTools(
+            conn,
+            decision_run_id=active_decision_run_id,
+            readme_client=GitHubReadmeClient(),
+            github_file_client=GitHubFileClient(),
+            page_client=PageFetchClient(),
+            web_search_client=scoring_web_search_client,
+            limits=InvestigatorToolLimits(
+                max_evidence_rows=int(cfg.get("max_evidence_rows_per_candidate", 80)),
+                max_github_file_chars=int(cfg.get("max_github_file_chars", 6000)),
+                max_homepage_chars=int(cfg.get("max_homepage_chars", 6000)),
+                max_web_results=int(cfg.get("max_web_results", 5)),
+            ),
+        )
+        investigator_limits = InvestigatorLimits(
+            max_investigation_turns=int(cfg.get("max_investigation_turns", 3)),
+            max_scoring_attempts=int(cfg.get("max_scoring_attempts", 3)),
+            max_tool_calls_per_candidate=int(
+                cfg.get("max_tool_calls_per_candidate", 8)
+            ),
+            max_web_search_calls_per_candidate=int(
+                cfg.get("max_web_search_calls_per_candidate", 1)
+            ),
+            max_github_file_calls_per_candidate=int(
+                cfg.get(
+                    "max_github_file_calls_per_candidate",
+                    cfg.get("max_repo_files_per_candidate", 3),
+                )
+            ),
+            max_homepage_fetches_per_candidate=int(
+                cfg.get(
+                    "max_homepage_fetches_per_candidate",
+                    cfg.get("max_pages_per_candidate", 1),
+                )
+            ),
+        )
         for group in scoring_candidates:
             try:
                 active_scoring_provider = TelemetryLLMProvider(
@@ -277,11 +337,13 @@ def run_layer2_feed(
                     stage="scoring",
                     timeout_seconds=_optional_int(cfg.get("scoring_timeout_seconds")),
                 )
-                result = score_candidate_groups(
+                result = score_with_investigator(
                     conn,
                     feed_run_id=active_feed_run_id,
                     groups=[group],
                     provider=active_scoring_provider,
+                    tools=investigator_tools.available_tools(),
+                    limits=investigator_limits,
                 )
                 scored.extend(result)
                 record_stage_event(
@@ -318,95 +380,161 @@ def run_layer2_feed(
                     "not_deepdived",
                 ),
             )
-        web_search_timeout = _optional_int(cfg.get("web_search_timeout_seconds"))
-        if web_search_timeout is not None and hasattr(active_deepdive_provider, "timeout"):
-            setattr(active_deepdive_provider, "timeout", web_search_timeout)
-        web_search_client = (
-            KimiWebSearchClient(provider=active_deepdive_provider)
-            if bool(cfg.get("enable_kimi_web_search", False))
-            else None
-        )
-        active_tools = default_deepdive_tools(
-            conn,
-            decision_run_id=active_decision_run_id,
-            enable_kimi_web_search=bool(cfg.get("enable_kimi_web_search", False)),
-            web_search_client=web_search_client,
-        )
-        active_limits = DeepdiveLimits(
-            max_tool_calls=int(
-                cfg.get(
-                    "max_tool_calls_per_candidate",
-                    (
-                        int(cfg.get("max_web_search_calls_per_candidate", 3))
-                        + int(cfg.get("max_repo_files_per_candidate", 8))
-                        + int(cfg.get("max_pages_per_candidate", 6))
-                    ),
-                )
-            ),
-            max_web_search_calls=int(cfg.get("max_web_search_calls_per_candidate", 3)),
-            max_repo_file_calls=int(cfg.get("max_repo_files_per_candidate", 8)),
-            max_page_fetch_calls=int(cfg.get("max_pages_per_candidate", 6)),
-            max_hn_thread_calls=int(
-                cfg.get("max_hn_thread_fetches_per_candidate", 3)
-            ),
-            max_x_context_calls=int(cfg.get("max_x_context_fetches_per_candidate", 5)),
-        )
-        selected_for_deepdive = select_deepdives(
-            scored,
-            max_deepdives=int(cfg.get("max_deepdives_per_run", 10)),
-            min_l2_score=float(cfg.get("deepdive_min_l2_score", 70)),
-        )
-        reports = []
-        for row in selected_for_deepdive:
-            group = row["group"]
-            record_stage_event(
-                conn,
-                feed_run_id=active_feed_run_id,
-                group_id=group.group_id,
-                stage="deepdive",
-                status="deepdive_selected",
+        briefs = []
+        if bool(cfg.get("enable_deepdive_briefs", True)):
+            selected_for_brief = select_deepdive_brief_candidates(
+                scored,
+                min_score=float(cfg.get("brief_min_score", 70)),
+                target_count=int(cfg.get("brief_target_count", 8)),
+                max_count=int(cfg.get("brief_max_count", 10)),
             )
-            try:
-                active_deepdive_stage_provider = TelemetryLLMProvider(
-                    active_deepdive_provider,
-                    conn=conn,
+            for row in selected_for_brief:
+                group = row["group"]
+                record_stage_event(
+                    conn,
                     feed_run_id=active_feed_run_id,
                     group_id=group.group_id,
-                    stage="deepdive",
-                    timeout_seconds=_optional_int(cfg.get("deepdive_timeout_seconds")),
+                    stage="brief",
+                    status="brief_selected",
                 )
-                reports.extend(
-                    run_deepdives(
+                try:
+                    active_brief_provider = TelemetryLLMProvider(
+                        scoring_provider,
+                        conn=conn,
+                        feed_run_id=active_feed_run_id,
+                        group_id=group.group_id,
+                        stage="brief",
+                        timeout_seconds=_optional_int(
+                            cfg.get(
+                                "brief_timeout_seconds",
+                                cfg.get("scoring_timeout_seconds"),
+                            )
+                        ),
+                    )
+                    briefs.extend(
+                        generate_deepdive_briefs(
+                            conn,
+                            feed_run_id=active_feed_run_id,
+                            selected=[row],
+                            provider=active_brief_provider,
+                        )
+                    )
+                    record_stage_event(
                         conn,
                         feed_run_id=active_feed_run_id,
-                        scored=[row],
-                        provider=active_deepdive_stage_provider,
-                        max_deepdives=1,
-                        min_l2_score=0,
-                        tools=active_tools,
-                        limits=active_limits,
+                        group_id=group.group_id,
+                        stage="brief",
+                        status="brief_ok",
                     )
-                )
+                except Exception as exc:
+                    record_stage_event(
+                        conn,
+                        feed_run_id=active_feed_run_id,
+                        group_id=group.group_id,
+                        stage="brief",
+                        status="brief_error",
+                        error=exc,
+                    )
+
+        reports = []
+        if bool(cfg.get("enable_legacy_deepdive", False)):
+            web_search_timeout = _optional_int(cfg.get("web_search_timeout_seconds"))
+            if web_search_timeout is not None and hasattr(
+                active_deepdive_provider, "timeout"
+            ):
+                setattr(active_deepdive_provider, "timeout", web_search_timeout)
+            web_search_client = (
+                KimiWebSearchClient(provider=active_deepdive_provider)
+                if bool(cfg.get("enable_kimi_web_search", False))
+                else None
+            )
+            active_tools = default_deepdive_tools(
+                conn,
+                decision_run_id=active_decision_run_id,
+                enable_kimi_web_search=bool(cfg.get("enable_kimi_web_search", False)),
+                web_search_client=web_search_client,
+            )
+            active_limits = DeepdiveLimits(
+                max_tool_calls=int(
+                    cfg.get(
+                        "max_tool_calls_per_candidate",
+                        (
+                            int(cfg.get("max_web_search_calls_per_candidate", 3))
+                            + int(cfg.get("max_repo_files_per_candidate", 8))
+                            + int(cfg.get("max_pages_per_candidate", 6))
+                        ),
+                    )
+                ),
+                max_web_search_calls=int(
+                    cfg.get("max_web_search_calls_per_candidate", 3)
+                ),
+                max_repo_file_calls=int(cfg.get("max_repo_files_per_candidate", 8)),
+                max_page_fetch_calls=int(cfg.get("max_pages_per_candidate", 6)),
+                max_hn_thread_calls=int(
+                    cfg.get("max_hn_thread_fetches_per_candidate", 3)
+                ),
+                max_x_context_calls=int(
+                    cfg.get("max_x_context_fetches_per_candidate", 5)
+                ),
+            )
+            selected_for_deepdive = select_deepdives(
+                scored,
+                max_deepdives=int(cfg.get("max_deepdives_per_run", 0)),
+                min_l2_score=float(cfg.get("deepdive_min_l2_score", 70)),
+            )
+            for row in selected_for_deepdive:
+                group = row["group"]
                 record_stage_event(
                     conn,
                     feed_run_id=active_feed_run_id,
                     group_id=group.group_id,
                     stage="deepdive",
-                    status="deepdive_ok",
+                    status="deepdive_selected",
                 )
-            except Exception as exc:
-                record_stage_event(
-                    conn,
-                    feed_run_id=active_feed_run_id,
-                    group_id=group.group_id,
-                    stage="deepdive",
-                    status="deepdive_error",
-                    error=exc,
-                )
+                try:
+                    active_deepdive_stage_provider = TelemetryLLMProvider(
+                        active_deepdive_provider,
+                        conn=conn,
+                        feed_run_id=active_feed_run_id,
+                        group_id=group.group_id,
+                        stage="deepdive",
+                        timeout_seconds=_optional_int(
+                            cfg.get("deepdive_timeout_seconds")
+                        ),
+                    )
+                    reports.extend(
+                        run_deepdives(
+                            conn,
+                            feed_run_id=active_feed_run_id,
+                            scored=[row],
+                            provider=active_deepdive_stage_provider,
+                            max_deepdives=1,
+                            min_l2_score=0,
+                            tools=active_tools,
+                            limits=active_limits,
+                        )
+                    )
+                    record_stage_event(
+                        conn,
+                        feed_run_id=active_feed_run_id,
+                        group_id=group.group_id,
+                        stage="deepdive",
+                        status="deepdive_ok",
+                    )
+                except Exception as exc:
+                    record_stage_event(
+                        conn,
+                        feed_run_id=active_feed_run_id,
+                        group_id=group.group_id,
+                        stage="deepdive",
+                        status="deepdive_error",
+                        error=exc,
+                    )
         telemetry = stage_summary(conn, active_feed_run_id)
         status = final_run_status(telemetry)
         note = {
             "scored": len(scored),
+            "briefs": len(briefs),
             "deepdives": len(reports),
             "stage_counts": telemetry["stage_counts"],
             "error_counts": telemetry["error_counts"],
@@ -433,6 +561,7 @@ def run_layer2_feed(
             "decision_run_id": active_decision_run_id,
             "groups": len(groups),
             "scored": len(scored),
+            "briefs": len(briefs),
             "deepdives": len(reports),
             "status": status,
             "errors": telemetry["error_total"],
@@ -465,9 +594,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--now", default=None)
     parser.add_argument("--edge-scout-limit", type=int, default=50)
     parser.add_argument("--scoring-limit", type=int, default=150)
-    parser.add_argument("--deepdive-limit", type=int, default=10)
+    parser.add_argument("--deepdive-limit", type=int, default=0)
     parser.add_argument("--no-deepdive", action="store_true")
+    parser.add_argument("--enable-legacy-deepdive", action="store_true")
     parser.add_argument("--deepdive-min-l2-score", type=float, default=70)
+    parser.add_argument("--no-briefs", action="store_true")
+    parser.add_argument("--brief-min-score", type=float, default=70)
+    parser.add_argument("--brief-target-count", type=int, default=8)
+    parser.add_argument("--brief-max-count", type=int, default=10)
     parser.add_argument("--enable-edge-scout", action="store_true")
     parser.add_argument("--scout-model", default=DEFAULT_KIMI_SCORING_MODEL)
     parser.add_argument("--scoring-model", default=DEFAULT_KIMI_SCORING_MODEL)
@@ -479,10 +613,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--deepdive-timeout-seconds", type=int, default=None)
     parser.add_argument("--web-search-timeout-seconds", type=int, default=None)
     parser.add_argument("--finalize-stale-running-before", default=None)
-    parser.add_argument("--max-tool-calls-per-candidate", type=int, default=20)
-    parser.add_argument("--max-web-search-calls-per-candidate", type=int, default=3)
-    parser.add_argument("--max-repo-files-per-candidate", type=int, default=8)
-    parser.add_argument("--max-pages-per-candidate", type=int, default=6)
+    parser.add_argument("--max-investigation-turns", type=int, default=3)
+    parser.add_argument("--max-scoring-attempts", type=int, default=3)
+    parser.add_argument("--max-tool-calls-per-candidate", type=int, default=8)
+    parser.add_argument("--max-web-search-calls-per-candidate", type=int, default=1)
+    parser.add_argument("--max-repo-files-per-candidate", type=int, default=3)
+    parser.add_argument("--max-pages-per-candidate", type=int, default=1)
     parser.add_argument("--max-hn-thread-fetches-per-candidate", type=int, default=3)
     parser.add_argument("--max-x-context-fetches-per-candidate", type=int, default=5)
     return parser
@@ -498,7 +634,12 @@ def config_from_args(args: argparse.Namespace) -> dict[str, Any]:
         "max_edge_watch_scout": args.edge_scout_limit,
         "max_scored_candidates": args.scoring_limit,
         "max_deepdives_per_run": deepdive_limit,
+        "enable_legacy_deepdive": args.enable_legacy_deepdive,
         "deepdive_min_l2_score": args.deepdive_min_l2_score,
+        "enable_deepdive_briefs": not args.no_briefs,
+        "brief_min_score": args.brief_min_score,
+        "brief_target_count": args.brief_target_count,
+        "brief_max_count": args.brief_max_count,
         "enable_edge_scout": args.enable_edge_scout,
         "edge_scout_model": args.scout_model,
         "scoring_model": args.scoring_model,
@@ -510,6 +651,8 @@ def config_from_args(args: argparse.Namespace) -> dict[str, Any]:
         "deepdive_timeout_seconds": args.deepdive_timeout_seconds,
         "web_search_timeout_seconds": args.web_search_timeout_seconds,
         "finalize_stale_running_before": args.finalize_stale_running_before,
+        "max_investigation_turns": args.max_investigation_turns,
+        "max_scoring_attempts": args.max_scoring_attempts,
         "max_tool_calls_per_candidate": args.max_tool_calls_per_candidate,
         "max_web_search_calls_per_candidate": args.max_web_search_calls_per_candidate,
         "max_repo_files_per_candidate": args.max_repo_files_per_candidate,

@@ -5,11 +5,12 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from pipeline.decision.layer2_models import CandidateGroup
+from pipeline.decision.layer2_models import LEVEL_RANK, CandidateGroup
 from pipeline.decision.schema import to_json, utc_now
 
 
 DEFAULT_INVESTIGATOR_PROMPT_VERSION = "layer2-scoring-investigator-v1"
+DEFAULT_BRIEF_PROMPT_VERSION = "layer2-scoring-investigator-brief-v1"
 
 
 SCORING_INVESTIGATOR_SYSTEM_PROMPT = """
@@ -41,6 +42,24 @@ Return strict JSON. On each turn return either:
 {"action":"use_tools","information_need":"...","tool_requests":[{"name":"...","arguments":{...}}]}
 or:
 {"action":"final","score":{...},"brief":{"should_print":false}}
+"""
+
+
+BRIEF_SYSTEM_PROMPT = """
+You write the selected Hero Radar Layer 2 deepdive brief.
+
+Use only the provided score, candidate context, investigation trace, and tool
+trace. Do not ask for tools. Write concise Chinese for a product-intelligence
+reader. Keep project names, repo names, and URLs in their original language.
+
+Return strict JSON with:
+{
+  "category": {"primary":"...", "tags":["..."]},
+  "headline": "...",
+  "core_highlights": ["1-3 items"],
+  "use_cases": ["1-4 items"],
+  "caveat": "optional"
+}
 """
 
 
@@ -114,6 +133,146 @@ def score_with_investigator(
         results.append(result)
     conn.commit()
     return results
+
+
+def select_deepdive_brief_candidates(
+    scored: list[dict[str, Any]],
+    *,
+    min_score: float = 70,
+    target_count: int = 8,
+    max_count: int = 10,
+) -> list[dict[str, Any]]:
+    if max_count <= 0 or target_count <= 0:
+        return []
+    eligible = [
+        row
+        for row in scored
+        if float(row.get("l2_score") or 0) >= float(min_score)
+        and bool(row.get("should_print", True))
+    ]
+    ordered = sorted(
+        eligible,
+        key=lambda row: (
+            -float(row.get("l2_score") or 0),
+            -LEVEL_RANK.get(getattr(row.get("group"), "level", ""), 0),
+            getattr(row.get("group"), "group_id", ""),
+        ),
+    )
+    limit = min(max_count, target_count)
+    selected = ordered[:limit]
+    if len(selected) == limit and limit < max_count:
+        cutoff = float(selected[-1].get("l2_score") or 0)
+        for row in ordered[limit:max_count]:
+            if float(row.get("l2_score") or 0) != cutoff:
+                break
+            selected.append(row)
+    return selected
+
+
+def generate_deepdive_briefs(
+    conn: sqlite3.Connection,
+    *,
+    feed_run_id: str,
+    selected: list[dict[str, Any]],
+    provider: Any,
+    prompt_version: str = DEFAULT_BRIEF_PROMPT_VERSION,
+) -> list[dict[str, Any]]:
+    briefs: list[dict[str, Any]] = []
+    for row in selected:
+        group = row["group"]
+        payload = {
+            "group_id": group.group_id,
+            "candidate": group.context,
+            "candidate_identity": _candidate_identity(group),
+            "score": {
+                key: row.get(key)
+                for key in [
+                    "object_type",
+                    "is_product_or_repo",
+                    "axes",
+                    "l2_score",
+                    "supporting_evidence",
+                    "negative_evidence",
+                    "known_gaps",
+                    "primary_reason",
+                    "rationale_short",
+                    "topic_tags",
+                    "caveats",
+                ]
+            },
+            "investigation_trace": row.get("trace") or [],
+            "tool_trace": row.get("tool_trace") or [],
+            "schema": _brief_schema(),
+        }
+        response = provider.complete_json(
+            task="layer2_scoring_investigator_brief",
+            prompt_version=prompt_version,
+            input_payload=payload,
+            system_prompt=BRIEF_SYSTEM_PROMPT,
+        )
+        brief = normalize_deepdive_brief(response)
+        cache_payload = {**payload, "brief": brief}
+        cache_key = _cache_key(
+            provider.provider_name,
+            provider.model,
+            prompt_version,
+            cache_payload,
+        )
+        conn.execute(
+            """
+            insert or replace into l2_deepdive_briefs(
+              feed_run_id, group_id, status, brief_json, language,
+              provider, model, prompt_version, cache_key, created_at
+            )
+            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                feed_run_id,
+                group.group_id,
+                "ok",
+                to_json(brief),
+                "zh",
+                provider.provider_name,
+                provider.model,
+                prompt_version,
+                cache_key,
+                utc_now(),
+            ),
+        )
+        conn.execute(
+            """
+            update l2_feed_items
+            set deepdive_status = ?
+            where feed_run_id = ? and group_id = ?
+            """,
+            ("briefed", feed_run_id, group.group_id),
+        )
+        briefs.append({"group": group, "brief": brief})
+    conn.commit()
+    return briefs
+
+
+def normalize_deepdive_brief(response: dict[str, Any]) -> dict[str, Any]:
+    category = response.get("category") if isinstance(response, dict) else {}
+    if not isinstance(category, dict):
+        category = {}
+    brief = {
+        "category": {
+            "primary": str(category.get("primary") or "未分类")[:40],
+            "tags": _string_list(category.get("tags"), 8, 40),
+        },
+        "headline": str(response.get("headline") or "")[:160],
+        "core_highlights": _string_list(response.get("core_highlights"), 3, 220),
+        "use_cases": _string_list(response.get("use_cases"), 4, 220),
+    }
+    caveat = str(response.get("caveat") or "").strip()
+    if caveat:
+        brief["caveat"] = caveat[:240]
+    if not brief["headline"]:
+        raise ValueError("deepdive brief missing headline")
+    if not brief["core_highlights"]:
+        raise ValueError("deepdive brief missing core_highlights")
+    return brief
 
 
 def _score_one_group(
@@ -495,6 +654,18 @@ def _turn_schema() -> dict[str, Any]:
             "caveats": ["string"],
             "should_print": "boolean",
         },
+    }
+
+
+def _brief_schema() -> dict[str, Any]:
+    return {
+        "category": {"primary": "string", "tags": ["string"]},
+        "headline": "Chinese one-line brief headline",
+        "core_highlights": [
+            "1-3 concise Chinese items around workflow, technical substance, or product wedge"
+        ],
+        "use_cases": ["1-4 concise Chinese use cases"],
+        "caveat": "optional Chinese caveat",
     }
 
 

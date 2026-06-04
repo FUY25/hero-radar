@@ -22,6 +22,8 @@ SUCCESS_STATUSES = {
     "scout_ok",
     "scout_filtered",
     "scoring_ok",
+    "brief_selected",
+    "brief_ok",
     "deepdive_selected",
     "deepdive_ok",
 }
