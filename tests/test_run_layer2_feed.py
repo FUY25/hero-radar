@@ -100,7 +100,7 @@ class Layer2RunnerTest(unittest.TestCase):
                 "把原本分散的开发流程压到一个可执行工具里。",
                 "README 给出了明确的使用入口和技术机制。",
             ],
-            "use_cases": ["开发者评估新的 agent workflow。"],
+            "use_cases": ["开发者把重复的代码检查、文件修改和命令执行串成一次性工作流。"],
             "caveat": "还需要验证真实使用留存。",
         }
 

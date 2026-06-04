@@ -283,6 +283,13 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
 
         self.assertEqual([row["group"].group_id for row in selected], ["g2", "g1"])
 
+    def test_brief_prompt_keeps_project_analysis_separate_from_evidence(self):
+        from pipeline.decision.layer2_scoring_investigator import BRIEF_SYSTEM_PROMPT
+
+        self.assertIn("project itself", BRIEF_SYSTEM_PROMPT)
+        self.assertIn("Do not put evidence quality", BRIEF_SYSTEM_PROMPT)
+        self.assertIn("actual end users", BRIEF_SYSTEM_PROMPT)
+
 
 if __name__ == "__main__":
     unittest.main()

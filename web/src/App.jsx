@@ -1359,8 +1359,8 @@ function FeedSignalCard({ item, onOpenSource }) {
           <h2>{item.title}</h2>
           <p>{description}</p>
         </div>
-        <div className="signal-score-card" style={scoreStyle} aria-label={`L2 score ${Math.round(item.l2_score)}`}>
-          <span>L2</span>
+        <div className="signal-score-card" style={scoreStyle} aria-label={`信号分 ${Math.round(item.l2_score)}`}>
+          <span>信号分</span>
           <strong>{scoreStyle.label}</strong>
           <i aria-hidden="true" />
         </div>

@@ -10,7 +10,7 @@ from pipeline.decision.schema import to_json, utc_now
 
 
 DEFAULT_INVESTIGATOR_PROMPT_VERSION = "layer2-scoring-investigator-v1"
-DEFAULT_BRIEF_PROMPT_VERSION = "layer2-scoring-investigator-brief-v1"
+DEFAULT_BRIEF_PROMPT_VERSION = "layer2-scoring-investigator-brief-v2"
 
 
 SCORING_INVESTIGATOR_SYSTEM_PROMPT = """
@@ -52,13 +52,24 @@ Use only the provided score, candidate context, investigation trace, and tool
 trace. Do not ask for tools. Write concise Chinese for a product-intelligence
 reader. Keep project names, repo names, and URLs in their original language.
 
+Analyze the project itself, not the evidence trail. Core highlights must describe
+the product/repo's own capability, interaction model, technical mechanism, or
+product wedge. Do not put evidence quality, GitHub/HN/npm/Product Hunt traction,
+alias proof, or "why this is credible" into core_highlights unless that evidence
+directly explains a user-facing capability.
+
+Use cases must be jobs for actual end users of the project, such as developers,
+teams, creators, researchers, or operators. Do not write Hero Radar analyst tasks
+like "track this project", "evaluate the trend", or "observe adoption". Evidence
+and momentum are already shown separately in the feed.
+
 Return strict JSON with:
 {
   "category": {"primary":"...", "tags":["..."]},
-  "headline": "...",
-  "core_highlights": ["1-3 items"],
-  "use_cases": ["1-4 items"],
-  "caveat": "optional"
+  "headline": "Chinese one-sentence project thesis",
+  "core_highlights": ["1-3 Chinese items about the project itself"],
+  "use_cases": ["1-4 Chinese end-user jobs enabled by the project"],
+  "caveat": "optional Chinese risk or uncertainty"
 }
 """
 
