@@ -196,6 +196,72 @@ class Layer2HarnessTest(unittest.TestCase):
         self.assertIn("llm_cache_hit", statuses)
         self.assertEqual(conn.execute("select count(*) from llm_cache").fetchone()[0], 1)
 
+    def test_cached_telemetry_key_changes_with_prompt_evidence_and_context_hashes(self):
+        from pipeline.decision.layer2_harness import CachedTelemetryLLMProvider
+
+        class Provider:
+            provider_name = "fake"
+            model = "fake-json"
+
+            def __init__(self):
+                self.calls = 0
+
+            def complete_json(self, **kwargs):
+                self.calls += 1
+                return {"call": self.calls}
+
+        conn = sqlite3.connect(":memory:")
+        init_decision_db(conn)
+        provider = Provider()
+        wrapped = CachedTelemetryLLMProvider(
+            provider,
+            conn=conn,
+            feed_run_id="l2-run",
+            group_id="group:repo",
+            stage="scoring",
+        )
+        payload = {
+            "group_id": "group:repo",
+            "evidence_hash": "evidence-a",
+            "context_hash": "context-a",
+        }
+
+        self.assertEqual(
+            wrapped.complete_json(
+                task="layer2_scoring_investigator_turn",
+                prompt_version="route-react-v1",
+                input_payload=payload,
+            ),
+            {"call": 1},
+        )
+        self.assertEqual(
+            wrapped.complete_json(
+                task="layer2_scoring_investigator_turn",
+                prompt_version="route-react-v1",
+                input_payload={**payload, "evidence_hash": "evidence-b"},
+            ),
+            {"call": 2},
+        )
+        self.assertEqual(
+            wrapped.complete_json(
+                task="layer2_scoring_investigator_turn",
+                prompt_version="route-react-v2",
+                input_payload=payload,
+            ),
+            {"call": 3},
+        )
+        self.assertEqual(
+            wrapped.complete_json(
+                task="layer2_scoring_investigator_turn",
+                prompt_version="route-react-v1",
+                input_payload=payload,
+            ),
+            {"call": 1},
+        )
+
+        self.assertEqual(provider.calls, 3)
+        self.assertEqual(conn.execute("select count(*) from llm_cache").fetchone()[0], 3)
+
 
 if __name__ == "__main__":
     unittest.main()

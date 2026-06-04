@@ -144,6 +144,69 @@ class Layer2GroupingTest(unittest.TestCase):
         self.assertEqual(groups[0].member_entity_ids, ["entity:a", "entity:b"])
         self.assertEqual(groups[0].grouping_reason["key"], "github:owner/repo")
 
+    def test_dedupes_identical_repo_across_canonical_alias_and_source_links(self):
+        from pipeline.decision.layer2_grouping import build_candidate_groups
+
+        conn = self.make_conn()
+        conn.execute(
+            "insert into items(id, source, name, url, description, metadata_json, raw_json) values (?, ?, ?, ?, ?, ?, ?)",
+            (
+                10,
+                "hn_search",
+                "Repo launch",
+                "https://github.com/Owner/Repo",
+                "",
+                "{}",
+                "{}",
+            ),
+        )
+        self.insert_entity(
+            conn, "entity:canonical", "owner/repo", "github:owner/repo", []
+        )
+        self.insert_entity(conn, "entity:alias", "repo package", "npm:repo", [])
+        self.insert_entity(conn, "entity:source", "Repo mention", "name:repo", [10])
+        conn.execute(
+            """
+            insert into alias_links(entity_id, source, external_id, alias, confidence, origin, approved, created_at)
+            values (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "entity:alias",
+                "resolver",
+                "npm:repo",
+                "github:OWNER/REPO",
+                "high",
+                "resolver",
+                1,
+                "2026-05-31T00:00:00Z",
+            ),
+        )
+        for entity_id, families in [
+            ("entity:canonical", '["github"]'),
+            ("entity:alias", '["package_family"]'),
+            ("entity:source", '["hn"]'),
+        ]:
+            conn.execute(
+                "insert into potential_candidates(entity_id, run_id, level, fired_families_json, first_trigger_at) values (?, ?, ?, ?, ?)",
+                (
+                    entity_id,
+                    "decision-run",
+                    "potential",
+                    families,
+                    "2026-05-31T00:00:00Z",
+                ),
+            )
+
+        groups = build_candidate_groups(conn, decision_run_id="decision-run")
+
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(
+            groups[0].member_entity_ids,
+            ["entity:canonical", "entity:alias", "entity:source"],
+        )
+        self.assertEqual(groups[0].canonical_link, "https://github.com/owner/repo")
+        self.assertEqual(groups[0].grouping_reason["key"], "github:owner/repo")
+
     def test_keeps_unrelated_name_matches_separate_without_strong_key(self):
         from pipeline.decision.layer2_grouping import build_candidate_groups
 

@@ -293,6 +293,9 @@ def query_feed_payload(feed_run_id: str | None = None) -> dict[str, Any]:
                 item for item in items if item["section"] == "today_focus"
             ],
             "scored_list": [item for item in items if item["section"] == "scored"],
+            "diagnostics": [
+                item for item in items if item["section"] == "diagnostics"
+            ],
             "pending": {"edge_watch_scout": 0, "deepdive": 0},
         }
     finally:
@@ -310,6 +313,7 @@ def _empty_feed_payload() -> dict[str, Any]:
         "stage_events": [],
         "today_focus": [],
         "scored_list": [],
+        "diagnostics": [],
         "pending": {"edge_watch_scout": 0, "deepdive": 0},
     }
 

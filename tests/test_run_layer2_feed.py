@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import tempfile
 import threading
@@ -66,21 +67,27 @@ class Layer2RunnerTest(unittest.TestCase):
         reason: str = "Workflow Shift",
         *,
         should_print: bool = True,
+        object_type: str = "repo",
+        is_product_or_repo: bool = True,
+        axes: dict | None = None,
     ) -> dict:
+        active_axes = {
+            "momentum": 80,
+            "workflow_shift": 80,
+            "technical_substance": 80,
+            "product_market_fit": 80,
+            "confidence": 80,
+            "risk_penalty": 0,
+            "derivative_news_penalty": 0,
+        }
+        if axes:
+            active_axes.update(axes)
         return {
             "action": "final",
             "score": {
-                "object_type": "repo",
-                "is_product_or_repo": True,
-                "axes": {
-                    "momentum": 80,
-                    "workflow_shift": 80,
-                    "technical_substance": 80,
-                    "product_market_fit": 80,
-                    "confidence": 80,
-                    "risk_penalty": 0,
-                    "derivative_news_penalty": 0,
-                },
+                "object_type": object_type,
+                "is_product_or_repo": is_product_or_repo,
+                "axes": active_axes,
                 "supporting_evidence": ["README shows a concrete workflow."],
                 "negative_evidence": [],
                 "known_gaps": [],
@@ -217,6 +224,13 @@ class Layer2RunnerTest(unittest.TestCase):
                 1,
             )
             self.assertEqual(
+                conn.execute(
+                    "select count(*) from l2_feed_items where section = ?",
+                    ("scored",),
+                ).fetchone()[0],
+                0,
+            )
+            self.assertEqual(
                 conn.execute("select count(*) from deepdive_reports").fetchone()[0],
                 0,
             )
@@ -226,6 +240,153 @@ class Layer2RunnerTest(unittest.TestCase):
             self.assertEqual(status, "ok")
             self.assertIn("开发工具", brief_json)
             conn.close()
+
+    def test_run_layer2_routes_focus_score_only_and_diagnostics(self):
+        from pipeline.decision.llm_provider import FakeLLMProvider
+        from pipeline.decision.run_layer2_feed import run_layer2_feed
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "hero.sqlite"
+            self.make_db_with_potentials(
+                db_path,
+                [
+                    "a-focus/repo",
+                    "b-score-only/repo",
+                    "c-weak/repo",
+                    "d-news/repo",
+                ],
+            )
+            provider = FakeLLMProvider(
+                [
+                    self.valid_score_response("Focus"),
+                    self.valid_score_response("Backlog"),
+                    self.valid_score_response(
+                        "Weak",
+                        should_print=False,
+                        axes={
+                            "workflow_shift": 28,
+                            "technical_substance": 30,
+                            "product_market_fit": 36,
+                            "momentum": 32,
+                            "confidence": 70,
+                            "derivative_news_penalty": 8,
+                        },
+                    ),
+                    self.valid_score_response(
+                        "News",
+                        object_type="news",
+                        is_product_or_repo=False,
+                        axes={
+                            "workflow_shift": 90,
+                            "technical_substance": 80,
+                            "product_market_fit": 82,
+                            "momentum": 90,
+                            "confidence": 80,
+                            "derivative_news_penalty": 18,
+                        },
+                    ),
+                    self.valid_brief_response(),
+                ]
+            )
+
+            summary = run_layer2_feed(
+                db_path=db_path,
+                decision_run_id="decision-run",
+                feed_run_id="l2-routes",
+                now="2026-06-01T12:00:00Z",
+                provider=provider,
+                config={
+                    "max_scored_candidates": 4,
+                    "brief_min_score": 70,
+                    "brief_target_count": 1,
+                    "brief_max_count": 1,
+                },
+            )
+
+            conn = sqlite3.connect(db_path)
+            items = conn.execute(
+                """
+                select g.canonical_name, fi.section, fi.deepdive_status
+                from l2_feed_items fi
+                join l2_candidate_groups g
+                  on g.feed_run_id = fi.feed_run_id and g.group_id = fi.group_id
+                where fi.feed_run_id = ?
+                order by fi.section, fi.rank
+                """,
+                ("l2-routes",),
+            ).fetchall()
+            run_note = json.loads(
+                conn.execute(
+                    "select note from l2_feed_runs where feed_run_id = ?",
+                    ("l2-routes",),
+                ).fetchone()[0]
+            )
+            conn.close()
+
+        self.assertEqual(summary["scored"], 4)
+        self.assertEqual(summary["briefs"], 1)
+        self.assertEqual(
+            items,
+            [
+                ("d-news/repo", "diagnostics", "suppress_or_low"),
+                ("c-weak/repo", "diagnostics", "suppress_or_low"),
+                ("b-score-only/repo", "scored", "score_only"),
+                ("a-focus/repo", "today_focus", "briefed"),
+            ],
+        )
+        self.assertEqual(
+            run_note["route_counts"],
+            {
+                "score_plus_deepdive": 1,
+                "score_only": 1,
+                "suppress_or_low": 2,
+                "candidate_error": 0,
+            },
+        )
+
+    def test_run_layer2_keeps_selected_focus_item_when_brief_fails(self):
+        from pipeline.decision.llm_provider import FakeLLMProvider
+        from pipeline.decision.run_layer2_feed import run_layer2_feed
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "hero.sqlite"
+            self.make_db_with_potentials(db_path, ["focus/repo"])
+            provider = FakeLLMProvider(
+                [
+                    self.valid_score_response("Focus"),
+                    {"category": {"primary": "开发工具"}, "headline": ""},
+                ]
+            )
+
+            summary = run_layer2_feed(
+                db_path=db_path,
+                decision_run_id="decision-run",
+                feed_run_id="l2-brief-error",
+                now="2026-06-01T12:00:00Z",
+                provider=provider,
+                config={"brief_min_score": 70, "brief_target_count": 1},
+            )
+
+            conn = sqlite3.connect(db_path)
+            item = conn.execute(
+                """
+                select section, deepdive_status
+                from l2_feed_items
+                where feed_run_id = ?
+                """,
+                ("l2-brief-error",),
+            ).fetchone()
+            brief_count = conn.execute(
+                "select count(*) from l2_deepdive_briefs where feed_run_id = ?",
+                ("l2-brief-error",),
+            ).fetchone()[0]
+            conn.close()
+
+        self.assertTrue(summary["ok"])
+        self.assertEqual(summary["status"], "ok_with_errors")
+        self.assertEqual(summary["briefs"], 0)
+        self.assertEqual(item, ("today_focus", "brief_error"))
+        self.assertEqual(brief_count, 0)
 
     def test_run_layer2_continues_when_one_scoring_candidate_fails(self):
         from pipeline.decision.llm_provider import FakeLLMProvider
@@ -313,12 +474,21 @@ class Layer2RunnerTest(unittest.TestCase):
                     ("l2-errors",),
                 ).fetchall()
             ]
+            diagnostic_count = conn.execute(
+                """
+                select count(*)
+                from l2_feed_items
+                where feed_run_id = ? and section = ? and deepdive_status = ?
+                """,
+                ("l2-errors", "diagnostics", "candidate_error"),
+            ).fetchone()[0]
             conn.close()
 
             self.assertEqual(run_row[0], "ok_with_errors")
             self.assertIn("scoring_error", statuses)
             self.assertIn("scoring_ok", statuses)
             self.assertIn("error_counts", run_row[1])
+            self.assertEqual(diagnostic_count, 1)
 
     def test_run_layer2_applies_total_scoring_cap(self):
         from pipeline.decision.llm_provider import FakeLLMProvider

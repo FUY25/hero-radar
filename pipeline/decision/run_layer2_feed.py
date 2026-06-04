@@ -41,6 +41,11 @@ from pipeline.decision.layer2_investigator_tools import (
 from pipeline.decision.layer2_scheduler import schedule_layer2_work
 from pipeline.decision.layer2_scoring_investigator import (
     InvestigatorLimits,
+    ROUTE_CANDIDATE_ERROR,
+    ROUTE_SCORE_ONLY,
+    ROUTE_SCORE_PLUS_DEEPDIVE,
+    ROUTE_SUPPRESS_OR_LOW,
+    classify_scored_route,
     generate_deepdive_briefs,
     score_with_investigator,
     select_deepdive_brief_candidates,
@@ -272,6 +277,7 @@ def run_layer2_feed(
                     metadata={"reason": "enable_edge_scout=false"},
                 )
         scored = []
+        candidate_errors = []
         scoring_candidates = [*schedule.score_now, *scouted]
         max_total_scoring = cfg.get("max_total_scoring_candidates")
         if max_total_scoring is not None:
@@ -299,7 +305,7 @@ def run_layer2_feed(
                 )
             )
             with ThreadPoolExecutor(max_workers=scoring_concurrency) as executor:
-                futures = [
+                futures = {
                     executor.submit(
                         _score_group_worker,
                         db_path,
@@ -308,13 +314,22 @@ def run_layer2_feed(
                         group,
                         cfg,
                         worker_factory,
-                    )
+                    ): group
                     for group in scoring_candidates
-                ]
+                }
                 for future in as_completed(futures):
+                    group = futures[future]
                     result = future.result()
                     if result.get("result"):
                         scored.append(result["result"])
+                    else:
+                        candidate_errors.append(
+                            {
+                                "group": group,
+                                "status": ROUTE_CANDIDATE_ERROR,
+                                "error": result.get("error", ""),
+                            }
+                        )
         else:
             investigator_tools = _investigator_tools_for(
                 conn,
@@ -352,6 +367,13 @@ def run_layer2_feed(
                         status="scoring_ok",
                     )
                 except Exception as exc:
+                    candidate_errors.append(
+                        {
+                            "group": group,
+                            "status": ROUTE_CANDIDATE_ERROR,
+                            "error": str(exc)[:800],
+                        }
+                    )
                     record_stage_event(
                         conn,
                         feed_run_id=active_feed_run_id,
@@ -360,25 +382,6 @@ def run_layer2_feed(
                         status="scoring_error",
                         error=exc,
                     )
-        for rank, row in enumerate(
-            sorted(scored, key=lambda item: -float(item["l2_score"])), start=1
-        ):
-            conn.execute(
-                """
-                insert or replace into l2_feed_items(
-                  feed_run_id, group_id, section, rank, deepdive_status
-                )
-                values (?, ?, ?, ?, ?)
-                """,
-                (
-                    active_feed_run_id,
-                    row["group"].group_id,
-                    "scored",
-                    rank,
-                    "not_deepdived",
-                ),
-            )
-        briefs = []
         if bool(cfg.get("enable_deepdive_briefs", True)):
             selected_for_brief = select_deepdive_brief_candidates(
                 scored,
@@ -386,6 +389,69 @@ def run_layer2_feed(
                 target_count=int(cfg.get("brief_target_count", 8)),
                 max_count=int(cfg.get("brief_max_count", 10)),
             )
+        else:
+            selected_for_brief = []
+        selected_group_ids = {row["group"].group_id for row in selected_for_brief}
+        route_counts = {
+            ROUTE_SCORE_PLUS_DEEPDIVE: 0,
+            ROUTE_SCORE_ONLY: 0,
+            ROUTE_SUPPRESS_OR_LOW: 0,
+            ROUTE_CANDIDATE_ERROR: len(candidate_errors),
+        }
+        for rank, row in enumerate(selected_for_brief, start=1):
+            route_counts[ROUTE_SCORE_PLUS_DEEPDIVE] += 1
+            _insert_feed_item(
+                conn,
+                feed_run_id=active_feed_run_id,
+                group_id=row["group"].group_id,
+                section="today_focus",
+                rank=rank,
+                deepdive_status="selected",
+            )
+        score_only_rank = 1
+        diagnostics_rank = 1
+        for row in sorted(scored, key=lambda item: -float(item["l2_score"])):
+            route = classify_scored_route(
+                row,
+                selected_group_ids=selected_group_ids,
+                min_score=float(cfg.get("brief_min_score", 70)),
+            )
+            if route == ROUTE_SCORE_PLUS_DEEPDIVE:
+                continue
+            route_counts[route] = route_counts.get(route, 0) + 1
+            if route == ROUTE_SCORE_ONLY:
+                _insert_feed_item(
+                    conn,
+                    feed_run_id=active_feed_run_id,
+                    group_id=row["group"].group_id,
+                    section="scored",
+                    rank=score_only_rank,
+                    deepdive_status=ROUTE_SCORE_ONLY,
+                )
+                score_only_rank += 1
+            elif route == ROUTE_SUPPRESS_OR_LOW:
+                _insert_feed_item(
+                    conn,
+                    feed_run_id=active_feed_run_id,
+                    group_id=row["group"].group_id,
+                    section="diagnostics",
+                    rank=diagnostics_rank,
+                    deepdive_status=ROUTE_SUPPRESS_OR_LOW,
+                )
+                diagnostics_rank += 1
+        for error_row in candidate_errors:
+            _insert_feed_item(
+                conn,
+                feed_run_id=active_feed_run_id,
+                group_id=error_row["group"].group_id,
+                section="diagnostics",
+                rank=diagnostics_rank,
+                deepdive_status=ROUTE_CANDIDATE_ERROR,
+            )
+            diagnostics_rank += 1
+        conn.commit()
+        briefs = []
+        if bool(cfg.get("enable_deepdive_briefs", True)):
             for row in selected_for_brief:
                 group = row["group"]
                 record_stage_event(
@@ -425,6 +491,13 @@ def run_layer2_feed(
                         status="brief_ok",
                     )
                 except Exception as exc:
+                    _update_feed_item_status(
+                        conn,
+                        feed_run_id=active_feed_run_id,
+                        group_id=group.group_id,
+                        section="today_focus",
+                        deepdive_status="brief_error",
+                    )
                     record_stage_event(
                         conn,
                         feed_run_id=active_feed_run_id,
@@ -538,6 +611,7 @@ def run_layer2_feed(
             "error_counts": telemetry["error_counts"],
             "success_total": telemetry["success_total"],
             "error_total": telemetry["error_total"],
+            "route_counts": route_counts,
         }
         conn.execute(
             """
@@ -583,6 +657,44 @@ def _optional_int(value: Any) -> int | None:
     if value is None:
         return None
     return int(value)
+
+
+def _insert_feed_item(
+    conn: sqlite3.Connection,
+    *,
+    feed_run_id: str,
+    group_id: str,
+    section: str,
+    rank: int,
+    deepdive_status: str,
+) -> None:
+    conn.execute(
+        """
+        insert or replace into l2_feed_items(
+          feed_run_id, group_id, section, rank, deepdive_status
+        )
+        values (?, ?, ?, ?, ?)
+        """,
+        (feed_run_id, group_id, section, rank, deepdive_status),
+    )
+
+
+def _update_feed_item_status(
+    conn: sqlite3.Connection,
+    *,
+    feed_run_id: str,
+    group_id: str,
+    section: str,
+    deepdive_status: str,
+) -> None:
+    conn.execute(
+        """
+        update l2_feed_items
+        set deepdive_status = ?
+        where feed_run_id = ? and group_id = ? and section = ?
+        """,
+        (deepdive_status, feed_run_id, group_id, section),
+    )
 
 
 def _active_scoring_concurrency(

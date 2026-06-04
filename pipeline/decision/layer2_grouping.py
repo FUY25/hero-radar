@@ -177,12 +177,14 @@ def _best_group_link(
     for row in [canonical, *members]:
         alias_key = _approved_alias_key(conn, row["entity_id"])
         if alias_key and alias_key.startswith("github:"):
-            return key_to_url(alias_key) or ""
+            return key_to_url(_normalize_github_key(alias_key)) or ""
     for row in [canonical, *members]:
-        canonical_link = key_to_url(row["canonical_key"])
+        canonical_link = key_to_url(_normalize_github_key(row["canonical_key"]))
         if canonical_link:
             return canonical_link
-        alias_link = key_to_url(_approved_alias_key(conn, row["entity_id"]))
+        alias_link = key_to_url(
+            _normalize_github_key(_approved_alias_key(conn, row["entity_id"]))
+        )
         if alias_link:
             return alias_link
     return ""
@@ -251,6 +253,13 @@ def _approved_alias_key(conn: sqlite3.Connection, entity_id: str) -> str:
         (entity_id,),
     ).fetchone()
     return str(row[0] or "") if row else ""
+
+
+def _normalize_github_key(key: str | None) -> str:
+    value = str(key or "").strip()
+    if value.startswith("github:"):
+        return f"github:{value.split(':', 1)[1].lower().strip('/')}"
+    return value
 
 
 def _is_content_domain(domain: str) -> bool:

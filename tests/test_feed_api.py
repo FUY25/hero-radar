@@ -137,6 +137,54 @@ class FeedApiTest(unittest.TestCase):
             "owner/repo 值得今天重点看",
         )
 
+    def test_query_feed_payload_returns_diagnostics_section(self):
+        import pipeline.server as server
+
+        temp, db_path = self.make_db()
+        self.addCleanup(temp.cleanup)
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "insert into l2_feed_items(feed_run_id, group_id, section, rank, deepdive_status) values (?, ?, ?, ?, ?)",
+            ("l2-run", "group:repo", "diagnostics", 1, "candidate_error"),
+        )
+        conn.commit()
+        conn.close()
+
+        with mock.patch.object(server, "DB_PATH", db_path):
+            payload = server.query_feed_payload()
+
+        self.assertEqual(payload["diagnostics"][0]["group_id"], "group:repo")
+        self.assertEqual(payload["diagnostics"][0]["deepdive_status"], "candidate_error")
+
+    def test_query_feed_payload_can_select_explicit_run(self):
+        import pipeline.server as server
+
+        temp, db_path = self.make_db()
+        self.addCleanup(temp.cleanup)
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "insert into l2_feed_runs(feed_run_id, decision_run_id, started_at, completed_at, status, config_hash, model_profile_json, note) values (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "l2-newer",
+                "decision-run",
+                "2026-06-01T00:00:00Z",
+                "2026-06-01T00:01:00Z",
+                "ok",
+                "hash",
+                "{}",
+                "",
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+        with mock.patch.object(server, "DB_PATH", db_path):
+            latest = server.query_feed_payload()
+            explicit = server.query_feed_payload(feed_run_id="l2-run")
+
+        self.assertEqual(latest["feed_run_id"], "l2-newer")
+        self.assertEqual(explicit["feed_run_id"], "l2-run")
+
     def test_query_feed_payload_exposes_run_status_and_stage_telemetry(self):
         import pipeline.server as server
 

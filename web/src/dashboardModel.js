@@ -308,6 +308,7 @@ export function normalizeFeedPayload(payload = {}) {
     stage_events: Array.isArray(payload?.stage_events) ? payload.stage_events : [],
     today_focus: (payload?.today_focus || []).map((item) => normalizeItem(item, 'today_focus')),
     scored_list: (payload?.scored_list || []).map((item) => normalizeItem(item, 'scored')),
+    diagnostics: (payload?.diagnostics || []).map((item) => normalizeItem(item, 'diagnostics')),
     pending: payload?.pending || { edge_watch_scout: 0, deepdive: 0 },
   };
 }
@@ -316,12 +317,17 @@ export function feedRows(feed) {
   return [
     ...(feed?.today_focus || []),
     ...(feed?.scored_list || []),
+    ...(feed?.diagnostics || []),
   ];
 }
 
 export function feedEmptyState(feed) {
   if (!feed?.feed_run_id) return 'missing';
-  if (!(feed.today_focus || []).length && !(feed.scored_list || []).length) return 'empty';
+  if (
+    !(feed.today_focus || []).length
+    && !(feed.scored_list || []).length
+    && !(feed.diagnostics || []).length
+  ) return 'empty';
   return '';
 }
 

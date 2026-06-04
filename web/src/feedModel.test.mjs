@@ -59,6 +59,14 @@ const payload = {
     },
   ],
   scored_list: [],
+  diagnostics: [
+    {
+      group_id: 'group:error',
+      canonical_name: 'bad/repo',
+      deepdive_status: 'candidate_error',
+      context: { members: [] },
+    },
+  ],
   pending: { edge_watch_scout: 2, deepdive: 1 },
 };
 
@@ -91,7 +99,17 @@ test('normalizeFeedPayload preserves run status and telemetry', () => {
 test('feedRows merges today focus and scored list with section markers', () => {
   const rows = feedRows(normalizeFeedPayload(payload));
 
-  assert.deepEqual(rows.map((row) => [row.group_id, row.section]), [['group:repo', 'today_focus']]);
+  assert.deepEqual(rows.map((row) => [row.group_id, row.section]), [
+    ['group:repo', 'today_focus'],
+    ['group:error', 'diagnostics'],
+  ]);
+});
+
+test('normalizeFeedPayload preserves diagnostics rows', () => {
+  const normalized = normalizeFeedPayload(payload);
+
+  assert.equal(normalized.diagnostics[0].group_id, 'group:error');
+  assert.equal(normalized.diagnostics[0].deepdive_status, 'candidate_error');
 });
 
 test('feedRunSummary formats model profile without secrets', () => {
@@ -158,5 +176,5 @@ test('feedSignalDescription prefers Chinese deepdive brief over scorer rationale
 
 test('feedEmptyState distinguishes missing feed from empty scored run', () => {
   assert.equal(feedEmptyState({ feed_run_id: '', today_focus: [], scored_list: [] }), 'missing');
-  assert.equal(feedEmptyState({ feed_run_id: 'l2-run', today_focus: [], scored_list: [] }), 'empty');
+  assert.equal(feedEmptyState({ feed_run_id: 'l2-run', today_focus: [], scored_list: [], diagnostics: [] }), 'empty');
 });
