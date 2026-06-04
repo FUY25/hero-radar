@@ -21,6 +21,7 @@ import {
   dashboardApiUrl,
   defaultRangeId as modelDefaultRangeId,
   detailRowsForItem,
+  feedCardDescription,
   feedEmptyState,
   feedRunSummary,
   filterCandidateRows,
@@ -1406,6 +1407,7 @@ function FeedBrief({ item }) {
 
 function ScoredFeedRow({ item, onOpenSource }) {
   const bar = scoreBarStyle(item.l2_score);
+  const description = feedCardDescription(item, { maxChars: 96 });
   return (
     <article className={`scored-feed-row ${scoreTone(item.l2_score)}`}>
       <div className="compact-score" style={bar}>
@@ -1414,7 +1416,7 @@ function ScoredFeedRow({ item, onOpenSource }) {
       </div>
       <div className="scored-feed-main">
         <strong>{item.title}</strong>
-        <p>{item.rationale_short || item.context_preview}</p>
+        <p>{description}</p>
       </div>
       <div className="scored-feed-meta">
         <span>{item.primary_reason}</span>

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   feedEmptyState,
+  feedCardDescription,
   feedRows,
   feedRunSummary,
   normalizeFeedPayload,
@@ -107,9 +108,29 @@ test('scoreTone maps numeric score to stable UI tone', () => {
 });
 
 test('scoreBarStyle clamps scores for compact feed cards', () => {
-  assert.deepEqual(scoreBarStyle(88), { '--score-pct': '88%', label: '88' });
-  assert.deepEqual(scoreBarStyle(140), { '--score-pct': '100%', label: '100' });
-  assert.deepEqual(scoreBarStyle(-4), { '--score-pct': '0%', label: '0' });
+  assert.equal(scoreBarStyle(88)['--score-pct'], '88%');
+  assert.equal(scoreBarStyle(88).label, '88');
+  assert.match(scoreBarStyle(88)['--score-gradient'], /linear-gradient/);
+  assert.equal(scoreBarStyle(140)['--score-pct'], '100%');
+  assert.equal(scoreBarStyle(140).label, '100');
+  assert.equal(scoreBarStyle(-4)['--score-pct'], '0%');
+  assert.equal(scoreBarStyle(-4).label, '0');
+});
+
+test('feedCardDescription shortens LLM rationale but preserves original context fallback', () => {
+  const longRationale = '这是一个很长的 LLM rationale，用来解释为什么这个项目值得看，因为它改变了用户完成任务的交互方式，同时也有明确的技术实现和产品使用场景。';
+  const longContext = 'Original source description should remain intact because it may be the only source-authored description shown in the feed list.';
+
+  const shortened = feedCardDescription(
+    { rationale_short: longRationale, context_preview: longContext },
+    { maxChars: 34 },
+  );
+  assert.ok(shortened.endsWith('…'));
+  assert.ok(shortened.length <= 35);
+  assert.equal(
+    feedCardDescription({ rationale_short: '', context_preview: longContext }, { maxChars: 34 }),
+    longContext,
+  );
 });
 
 test('feedEmptyState distinguishes missing feed from empty scored run', () => {

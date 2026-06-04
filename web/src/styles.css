@@ -793,14 +793,14 @@ button:disabled {
 
 .scored-feed-row {
   display: grid;
-  grid-template-columns: 64px minmax(220px, 1fr) minmax(150px, 260px) auto;
-  gap: 12px;
+  grid-template-columns: 74px minmax(220px, 1fr) minmax(150px, 260px) auto;
+  gap: 14px;
   align-items: center;
   border: 1px solid var(--line);
   border-radius: 8px;
-  padding: 11px 12px;
+  padding: 12px 13px;
   background: color-mix(in srgb, var(--panel) 96%, var(--head));
-  box-shadow: 0 8px 20px color-mix(in srgb, var(--text) 4%, transparent);
+  box-shadow: 0 8px 22px color-mix(in srgb, var(--text) 5%, transparent);
 }
 
 .scored-feed-row.hot {
@@ -813,23 +813,36 @@ button:disabled {
 
 .compact-score {
   display: grid;
-  gap: 7px;
+  gap: 8px;
   min-width: 0;
 }
 
 .compact-score span {
-  color: var(--text);
-  font-size: 13px;
+  justify-self: start;
+  min-width: 34px;
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--line));
+  border-radius: 999px;
+  padding: 3px 8px;
+  color: color-mix(in srgb, var(--text) 88%, var(--accent));
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--panel) 92%, white), var(--panel)),
+    color-mix(in srgb, var(--accent) 8%, var(--panel));
+  font-size: 12px;
   font-weight: 700;
+  line-height: 1.2;
+  text-align: center;
   font-variant-numeric: tabular-nums;
 }
 
 .compact-score div {
   width: 100%;
-  height: 6px;
+  height: 7px;
   overflow: hidden;
   border-radius: 999px;
-  background: color-mix(in srgb, var(--line) 72%, var(--panel));
+  background:
+    linear-gradient(90deg, color-mix(in srgb, var(--line) 42%, transparent), color-mix(in srgb, var(--line) 22%, transparent)),
+    color-mix(in srgb, var(--panel) 80%, var(--head));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--line) 56%, transparent);
 }
 
 .compact-score div::before {
@@ -838,7 +851,8 @@ button:disabled {
   width: var(--score-pct);
   height: 100%;
   border-radius: inherit;
-  background: linear-gradient(90deg, var(--accent), color-mix(in srgb, var(--good) 58%, var(--accent)));
+  background: var(--score-gradient);
+  box-shadow: 0 0 14px color-mix(in srgb, var(--accent) 22%, transparent);
 }
 
 .scored-feed-main {
@@ -853,9 +867,14 @@ button:disabled {
 }
 
 .scored-feed-row p {
-  margin: 3px 0 0;
+  display: -webkit-box;
+  margin: 4px 0 0;
+  overflow: hidden;
   color: var(--muted);
+  font-size: 12px;
   line-height: 1.42;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 .scored-feed-meta {

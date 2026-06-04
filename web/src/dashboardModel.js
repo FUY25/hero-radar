@@ -372,10 +372,33 @@ export function scoreTone(score) {
 
 export function scoreBarStyle(score) {
   const value = Math.max(0, Math.min(100, Math.round(Number(score || 0))));
+  const stops = value >= 85
+    ? ['#f25f5c', '#f7b267', '#4ecdc4']
+    : value >= 70
+      ? ['#2f80ed', '#56ccf2', '#6fcf97']
+      : value >= 50
+        ? ['#8a7cf6', '#56ccf2', '#f2c94c']
+        : ['#8b98a8', '#b8c1cc', '#d7dde5'];
   return {
     '--score-pct': `${value}%`,
+    '--score-gradient': `linear-gradient(90deg, ${stops[0]}, ${stops[1]} 55%, ${stops[2]})`,
     label: String(value),
   };
+}
+
+export function feedCardDescription(item, { maxChars = 96 } = {}) {
+  const rationale = String(item?.rationale_short || '').trim();
+  if (rationale) {
+    return truncateText(rationale, maxChars);
+  }
+  return String(item?.context_preview || '').trim();
+}
+
+function truncateText(value, maxChars) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  const limit = Math.max(8, Number(maxChars || 96));
+  if (text.length <= limit) return text;
+  return `${text.slice(0, limit).trim()}…`;
 }
 
 export function candidateRowsForFeed(candidates) {
