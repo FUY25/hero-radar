@@ -205,6 +205,36 @@ create table if not exists l2_scores (
     unique(feed_run_id, group_id)
 );
 
+create table if not exists l2_scoring_investigations (
+    id integer primary key autoincrement,
+    feed_run_id text not null,
+    group_id text not null,
+    status text not null,
+    trace_json text not null,
+    tool_trace_json text not null,
+    provider text not null,
+    model text not null,
+    prompt_version text not null,
+    cache_key text not null,
+    created_at text not null,
+    unique(feed_run_id, group_id)
+);
+
+create table if not exists l2_deepdive_briefs (
+    id integer primary key autoincrement,
+    feed_run_id text not null,
+    group_id text not null,
+    status text not null,
+    brief_json text not null,
+    language text not null,
+    provider text not null,
+    model text not null,
+    prompt_version text not null,
+    cache_key text not null,
+    created_at text not null,
+    unique(feed_run_id, group_id)
+);
+
 create table if not exists deepdive_reports (
     id integer primary key autoincrement,
     feed_run_id text not null,
@@ -258,6 +288,8 @@ create index if not exists idx_edge_watch_run on edge_watch_candidates(run_id);
 create index if not exists idx_backfill_run_status on backfill_jobs(run_id, status);
 create index if not exists idx_l2_groups_run on l2_candidate_groups(feed_run_id);
 create index if not exists idx_l2_scores_run_score on l2_scores(feed_run_id, l2_score);
+create index if not exists idx_l2_investigations_run on l2_scoring_investigations(feed_run_id, status);
+create index if not exists idx_l2_briefs_run on l2_deepdive_briefs(feed_run_id, status);
 create index if not exists idx_l2_feed_items_run_section on l2_feed_items(feed_run_id, section, rank);
 create index if not exists idx_l2_stage_events_run on l2_stage_events(feed_run_id, stage, status);
 """
@@ -332,6 +364,8 @@ def reset_decision_stage(
         "l2_candidate_groups": "feed_run_id",
         "l2_scout_results": "feed_run_id",
         "l2_scores": "feed_run_id",
+        "l2_scoring_investigations": "feed_run_id",
+        "l2_deepdive_briefs": "feed_run_id",
         "deepdive_reports": "feed_run_id",
         "l2_feed_items": "feed_run_id",
         "l2_stage_events": "feed_run_id",

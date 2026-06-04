@@ -117,6 +117,8 @@ class DecisionSchemaTest(unittest.TestCase):
         self.assertIn("l2_candidate_groups", names)
         self.assertIn("l2_scout_results", names)
         self.assertIn("l2_scores", names)
+        self.assertIn("l2_scoring_investigations", names)
+        self.assertIn("l2_deepdive_briefs", names)
         self.assertIn("deepdive_reports", names)
         self.assertIn("l2_feed_items", names)
         self.assertIn("feed_feedback", names)
@@ -205,15 +207,65 @@ class DecisionSchemaTest(unittest.TestCase):
                 "2026-06-01T00:00:00Z",
             ),
         )
+        conn.execute(
+            """
+            insert into l2_scoring_investigations(
+              feed_run_id, group_id, status, trace_json, tool_trace_json,
+              provider, model, prompt_version, cache_key, created_at
+            )
+            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "l2-run",
+                "group:one",
+                "ok",
+                "{}",
+                "[]",
+                "kimi",
+                "kimi-k2.5",
+                "v2",
+                "trace-cache",
+                "2026-06-01T00:00:00Z",
+            ),
+        )
+        conn.execute(
+            """
+            insert into l2_deepdive_briefs(
+              feed_run_id, group_id, status, brief_json, language,
+              provider, model, prompt_version, cache_key, created_at
+            )
+            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "l2-run",
+                "group:one",
+                "ok",
+                "{}",
+                "zh",
+                "kimi",
+                "kimi-k2.5",
+                "v2",
+                "brief-cache",
+                "2026-06-01T00:00:00Z",
+            ),
+        )
 
         reset_decision_stage(
             conn,
             run_id="l2-run",
-            tables=["l2_candidate_groups", "l2_scores", "l2_stage_events"],
+            tables=[
+                "l2_candidate_groups",
+                "l2_scores",
+                "l2_scoring_investigations",
+                "l2_deepdive_briefs",
+                "l2_stage_events",
+            ],
         )
 
         self.assertEqual(conn.execute("select count(*) from l2_candidate_groups").fetchone()[0], 0)
         self.assertEqual(conn.execute("select count(*) from l2_scores").fetchone()[0], 0)
+        self.assertEqual(conn.execute("select count(*) from l2_scoring_investigations").fetchone()[0], 0)
+        self.assertEqual(conn.execute("select count(*) from l2_deepdive_briefs").fetchone()[0], 0)
         self.assertEqual(conn.execute("select count(*) from l2_stage_events").fetchone()[0], 0)
         self.assertEqual(conn.execute("select count(*) from l2_feed_runs").fetchone()[0], 1)
 
