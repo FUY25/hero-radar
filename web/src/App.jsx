@@ -21,8 +21,10 @@ import {
   dashboardApiUrl,
   defaultRangeId as modelDefaultRangeId,
   detailRowsForItem,
+  feedBriefPreview,
   feedCardDescription,
   feedEmptyState,
+  feedFocusLayout,
   feedRunSummary,
   feedSignalDescription,
   filterCandidateRows,
@@ -738,8 +740,21 @@ function SourceTable({ payload, channel, state, onStateChange, titlePrefix = '' 
 function SourcesView({ payload, state, onStateChange, hiddenSources = new Set() }) {
   const channels = activeChannelList(payload, 'sources').filter((channel) => !hiddenSources.has(channel.id));
   const activeChannel = channels.some((channel) => channel.id === state.activeChannel) ? state.activeChannel : channels[0]?.id || '';
+  const activeCount = channels.reduce((sum, channel) => sum + Number(channel.count || 0), 0);
+  const errorCount = Object.values(payload.source_errors || {}).filter(Boolean).length;
   return (
     <>
+      <section className="source-command-strip" aria-label="Source overview">
+        <div>
+          <span>Source Monitor</span>
+          <strong>{activeChannel ? channels.find((channel) => channel.id === activeChannel)?.label : 'Sources'}</strong>
+        </div>
+        <div className="source-strip-metrics">
+          <span>{channels.length} sources</span>
+          <span>{formatNumber(activeCount)} rows</span>
+          <span className={errorCount ? 'warn' : ''}>{errorCount ? `${errorCount} warnings` : 'healthy'}</span>
+        </div>
+      </section>
       <section className="channel-tabs" aria-label="Source channels">
         {channels.map((channel) => (
           <button
@@ -1306,6 +1321,7 @@ function DailyFeedView({ payload, onOpenSource }) {
     );
   }
   const summary = feedRunSummary(feed);
+  const focusLayout = feedFocusLayout(feed.today_focus || []);
   return (
     <section className="daily-feed-shell">
       <div className="feed-run-strip">
@@ -1325,11 +1341,18 @@ function DailyFeedView({ payload, onOpenSource }) {
             <span>Selected briefs</span>
             <strong>今日重点</strong>
           </div>
-          <section className="today-focus-grid" aria-label="Today Focus">
-            {feed.today_focus.map((item) => (
-              <FeedSignalCard key={item.group_id} item={item} onOpenSource={onOpenSource} />
+          <section className="today-focus-grid today-focus-grid-featured" aria-label="Today Focus featured">
+            {focusLayout.featured.map((item) => (
+              <FeedSignalCard key={item.group_id} item={item} onOpenSource={onOpenSource} variant="featured" />
             ))}
           </section>
+          {focusLayout.medium.length ? (
+            <section className="today-focus-grid today-focus-grid-medium" aria-label="Today Focus medium">
+              {focusLayout.medium.map((item) => (
+                <FeedSignalCard key={item.group_id} item={item} onOpenSource={onOpenSource} variant="medium" />
+              ))}
+            </section>
+          ) : null}
         </>
       ) : null}
       {(feed.scored_list || []).length ? (
@@ -1362,12 +1385,14 @@ function DailyFeedView({ payload, onOpenSource }) {
   );
 }
 
-function FeedSignalCard({ item, onOpenSource }) {
+function FeedSignalCard({ item, onOpenSource, variant = 'featured' }) {
+  const [expanded, setExpanded] = useState(false);
   const tone = scoreTone(item.l2_score);
   const description = feedSignalDescription(item);
   const scoreStyle = scoreBarStyle(item.l2_score);
+  const preview = feedBriefPreview(item);
   return (
-    <article className={`feed-signal-card ${tone}`}>
+    <article className={`feed-signal-card ${tone} ${variant}`}>
       <div className="signal-card-head">
         <div className="signal-title-block">
           <h2>{item.title}</h2>
@@ -1380,7 +1405,22 @@ function FeedSignalCard({ item, onOpenSource }) {
           <i aria-hidden="true" />
         </div>
       </div>
-      <FeedBrief item={item} />
+      {expanded ? (
+        <FeedBrief item={item} />
+      ) : (
+        <FeedBriefPreview item={item} preview={preview} />
+      )}
+      {preview.hasDetails ? (
+        <button
+          type="button"
+          className="feed-brief-toggle"
+          aria-expanded={expanded}
+          onClick={() => setExpanded((value) => !value)}
+        >
+          {expanded ? '收起简报' : '展开简报'}
+          <CaretDown size={14} weight="bold" aria-hidden="true" />
+        </button>
+      ) : null}
       <FeedEvidence item={item} />
       <FeedLinks item={item} onOpenSource={onOpenSource} />
       <div className="feed-feedback" aria-label="Feed feedback">
@@ -1399,6 +1439,35 @@ function FeedBadges({ item }) {
       {badges.map((badge) => <span key={badge}>{badge}</span>)}
     </div>
   ) : null;
+}
+
+function FeedBriefPreview({ item, preview }) {
+  const brief = item.deepdive_brief;
+  if (!brief) {
+    return item.deepdive ? <p className="deepdive-summary">{item.deepdive.summary}</p> : null;
+  }
+  const tags = [
+    brief.category?.primary,
+    ...(brief.category?.tags || []),
+  ].filter(Boolean);
+  return (
+    <section className="feed-brief feed-brief-preview" aria-label="Deepdive brief preview">
+      <div className="feed-brief-tags">
+        {tags.slice(0, 5).map((tag) => <span key={tag}>{tag}</span>)}
+      </div>
+      {(preview.highlights || []).length ? (
+        <div className="feed-brief-grid">
+          <div className="feed-brief-column">
+            <span>核心亮点</span>
+            <ul>
+              {preview.highlights.map((highlight) => <li key={highlight}>{highlight}</li>)}
+            </ul>
+          </div>
+        </div>
+      ) : null}
+      {preview.caveat ? <p>{preview.caveat}</p> : null}
+    </section>
+  );
 }
 
 function FeedBrief({ item }) {
@@ -1550,6 +1619,7 @@ function FeedView({ payload, tab = 'daily', onTabChange, onOpenSource }) {
   const [expandedEvidenceIds, setExpandedEvidenceIds] = useState(() => new Set());
   const [expandedSourceIds, setExpandedSourceIds] = useState(() => new Set());
   const [expandedContextIds, setExpandedContextIds] = useState(() => new Set());
+  const [selectedCandidateId, setSelectedCandidateId] = useState(null);
   const [columnWidths, setColumnWidths] = useState(() => readColumnWidths('candidate_pool'));
   const columns = candidateTableColumns();
   const rows = useMemo(() => candidateRowsForFeed(payload.candidates), [payload.candidates]);
@@ -1557,6 +1627,10 @@ function FeedView({ payload, tab = 'daily', onTabChange, onOpenSource }) {
   const filteredRows = useMemo(
     () => filterCandidateRows(rows, { levelFilter, sourceFilters }),
     [rows, levelFilter, sourceFilters],
+  );
+  const selectedCandidate = useMemo(
+    () => filteredRows.find((row) => row.entity_id === selectedCandidateId) || rows.find((row) => row.entity_id === selectedCandidateId) || null,
+    [filteredRows, rows, selectedCandidateId],
   );
   const toggleSourceFilter = (source) => {
     setSourceFilters((current) => (
@@ -1659,154 +1733,233 @@ function FeedView({ payload, tab = 'daily', onTabChange, onOpenSource }) {
               </div>
             </div>
           </section>
-          <div className="table-wrap">
-            <table className="candidate-table">
-              <thead>
-                <tr>
-                  {columns.map((column, index) => (
-                    <th
-                      key={column.label}
-                      className={column.cls || ''}
-                      data-col-index={index}
-                      style={columnWidthStyle(columnWidths, index)}
-                    >
-                      <span className="th-inner">
-                        <span className="th-label">{column.label}</span>
-                      </span>
-                      <span
-                        className="col-resizer"
+          <div className={`candidate-workspace ${selectedCandidate ? 'has-detail' : ''}`}>
+            <div className="table-wrap candidate-table-wrap">
+              <table className="candidate-table">
+                <thead>
+                  <tr>
+                    {columns.map((column, index) => (
+                      <th
+                        key={column.label}
+                        className={column.cls || ''}
                         data-col-index={index}
-                        title="拖动调整列宽"
-                        aria-hidden="true"
-                        onPointerDown={(event) => startColumnResize(event, index)}
-                        onClick={(event) => {
-                          event.preventDefault();
-                          event.stopPropagation();
-                        }}
-                      />
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {filteredRows.length ? filteredRows.map((row) => {
-                  const evidence = candidateVisibleEvidence(row, expandedEvidenceIds.has(row.entity_id));
-                  const sources = candidateVisibleSources(row, expandedSourceIds.has(row.entity_id));
-                  const context = candidateContextSummary(row.context_preview || row.first_trigger_at || row.status || '', expandedContextIds.has(row.entity_id));
-                  return (
-                    <tr key={`${row.pool_type}:${row.entity_id}`}>
-                      <td className="candidate-name-cell" style={columnWidthStyle(columnWidths, 0)}>
-                        <strong>{row.canonical_entity || row.entity_id}</strong>
-                        <code>{row.canonical_key || row.entity_id}</code>
-                      </td>
-                      <td style={columnWidthStyle(columnWidths, 1)}><span className={`badge ${row.level}`}>{levelLabel(row.level)}</span></td>
-                      <td style={columnWidthStyle(columnWidths, 2)}>
-                        <ul className="evidence-list">
-                          {evidence.bullets.map((bullet) => (
-                            <li className="evidence-bullet" title={bullet.label} key={`${row.entity_id}:${bullet.label}:${bullet.origin_type}`}>
-                              <span>{bullet.display_label || bullet.label}</span>
-                              {bullet.display_badge === 'LLM' ? <small className="evidence-llm-badge">LLM</small> : null}
-                            </li>
-                          ))}
-                          {evidence.extraCount > 0 ? (
-                            <li className="evidence-action">
+                        style={columnWidthStyle(columnWidths, index)}
+                      >
+                        <span className="th-inner">
+                          <span className="th-label">{column.label}</span>
+                        </span>
+                        <span
+                          className="col-resizer"
+                          data-col-index={index}
+                          title="拖动调整列宽"
+                          aria-hidden="true"
+                          onPointerDown={(event) => startColumnResize(event, index)}
+                          onClick={(event) => {
+                            event.preventDefault();
+                            event.stopPropagation();
+                          }}
+                        />
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredRows.length ? filteredRows.map((row) => {
+                    const evidence = candidateVisibleEvidence(row, expandedEvidenceIds.has(row.entity_id));
+                    const sources = candidateVisibleSources(row, expandedSourceIds.has(row.entity_id));
+                    const context = candidateContextSummary(row.context_preview || row.first_trigger_at || row.status || '', expandedContextIds.has(row.entity_id));
+                    const selected = selectedCandidate?.entity_id === row.entity_id;
+                    return (
+                      <tr key={`${row.pool_type}:${row.entity_id}`} className={selected ? 'candidate-row selected-candidate-row' : 'candidate-row'}>
+                        <td className="candidate-name-cell" style={columnWidthStyle(columnWidths, 0)}>
+                          <strong>{row.canonical_entity || row.entity_id}</strong>
+                          <code>{row.canonical_key || row.entity_id}</code>
+                          <button
+                            type="button"
+                            className="candidate-mini-card-button"
+                            aria-pressed={selected}
+                            onClick={() => setSelectedCandidateId(selected ? null : row.entity_id)}
+                          >
+                            信息卡
+                          </button>
+                        </td>
+                        <td style={columnWidthStyle(columnWidths, 1)}><span className={`badge ${row.level}`}>{levelLabel(row.level)}</span></td>
+                        <td style={columnWidthStyle(columnWidths, 2)}>
+                          <ul className="evidence-list">
+                            {evidence.bullets.map((bullet) => (
+                              <li className="evidence-bullet" title={bullet.label} key={`${row.entity_id}:${bullet.label}:${bullet.origin_type}`}>
+                                <span>{bullet.display_label || bullet.label}</span>
+                                {bullet.display_badge === 'LLM' ? <small className="evidence-llm-badge">LLM</small> : null}
+                              </li>
+                            ))}
+                            {evidence.extraCount > 0 ? (
+                              <li className="evidence-action">
+                                <button
+                                  type="button"
+                                  className="evidence-more"
+                                  aria-expanded={false}
+                                  onClick={() => toggleEvidence(row.entity_id)}
+                                >
+                                  +{evidence.extraCount}
+                                </button>
+                              </li>
+                            ) : null}
+                            {evidence.expandable && evidence.extraCount === 0 ? (
+                              <li className="evidence-action">
+                                <button
+                                  type="button"
+                                  className="evidence-more"
+                                  aria-expanded
+                                  onClick={() => toggleEvidence(row.entity_id)}
+                                >
+                                  收起
+                                </button>
+                              </li>
+                            ) : null}
+                          </ul>
+                        </td>
+                        <td style={columnWidthStyle(columnWidths, 3)}>
+                          <div className="candidate-source-list">
+                            {sources.sources.map((sourceGroup) => (
                               <button
                                 type="button"
-                                className="evidence-more"
-                                aria-expanded={false}
-                                onClick={() => toggleEvidence(row.entity_id)}
+                                className="candidate-source-row"
+                                key={`${row.entity_id}:${sourceGroup.key}`}
+                                title={sourceGroupTitle(sourceGroup)}
+                                onClick={() => onOpenSource?.(sourceGroup.link)}
                               >
-                                +{evidence.extraCount}
+                                <span>{sourceGroup.label}</span>
+                                {sourceGroup.count > 1 ? <small>{sourceGroup.count}</small> : null}
                               </button>
-                            </li>
-                          ) : null}
-                          {evidence.expandable && evidence.extraCount === 0 ? (
-                            <li className="evidence-action">
+                            ))}
+                            {sources.extraCount > 0 ? (
                               <button
                                 type="button"
-                                className="evidence-more"
+                                className="candidate-source-more"
+                                aria-expanded={false}
+                                onClick={() => toggleSources(row.entity_id)}
+                              >
+                                +{sources.extraCount}
+                              </button>
+                            ) : null}
+                            {sources.expandable && sources.extraCount === 0 ? (
+                              <button
+                                type="button"
+                                className="candidate-source-more"
                                 aria-expanded
-                                onClick={() => toggleEvidence(row.entity_id)}
+                                onClick={() => toggleSources(row.entity_id)}
                               >
                                 收起
                               </button>
-                            </li>
-                          ) : null}
-                        </ul>
-                      </td>
-                      <td style={columnWidthStyle(columnWidths, 3)}>
-                        <div className="candidate-source-list">
-                          {sources.sources.map((sourceGroup) => (
-                            <button
-                              type="button"
-                              className="candidate-source-row"
-                              key={`${row.entity_id}:${sourceGroup.key}`}
-                              title={sourceGroupTitle(sourceGroup)}
-                              onClick={() => onOpenSource?.(sourceGroup.link)}
-                            >
-                              <span>{sourceGroup.label}</span>
-                              {sourceGroup.count > 1 ? <small>{sourceGroup.count}</small> : null}
-                            </button>
-                          ))}
-                          {sources.extraCount > 0 ? (
-                            <button
-                              type="button"
-                              className="candidate-source-more"
-                              aria-expanded={false}
-                              onClick={() => toggleSources(row.entity_id)}
-                            >
-                              +{sources.extraCount}
-                            </button>
-                          ) : null}
-                          {sources.expandable && sources.extraCount === 0 ? (
-                            <button
-                              type="button"
-                              className="candidate-source-more"
-                              aria-expanded
-                              onClick={() => toggleSources(row.entity_id)}
-                            >
-                              收起
-                            </button>
-                          ) : null}
-                          {!sources.sources.length ? <span className="muted">暂无内部来源</span> : null}
-                        </div>
-                      </td>
-                      <td style={columnWidthStyle(columnWidths, 4)}>
-                        {row.canonical_link ? (
-                          <a className="candidate-link" href={row.canonical_link} target="_blank" rel="noreferrer">
-                            打开
-                          </a>
-                        ) : (
-                          <span className="muted">{row.binding_confidence === 'weak' ? '弱绑定' : '暂无链接'}</span>
-                        )}
-                      </td>
-                      <td className="candidate-context" style={columnWidthStyle(columnWidths, 5)}>
-                        {context.text ? (
-                          <>
-                            <span className="candidate-context-text">{context.text}</span>
-                            {context.expandable ? (
-                              <button
-                                type="button"
-                                className="candidate-context-toggle"
-                                onClick={() => toggleContext(row.entity_id)}
-                              >
-                                {expandedContextIds.has(row.entity_id) ? '收起' : '展开'}
-                              </button>
                             ) : null}
-                          </>
-                        ) : null}
-                      </td>
-                    </tr>
-                  );
-                }) : (
-                  <tr><td colSpan={columns.length}><div className="empty">Candidate Pool 当前没有数据。</div></td></tr>
-                )}
-              </tbody>
-            </table>
+                            {!sources.sources.length ? <span className="muted">暂无内部来源</span> : null}
+                          </div>
+                        </td>
+                        <td style={columnWidthStyle(columnWidths, 4)}>
+                          {row.canonical_link ? (
+                            <a className="candidate-link" href={row.canonical_link} target="_blank" rel="noreferrer">
+                              打开
+                            </a>
+                          ) : (
+                            <span className="muted">{row.binding_confidence === 'weak' ? '弱绑定' : '暂无链接'}</span>
+                          )}
+                        </td>
+                        <td className="candidate-context" style={columnWidthStyle(columnWidths, 5)}>
+                          {context.text ? (
+                            <>
+                              <span className="candidate-context-text">{context.text}</span>
+                              {context.expandable ? (
+                                <button
+                                  type="button"
+                                  className="candidate-context-toggle"
+                                  onClick={() => toggleContext(row.entity_id)}
+                                >
+                                  {expandedContextIds.has(row.entity_id) ? '收起' : '展开'}
+                                </button>
+                              ) : null}
+                            </>
+                          ) : null}
+                        </td>
+                      </tr>
+                    );
+                  }) : (
+                    <tr><td colSpan={columns.length}><div className="empty">Candidate Pool 当前没有数据。</div></td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+            {selectedCandidate ? (
+              <CandidateInsightPanel
+                row={selectedCandidate}
+                onClose={() => setSelectedCandidateId(null)}
+                onOpenSource={onOpenSource}
+              />
+            ) : null}
           </div>
         </section>
       )}
     </>
+  );
+}
+
+function CandidateInsightPanel({ row, onClose, onOpenSource }) {
+  const evidence = candidateVisibleEvidence(row, true);
+  const sources = candidateVisibleSources(row, true, 10);
+  const context = candidateContextSummary(row.context_preview || row.first_trigger_at || row.status || '', false);
+  return (
+    <aside className="candidate-insight-panel" aria-label={`${row.canonical_entity || row.entity_id} 信息卡`}>
+      <div className="candidate-insight-head">
+        <div>
+          <span>Candidate card</span>
+          <strong>{row.canonical_entity || row.entity_id}</strong>
+        </div>
+        <button type="button" onClick={onClose} aria-label="关闭候选信息卡">关闭</button>
+      </div>
+      <div className="candidate-insight-meta">
+        <span className={`badge ${row.level}`}>{levelLabel(row.level)}</span>
+        {row.binding_confidence ? <span>{row.binding_confidence}</span> : null}
+        {row.pool_type ? <span>{row.pool_type}</span> : null}
+      </div>
+      {context.text ? (
+        <section>
+          <h3>简介</h3>
+          <p>{context.text}</p>
+        </section>
+      ) : null}
+      <section>
+        <h3>证据</h3>
+        <ul className="evidence-list insight-evidence-list">
+          {evidence.bullets.map((bullet) => (
+            <li className="evidence-bullet" key={`${row.entity_id}:panel:${bullet.label}:${bullet.origin_type}`}>
+              <span>{bullet.display_label || bullet.label}</span>
+              {bullet.display_badge === 'LLM' ? <small className="evidence-llm-badge">LLM</small> : null}
+            </li>
+          ))}
+        </ul>
+      </section>
+      <section>
+        <h3>来源</h3>
+        <div className="candidate-source-list insight-source-list">
+          {sources.sources.map((sourceGroup) => (
+            <button
+              type="button"
+              className="candidate-source-row"
+              key={`${row.entity_id}:panel:${sourceGroup.key}`}
+              title={sourceGroupTitle(sourceGroup)}
+              onClick={() => onOpenSource?.(sourceGroup.link)}
+            >
+              <span>{sourceGroup.label}</span>
+              {sourceGroup.count > 1 ? <small>{sourceGroup.count}</small> : null}
+            </button>
+          ))}
+        </div>
+      </section>
+      {row.canonical_link ? (
+        <a className="candidate-insight-open" href={row.canonical_link} target="_blank" rel="noreferrer">
+          <ArrowSquareOut size={15} aria-hidden="true" /> 打开项目
+        </a>
+      ) : null}
+    </aside>
   );
 }
 

@@ -322,6 +322,14 @@ export function feedRows(feed) {
   ];
 }
 
+export function feedFocusLayout(items = []) {
+  const normalized = Array.isArray(items) ? items.filter(Boolean) : [];
+  return {
+    featured: normalized.slice(0, 2),
+    medium: normalized.slice(2),
+  };
+}
+
 export function feedEmptyState(feed) {
   if (!feed?.feed_run_id) return 'missing';
   if (
@@ -330,6 +338,32 @@ export function feedEmptyState(feed) {
     && !(feed.diagnostics || []).length
   ) return 'empty';
   return '';
+}
+
+export function feedBriefPreview(item) {
+  const brief = item?.deepdive_brief;
+  if (!brief) {
+    return {
+      headline: '',
+      highlights: [],
+      use_cases: [],
+      caveat: '',
+      hasDetails: false,
+    };
+  }
+  const highlights = Array.isArray(brief.core_highlights)
+    ? brief.core_highlights.map((row) => String(row || '').trim()).filter(Boolean)
+    : [];
+  const useCases = Array.isArray(brief.use_cases)
+    ? brief.use_cases.map((row) => String(row || '').trim()).filter(Boolean)
+    : [];
+  return {
+    headline: String(brief.headline || '').trim(),
+    highlights: highlights.slice(0, 2),
+    use_cases: [],
+    caveat: String(brief.caveat || '').trim(),
+    hasDetails: highlights.length > 2 || useCases.length > 0 || Boolean(brief.caveat),
+  };
 }
 
 export function feedRunSummary(feed) {
@@ -403,12 +437,12 @@ export function feedCardDescription(item, { maxChars = 96 } = {}) {
 
 export function feedSignalDescription(item, { maxChars = 160 } = {}) {
   const brief = item?.deepdive_brief;
+  const headline = String(brief?.headline || '').trim();
+  if (headline) return truncateText(headline, maxChars);
   const highlight = Array.isArray(brief?.core_highlights)
     ? String(brief.core_highlights[0] || '').trim()
     : '';
-  const headline = String(brief?.headline || '').trim();
   if (highlight) return truncateText(highlight, maxChars);
-  if (headline) return truncateText(headline, maxChars);
   return feedCardDescription(item, { maxChars });
 }
 
@@ -650,6 +684,7 @@ function cleanPreviewText(rawText) {
   text = decodeHtmlEntities(text)
     .replace(/\[([^\]]+)]\([^)]*\)/g, '$1')
     .replace(/https?:\/\/\S+/g, ' ')
+    .replace(/[\u2500-\u257f\u2580-\u259f]+/g, ' ')
     .replace(/<([^<>]{1,80})>/g, '$1')
     .replace(/(^|\s)#{1,6}\s*/g, ' ')
     .replace(/(^|\s)>+\s*/g, ' ')

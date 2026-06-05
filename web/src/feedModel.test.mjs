@@ -3,6 +3,8 @@ import test from 'node:test';
 import {
   feedEmptyState,
   feedCardDescription,
+  feedBriefPreview,
+  feedFocusLayout,
   feedSignalDescription,
   feedRows,
   feedRunSummary,
@@ -164,7 +166,7 @@ test('feedSignalDescription prefers Chinese deepdive brief over scorer rationale
         core_highlights: ['这是中文重点摘要。'],
       },
     }),
-    '这是中文重点摘要。',
+    '这是中文标题',
   );
   assert.equal(
     feedSignalDescription({
@@ -174,6 +176,36 @@ test('feedSignalDescription prefers Chinese deepdive brief over scorer rationale
     }),
     'Fallback scorer rationale.',
   );
+});
+
+test('feedFocusLayout promotes first two selected briefs and keeps the rest medium', () => {
+  const items = Array.from({ length: 6 }, (_, index) => ({
+    group_id: `group:${index + 1}`,
+    rank: index + 1,
+    title: `Project ${index + 1}`,
+  }));
+
+  const layout = feedFocusLayout(items);
+
+  assert.deepEqual(layout.featured.map((item) => item.group_id), ['group:1', 'group:2']);
+  assert.deepEqual(layout.medium.map((item) => item.group_id), ['group:3', 'group:4', 'group:5', 'group:6']);
+});
+
+test('feedBriefPreview keeps selected cards compact before expansion', () => {
+  const preview = feedBriefPreview({
+    deepdive_brief: {
+      headline: '这是中文 headline',
+      core_highlights: ['第一条重点。', '第二条重点。', '第三条重点。'],
+      use_cases: ['使用场景 A', '使用场景 B'],
+      caveat: '风险说明。',
+    },
+  });
+
+  assert.equal(preview.headline, '这是中文 headline');
+  assert.deepEqual(preview.highlights, ['第一条重点。', '第二条重点。']);
+  assert.deepEqual(preview.use_cases, []);
+  assert.equal(preview.caveat, '风险说明。');
+  assert.equal(preview.hasDetails, true);
 });
 
 test('feedEmptyState distinguishes missing feed from empty scored run', () => {

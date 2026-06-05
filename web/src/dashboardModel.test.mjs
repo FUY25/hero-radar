@@ -591,6 +591,13 @@ test('candidateContextSummary cleans markdown and html before display', () => {
       expandable: false,
     },
   );
+  assert.deepEqual(
+    candidateContextSummary('Compress outputs ▉▉▉ before agents ┌──┘ 60-95% fewer tokens', false, 120),
+    {
+      text: 'Compress outputs before agents 60-95% fewer tokens',
+      expandable: false,
+    },
+  );
 });
 
 test('sourceItemNavigationState opens the internal source row and page from a candidate source link', () => {
