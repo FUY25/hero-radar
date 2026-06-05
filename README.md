@@ -9,6 +9,81 @@ Hero Radar 是一个用于发现 AI 应用层机会的本地 intelligence dashbo
 在线只读演示：
 [https://demo-six-sigma-28.vercel.app](https://demo-six-sigma-28.vercel.app)
 
+## AI 使用方式
+
+Hero Radar 不是把所有事情都丢给一个大模型做判断。系统把 AI 分成两层：便宜、批量、结构化的 source classifier；以及更谨慎、更有工具边界的 Layer 2 Scoring Investigator。
+
+### 1. Source / Candidate 层：DeepSeek 做轻量语义分类
+
+Source collection 本身主要是确定性抓取和解析：GitHub、HN、Product Hunt、npm、PyPI、Hugging Face、X/Apify 等来源先写入 SQLite。之后 Decision Layer v1 做 entity resolution、deterministic rules、candidate pool 和 evidence rows。
+
+DeepSeek 用在这一层的“确定性旁路”任务：
+
+- HN/X/npm 等 source 的轻量 semantic classification。
+- 把帖子、tweet、package 描述解析成结构化 JSON。
+- 判断一个 source item 更像 project/product/repo，还是 topic/news/noise。
+- 生成 candidate evidence 的辅助标签，但不直接决定最终 Daily Feed。
+
+这层的原则是 high recall：宁可把可能有价值的东西放进 Candidate Pool，也不要过早让模型过滤掉。Candidate Pool 的 `high_potential` / `potential` / `edge_watch` 仍然是 Layer 1 输出，Layer 2 不会回写修改这些等级。
+
+### 2. Layer 2：Kimi Scoring Investigator 做有边界的 ReAct 判断
+
+Layer 2 使用 Kimi/Moonshot。它的任务是回答：这些候选里，今天哪些真的值得产品/AI 应用层研究？
+
+当前默认不是独立 deepdive agent，而是一个 bounded Scoring Investigator harness：
+
+- 先判断已有 context 是否足够评分；够就直接 final score，不额外浏览。
+- 不够时才进入 ReAct loop，调用最小必要工具。
+- 每个候选最多 3 个 investigation turns。
+- 每个候选最多 8 次工具调用。
+- 默认并发评分 5 个候选。
+- candidate-level failure 不会让整轮 run 崩掉，会记录为 candidate error 或 ok_with_errors。
+
+可用工具是刻意收窄的 primitive tools：
+
+| Tool | 作用 |
+| --- | --- |
+| `read_evidence_rows(entity_id)` | 读取该候选的结构化证据、source rows 和入池原因。 |
+| `fetch_github_readme(repo_key)` | 获取 GitHub README，补足产品/技术语义。 |
+| `fetch_github_file(repo_key, path)` | 读取安全白名单内的 repo 文件，例如 `package.json`、docs、examples。 |
+| `fetch_homepage_or_docs(url)` | 抓 homepage/docs 的简化文本。 |
+| `web_search(query)` | 可选，最多少量调用，用于补关键缺口。 |
+
+这些工具都需要 bounded、cached、sanitized；URL fetch 要 SSRF-safe；所有 provider token 都不能进入输出或静态 demo。
+
+### 3. Scoring + Brief
+
+Kimi 输出结构化 score，确定性代码再校验 schema、聚合分数、写入 DB。核心字段包括：
+
+- `object_type`
+- `is_product_or_repo`
+- `workflow_shift`
+- `technical_substance`
+- `product_market_fit`
+- `momentum`
+- `confidence`
+- `risk_penalty`
+- `derivative_news_penalty`
+- `l2_score`
+- `supporting_evidence`
+- `negative_evidence`
+- `known_gaps`
+- `should_print`
+
+高分项目会生成中文 `deepdive_brief`，用于 Daily Feed 的今日重点卡片。brief 不是复述证据来源，而是解释项目本身：类别、核心亮点、使用场景和 caveat。
+
+### 4. Eval 和校准
+
+这个系统的 AI 部分用 eval 保护，而不是只凭 prompt 感觉：
+
+- deterministic eval 覆盖 OpenClaw、Hermes Agent、HeyClicky、generic chatbot、funding/news、standalone model、tutorial/resource list、ordinary dashboard/editor/calculator、gray-zone utility。
+- OpenClaw / Hermes / HeyClicky 必须高分。
+- generic chatbot、纯新闻、单独模型发布、教程资源、普通 dashboard/editor/calculator 必须低分，除非证据明确展示了新的 workflow unlock。
+- Kimi smoke run 用小规模真实调用验证 JSON schema、ReAct tool trace、失败 fallback、brief 中文质量。
+- 20-30 candidate bounded run 用来验证真实 feed routing、cache、tool budgets、API payload 和 UI 展示。
+
+当前 deterministic scorer eval 是 `9/9` 通过。
+
 ## 第一步：历史回测
 
 Hero Radar 的第一步不是先把界面做漂亮，而是先回答一个更硬的问题：如果我们当时在跑这套系统，它能不能在 OpenClaw / Hermes Agent 变成共识前，把它们放进 closer-look 队列？
@@ -339,7 +414,7 @@ open http://127.0.0.1:5176/?section=feed&feed=daily
 - `KIMI_API_KEY` 或 `MOONSHOT_API_KEY`：Layer 2 Scoring Investigator / brief。
 - `KIMI_BASE_URL` 或 `MOONSHOT_BASE_URL`：可选，默认 `https://api.moonshot.ai/v1`。
 - `KIMI_MODEL`：可选，默认使用 repo 内配置的 Kimi 模型。
-- `DEEPSEEK_API_KEY`：旧 LLM classifier/eval 路径可能用到，当前 Layer 2 主路径不依赖它。
+- `DEEPSEEK_API_KEY`：Layer 1 source classifiers / lightweight semantic parsing。
 
 Kimi 也支持本地 JSON secret：
 
@@ -355,77 +430,12 @@ Kimi 也支持本地 JSON secret：
 
 文件路径：`pipeline/secrets.local.json`。这个文件被 git ignore，不要提交。
 
-## 静态 Demo / Vercel
+## Demo 和部署状态
 
-如果只是给别人看当前版本，推荐部署静态快照，不要直接把 Vercel 连到本地 DB 或完整 batch worker。
-
-当前线上 demo：
+当前线上 demo 是静态快照，不连接后端、不触发 pipeline、不需要 API key：
 [https://demo-six-sigma-28.vercel.app](https://demo-six-sigma-28.vercel.app)
 
-原因：
-
-- 静态 demo 不需要后端，不需要 API key。
-- Demo 是 read-only，不会触发 pipeline，不会花 Apify/Kimi/GitHub quota。
-- 当前 UI、Feed、候选池、Sources、Settings 都能展示。
-- 页面顶部会显示一条细 banner，说明这是演示快照，不连接后端；完整项目可以看 GitHub repo，或者让 Codex 在本机启动 API + Web app。
-
-生成静态 JSON 快照：
-
-```bash
-python3 pipeline/export_static_demo.py \
-  --output docs/demo/dashboard-data.json \
-  --max-items-per-channel-window 20
-```
-
-构建静态 app：
-
-```bash
-cd web
-VITE_STATIC_DASHBOARD_DATA_URL=./dashboard-data.json \
-  npm run build -- --base ./ --outDir ../docs/demo --emptyOutDir
-```
-
-本地预览：
-
-```bash
-python3 -m http.server 4180 --directory docs/demo
-open http://127.0.0.1:4180/
-```
-
-GitHub Pages 发布方式：
-
-1. push `docs/demo` 到 GitHub。
-2. 在 GitHub repo 里打开 `Settings -> Pages`。
-3. Source 选 `Deploy from a branch`。
-4. Branch 选 `main`，folder 选 `/docs`。
-5. 页面地址会类似：`https://<user>.github.io/<repo>/demo/`。
-
-Vercel 发布方式：
-
-```bash
-npx --yes vercel deploy docs/demo --prod
-```
-
-Vercel 上只部署 `docs/demo` 这个静态目录。不要把 full batch worker 放到 Vercel 上跑。
-
-## 数据和提交规则
-
-不要提交：
-
-- `data/hero_radar.sqlite`
-- `data/raw/`
-- `data/exports/`
-- `.env`
-- `pipeline/secrets.local.json`
-- 任何 token/key 文件
-
-可以提交：
-
-- pipeline 代码
-- tests
-- docs
-- `docs/demo` 静态 read-only demo
-- `docs/assets` 截图
+如果要看实时版本，可以让 Codex 在本机启动 API 和 Web app；如果要每天自动跑，目前项目内已有 `pipeline/run_daily.py --run-layer2` 串起 source collection -> decision layer -> Layer 2 feed，但还没有内置托管式每日定时模块。实际部署时可以很容易用 cron、GitHub Actions schedule、Render/Railway worker cron，或其他 worker scheduler 调用这条命令。
 
 ## 测试
 
