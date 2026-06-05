@@ -10,6 +10,8 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import os
+import sqlite3
 import subprocess
 import sys
 import time
@@ -26,6 +28,7 @@ from pipeline.run_logging import JsonlRunLogger
 PYTHON = sys.executable or "python3"
 DEFAULT_TIMEOUT_SECONDS = 3600
 CONFIG_RELATIVE_PATH = Path("pipeline") / "config.json"
+DB_RELATIVE_PATH = Path("data") / "hero_radar.sqlite"
 
 
 def utc_now() -> str:
@@ -112,6 +115,87 @@ def _configured_optional_str(
     return str(value)
 
 
+def completed_stages_from_log(log_path: Path) -> set[str]:
+    if not log_path.exists():
+        return set()
+    completed: set[str] = set()
+    for line in log_path.read_text().splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if (
+            event.get("event") == "stage_completed"
+            and int(event.get("returncode", 1)) == 0
+            and event.get("stage")
+        ):
+            completed.add(str(event["stage"]))
+    return completed
+
+
+def decision_run_is_complete(root: Path, run_id: str) -> bool:
+    db_path = Path(root) / DB_RELATIVE_PATH
+    if not db_path.exists():
+        return False
+    try:
+        conn = sqlite3.connect(db_path)
+        row = conn.execute(
+            "select status from decision_runs where run_id = ?",
+            (run_id,),
+        ).fetchone()
+    except sqlite3.Error:
+        return False
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    return bool(row and row[0] == "ok")
+
+
+def layer2_run_is_complete(root: Path, decision_run_id: str) -> bool:
+    db_path = Path(root) / DB_RELATIVE_PATH
+    if not db_path.exists():
+        return False
+    try:
+        conn = sqlite3.connect(db_path)
+        row = conn.execute(
+            """
+            select status
+            from l2_feed_runs
+            where decision_run_id = ? and status in ('ok', 'ok_with_errors')
+            order by coalesce(completed_at, started_at) desc
+            limit 1
+            """,
+            (decision_run_id,),
+        ).fetchone()
+    except sqlite3.Error:
+        return False
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    return bool(row)
+
+
+def stale_lock_matches_run(lock_path: Path, run_id: str) -> bool:
+    try:
+        payload = json.loads(lock_path.read_text())
+    except Exception:
+        return False
+    if payload.get("run_id") != run_id:
+        return False
+    pid = payload.get("pid")
+    if isinstance(pid, int) and pid > 0 and pid != os.getpid():
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return True
+        return False
+    return True
+
+
 def source_command(
     *,
     root: Path,
@@ -192,6 +276,7 @@ def layer2_command(
     max_pages: int | None = None,
     max_hn_thread_fetches: int | None = None,
     max_x_context_fetches: int | None = None,
+    finalize_stale_running_before: str | None = None,
 ) -> list[str]:
     cmd = [
         python,
@@ -230,6 +315,8 @@ def layer2_command(
         cmd.extend(["--max-hn-thread-fetches-per-candidate", str(max_hn_thread_fetches)])
     if max_x_context_fetches is not None:
         cmd.extend(["--max-x-context-fetches-per-candidate", str(max_x_context_fetches)])
+    if finalize_stale_running_before:
+        cmd.extend(["--finalize-stale-running-before", finalize_stale_running_before])
     return cmd
 
 
@@ -322,6 +409,7 @@ def run_daily(
     layer2_max_hn_thread_fetches: int | None = None,
     layer2_max_x_context_fetches: int | None = None,
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
+    resume: bool = False,
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
 ) -> dict[str, Any]:
     active_root = Path(root)
@@ -387,10 +475,24 @@ def run_daily(
     decision_log_path = log_path.parent / f"{active_run_id}.decision.jsonl"
     logger = JsonlRunLogger(log_path, run_id=active_run_id)
     if lock_path.exists():
-        raise RuntimeError(f"daily pipeline lock exists: {lock_path}")
+        if resume and stale_lock_matches_run(lock_path, active_run_id):
+            lock_path.unlink()
+        else:
+            raise RuntimeError(f"daily pipeline lock exists: {lock_path}")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    lock_path.write_text(json.dumps({"run_id": active_run_id, "started_at": active_now}) + "\n")
+    lock_path.write_text(
+        json.dumps(
+            {"run_id": active_run_id, "started_at": active_now, "pid": os.getpid()}
+        )
+        + "\n"
+    )
     stages: list[dict[str, Any]] = []
+    completed_stages = completed_stages_from_log(log_path) if resume else set()
+    resume_skip_sources = resume and "sources" in completed_stages
+    resume_skip_decision = resume and decision_run_is_complete(active_root, active_run_id)
+    resume_skip_layer2 = (
+        resume and active_run_layer2 and layer2_run_is_complete(active_root, active_run_id)
+    )
     logger.event(
         "run_started",
         now=active_now,
@@ -398,9 +500,14 @@ def run_daily(
         skip_decision=skip_decision,
         run_layer2=active_run_layer2,
         only_sources=only_sources or [],
+        resume=resume,
+        resume_completed_stages=sorted(completed_stages),
     )
     try:
-        if not skip_sources:
+        if skip_sources or resume_skip_sources:
+            if resume_skip_sources and not skip_sources:
+                logger.event("stage_skipped", stage="sources", reason="resume_completed_stage")
+        else:
             stages.append(
                 _run_logged_stage(
                     logger=logger,
@@ -427,7 +534,10 @@ def run_daily(
                 logger.event("run_failed", returncode=summary["returncode"], failed_stage="sources")
                 return summary
 
-        if not skip_decision:
+        if skip_decision or resume_skip_decision:
+            if resume_skip_decision and not skip_decision:
+                logger.event("stage_skipped", stage="decision", reason="resume_completed_run")
+        else:
             stages.append(
                 _run_logged_stage(
                     logger=logger,
@@ -463,7 +573,9 @@ def run_daily(
                 logger.event("run_failed", returncode=summary["returncode"], failed_stage="decision")
                 return summary
 
-        if active_run_layer2:
+        if active_run_layer2 and resume_skip_layer2:
+            logger.event("stage_skipped", stage="layer2", reason="resume_completed_run")
+        elif active_run_layer2:
             stages.append(
                 _run_logged_stage(
                     logger=logger,
@@ -487,6 +599,7 @@ def run_daily(
                         max_pages=active_layer2_max_pages,
                         max_hn_thread_fetches=active_layer2_max_hn_thread_fetches,
                         max_x_context_fetches=active_layer2_max_x_context_fetches,
+                        finalize_stale_running_before=active_now,
                     ),
                     cwd=active_root,
                     timeout=timeout,
@@ -536,6 +649,7 @@ def main() -> int:
     parser.add_argument("--only-source", action="append", default=[])
     parser.add_argument("--skip-sources", action="store_true")
     parser.add_argument("--skip-decision", action="store_true")
+    parser.add_argument("--resume", action="store_true")
     parser.add_argument("--no-backfill", action="store_true")
     parser.add_argument("--classify-hn-limit", type=int, default=200)
     parser.add_argument("--classify-x-limit", type=int, default=300)
@@ -605,6 +719,7 @@ def main() -> int:
         layer2_max_hn_thread_fetches=args.layer2_max_hn_thread_fetches,
         layer2_max_x_context_fetches=args.layer2_max_x_context_fetches,
         timeout=args.timeout,
+        resume=args.resume,
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return int(summary["returncode"])

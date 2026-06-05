@@ -4,6 +4,7 @@ import tempfile
 import unittest
 import json
 import os
+import sqlite3
 from pathlib import Path
 
 
@@ -278,8 +279,139 @@ class DailyPipelineTest(unittest.TestCase):
                 "20",
                 "--deepdive-limit",
                 "2",
+                "--finalize-stale-running-before",
+                "2026-05-31T12:00:00Z",
             ],
         )
+
+    def test_resume_skips_completed_source_stage_from_log(self):
+        from pipeline.run_daily import run_daily
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            log_dir = root / "data" / "logs" / "run_daily"
+            log_dir.mkdir(parents=True)
+            (log_dir / "decision_daily_resume.jsonl").write_text(
+                json.dumps(
+                    {
+                        "event": "stage_completed",
+                        "run_id": "decision_daily_resume",
+                        "stage": "sources",
+                        "returncode": 0,
+                    }
+                )
+                + "\n"
+            )
+            runner = FakeRunner()
+
+            summary = run_daily(
+                root=root,
+                python="py",
+                run_id="decision_daily_resume",
+                now="2026-05-31T12:00:00Z",
+                resume=True,
+                runner=runner,
+            )
+
+        self.assertTrue(summary["ok"])
+        self.assertEqual(len(runner.calls), 1)
+        self.assertIn("pipeline.decision.run_decision", runner.calls[0]["cmd"])
+
+    def test_resume_skips_completed_decision_run_and_continues_to_layer2(self):
+        from pipeline.decision.schema import init_decision_db
+        from pipeline.run_daily import run_daily
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            db_path = root / "data" / "hero_radar.sqlite"
+            db_path.parent.mkdir(parents=True)
+            conn = sqlite3.connect(db_path)
+            init_decision_db(conn)
+            conn.execute(
+                "insert into decision_runs(run_id, source_snapshot_run_id, started_at, completed_at, status, config_hash, rule_version, note) values (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "decision_daily_resume",
+                    "source-run",
+                    "2026-05-31T12:00:00Z",
+                    "2026-05-31T12:01:00Z",
+                    "ok",
+                    "config",
+                    "rules",
+                    "",
+                ),
+            )
+            conn.commit()
+            conn.close()
+            runner = FakeRunner()
+
+            summary = run_daily(
+                root=root,
+                python="py",
+                run_id="decision_daily_resume",
+                now="2026-05-31T12:00:00Z",
+                skip_sources=True,
+                run_layer2=True,
+                resume=True,
+                runner=runner,
+            )
+
+        self.assertTrue(summary["ok"])
+        self.assertEqual(len(runner.calls), 1)
+        self.assertIn("pipeline.decision.run_layer2_feed", runner.calls[0]["cmd"])
+
+    def test_resume_skips_completed_layer2_run(self):
+        from pipeline.decision.schema import init_decision_db
+        from pipeline.run_daily import run_daily
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            db_path = root / "data" / "hero_radar.sqlite"
+            db_path.parent.mkdir(parents=True)
+            conn = sqlite3.connect(db_path)
+            init_decision_db(conn)
+            conn.execute(
+                "insert into decision_runs(run_id, source_snapshot_run_id, started_at, completed_at, status, config_hash, rule_version, note) values (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "decision_daily_resume",
+                    "source-run",
+                    "2026-05-31T12:00:00Z",
+                    "2026-05-31T12:01:00Z",
+                    "ok",
+                    "config",
+                    "rules",
+                    "",
+                ),
+            )
+            conn.execute(
+                "insert into l2_feed_runs(feed_run_id, decision_run_id, started_at, completed_at, status, config_hash, model_profile_json, note) values (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "l2-resume",
+                    "decision_daily_resume",
+                    "2026-05-31T12:02:00Z",
+                    "2026-05-31T12:03:00Z",
+                    "ok",
+                    "config",
+                    "{}",
+                    "{}",
+                ),
+            )
+            conn.commit()
+            conn.close()
+            runner = FakeRunner()
+
+            summary = run_daily(
+                root=root,
+                python="py",
+                run_id="decision_daily_resume",
+                now="2026-05-31T12:00:00Z",
+                skip_sources=True,
+                run_layer2=True,
+                resume=True,
+                runner=runner,
+            )
+
+        self.assertTrue(summary["ok"])
+        self.assertEqual(runner.calls, [])
 
     def test_daily_pipeline_uses_layer2_config_defaults_without_explicit_flag(self):
         from pipeline.run_daily import run_daily
