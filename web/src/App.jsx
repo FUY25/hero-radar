@@ -1368,19 +1368,6 @@ function DailyFeedView({ payload, onOpenSource }) {
           </section>
         </>
       ) : null}
-      {(feed.diagnostics || []).length ? (
-        <>
-          <div className="feed-section-heading compact">
-            <span>Diagnostics</span>
-            <strong>诊断项</strong>
-          </div>
-          <section className="scored-feed-list diagnostic-feed-list" aria-label="Diagnostics Feed">
-            {feed.diagnostics.map((item, index) => (
-              <ScoredFeedRow key={item.group_id} item={{ ...item, rank: item.rank || index + 1 }} onOpenSource={onOpenSource} />
-            ))}
-          </section>
-        </>
-      ) : null}
     </section>
   );
 }

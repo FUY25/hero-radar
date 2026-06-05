@@ -482,16 +482,6 @@ def run_layer2_feed(
                     deepdive_status=ROUTE_SCORE_ONLY,
                 )
                 score_only_rank += 1
-            elif route == ROUTE_SUPPRESS_OR_LOW:
-                _insert_feed_item(
-                    conn,
-                    feed_run_id=active_feed_run_id,
-                    group_id=row["group"].group_id,
-                    section="diagnostics",
-                    rank=diagnostics_rank,
-                    deepdive_status=ROUTE_SUPPRESS_OR_LOW,
-                )
-                diagnostics_rank += 1
         for error_row in candidate_errors:
             _record_route_decision(
                 conn,

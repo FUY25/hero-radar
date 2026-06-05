@@ -295,7 +295,10 @@ def query_feed_payload(feed_run_id: str | None = None) -> dict[str, Any]:
             ],
             "scored_list": [item for item in items if item["section"] == "scored"],
             "diagnostics": [
-                item for item in items if item["section"] == "diagnostics"
+                item
+                for item in items
+                if item["section"] == "diagnostics"
+                and item.get("deepdive_status") != "suppress_or_low"
             ],
             "pending": {"edge_watch_scout": 0, "deepdive": 0},
         }

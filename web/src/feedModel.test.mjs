@@ -105,7 +105,6 @@ test('feedRows merges today focus and scored list with section markers', () => {
 
   assert.deepEqual(rows.map((row) => [row.group_id, row.section]), [
     ['group:repo', 'today_focus'],
-    ['group:error', 'diagnostics'],
   ]);
 });
 
@@ -211,4 +210,5 @@ test('feedBriefPreview keeps selected cards compact before expansion', () => {
 test('feedEmptyState distinguishes missing feed from empty scored run', () => {
   assert.equal(feedEmptyState({ feed_run_id: '', today_focus: [], scored_list: [] }), 'missing');
   assert.equal(feedEmptyState({ feed_run_id: 'l2-run', today_focus: [], scored_list: [], diagnostics: [] }), 'empty');
+  assert.equal(feedEmptyState({ feed_run_id: 'l2-run', today_focus: [], scored_list: [], diagnostics: [{ group_id: 'group:error' }] }), 'empty');
 });

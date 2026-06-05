@@ -268,7 +268,7 @@ class Layer2RunnerTest(unittest.TestCase):
             self.assertIn("开发工具", brief_json)
             conn.close()
 
-    def test_run_layer2_routes_focus_score_only_and_diagnostics(self):
+    def test_run_layer2_routes_focus_score_only_and_suppressed_routes(self):
         from pipeline.decision.llm_provider import FakeLLMProvider
         from pipeline.decision.run_layer2_feed import run_layer2_feed
 
@@ -376,8 +376,6 @@ class Layer2RunnerTest(unittest.TestCase):
         self.assertEqual(
             items,
             [
-                ("d-news/repo", "diagnostics", "suppress_or_low"),
-                ("c-weak/repo", "diagnostics", "suppress_or_low"),
                 ("anthropics/claude-plugins-official", "scored", "score_only"),
                 ("a-focus/repo", "today_focus", "briefed"),
             ],

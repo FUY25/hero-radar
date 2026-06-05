@@ -184,6 +184,24 @@ class FeedApiTest(unittest.TestCase):
         self.assertEqual(payload["diagnostics"][0]["group_id"], "group:repo")
         self.assertEqual(payload["diagnostics"][0]["deepdive_status"], "candidate_error")
 
+    def test_query_feed_payload_filters_legacy_suppressed_diagnostics(self):
+        import pipeline.server as server
+
+        temp, db_path = self.make_db()
+        self.addCleanup(temp.cleanup)
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "insert into l2_feed_items(feed_run_id, group_id, section, rank, deepdive_status) values (?, ?, ?, ?, ?)",
+            ("l2-run", "group:repo", "diagnostics", 1, "suppress_or_low"),
+        )
+        conn.commit()
+        conn.close()
+
+        with mock.patch.object(server, "DB_PATH", db_path):
+            payload = server.query_feed_payload()
+
+        self.assertEqual(payload["diagnostics"], [])
+
     def test_query_feed_payload_can_select_explicit_run(self):
         import pipeline.server as server
 

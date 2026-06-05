@@ -318,7 +318,6 @@ export function feedRows(feed) {
   return [
     ...(feed?.today_focus || []),
     ...(feed?.scored_list || []),
-    ...(feed?.diagnostics || []),
   ];
 }
 
@@ -335,7 +334,6 @@ export function feedEmptyState(feed) {
   if (
     !(feed.today_focus || []).length
     && !(feed.scored_list || []).length
-    && !(feed.diagnostics || []).length
   ) return 'empty';
   return '';
 }
