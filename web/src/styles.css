@@ -119,6 +119,7 @@ body {
 .brand {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 9px;
   min-width: 0;
 }
@@ -207,6 +208,47 @@ body {
 
 .workspace {
   min-width: 0;
+}
+
+.demo-banner {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 28px;
+  padding: 5px 24px;
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--warn-soft) 72%, var(--panel));
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.demo-banner-label {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 7px;
+  border: 1px solid color-mix(in srgb, var(--warn) 34%, var(--line));
+  border-radius: 999px;
+  color: var(--warn);
+  font-weight: 720;
+}
+
+.demo-banner a {
+  color: var(--accent);
+  font-weight: 650;
+  text-decoration: none;
+}
+
+.demo-banner a:hover {
+  text-decoration: underline;
+}
+
+.demo-banner-note {
+  color: var(--faint);
 }
 
 main {

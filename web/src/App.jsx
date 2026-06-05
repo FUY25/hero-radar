@@ -43,6 +43,7 @@ import {
   settingsPanelDefs,
   sourceItemNavigationState,
   sortOptionsForChannel as modelSortOptionsForChannel,
+  staticDemoNotice,
   valueAt as modelValueAt,
   workspaceSections,
   xAvatarForHandle,
@@ -2178,6 +2179,7 @@ function App() {
     ? state.activeSettings
     : settingsChannels[0]?.id || '';
   const configDirty = JSON.stringify(runtimeConfig || {}) !== savedConfigText;
+  const demoNotice = staticDemoNotice(STATIC_DASHBOARD_DATA_URL);
 
   return (
     <div className={`app-root ${railCollapsed ? 'rail-collapsed' : ''} ${activeSection === 'settings' ? 'settings-mode' : ''}`} data-theme={theme}>
@@ -2230,6 +2232,14 @@ function App() {
         ) : null}
 
         <div className="workspace">
+          {demoNotice.enabled ? (
+            <div className="demo-banner" role="status">
+              <span className="demo-banner-label">{demoNotice.label}</span>
+              <span>{demoNotice.text}</span>
+              <a href={demoNotice.actionUrl} target="_blank" rel="noreferrer">{demoNotice.actionText}</a>
+              <span className="demo-banner-note">也可以让 Codex 在本机启动后端和 Web app。</span>
+            </div>
+          ) : null}
           <main>
             {error ? <div className="error visible">Failed to load dashboard data: {error}</div> : null}
             {!payload || !state ? <div className="empty">Loading dashboard data from {dashboardDataUrl({ apiBase: API_BASE, staticUrl: STATIC_DASHBOARD_DATA_URL })}...</div> : null}

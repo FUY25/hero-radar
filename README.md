@@ -293,15 +293,16 @@ Kimi 也支持本地 JSON secret：
 
 文件路径：`pipeline/secrets.local.json`。这个文件被 git ignore，不要提交。
 
-## 静态 Demo
+## 静态 Demo / Vercel
 
-如果只是给别人看当前版本，推荐用 GitHub Pages 的静态快照，不推荐直接上 Vercel 连接本地 DB。
+如果只是给别人看当前版本，推荐部署静态快照，不要直接把 Vercel 连到本地 DB 或完整 batch worker。
 
 原因：
 
-- GitHub Pages 不需要后端，不需要 API key。
+- 静态 demo 不需要后端，不需要 API key。
 - Demo 是 read-only，不会触发 pipeline，不会花 Apify/Kimi/GitHub quota。
 - 当前 UI、Feed、候选池、Sources、Settings 都能展示。
+- 页面顶部会显示一条细 banner，说明这是演示快照，不连接后端；完整项目可以看 GitHub repo，或者让 Codex 在本机启动 API + Web app。
 
 生成静态 JSON 快照：
 
@@ -334,7 +335,13 @@ GitHub Pages 发布方式：
 4. Branch 选 `main`，folder 选 `/docs`。
 5. 页面地址会类似：`https://<user>.github.io/<repo>/demo/`。
 
-如果用 Vercel，也建议只部署 `docs/demo` 这个静态目录。不要把 full batch worker 放到 Vercel 上跑。
+Vercel 发布方式：
+
+```bash
+npx --yes vercel deploy docs/demo --prod
+```
+
+Vercel 上只部署 `docs/demo` 这个静态目录。不要把 full batch worker 放到 Vercel 上跑。
 
 ## 数据和提交规则
 

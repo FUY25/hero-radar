@@ -23,6 +23,7 @@ import {
   setConfigValue,
   settingsPanelDefs,
   sortOptionsForChannel,
+  staticDemoNotice,
   sourceItemNavigationState,
   visibleWindowsForChannel,
   workspaceSections,
@@ -288,6 +289,17 @@ test('dashboardDataUrl prefers a static demo snapshot when configured', () => {
     dashboardDataUrl({ apiBase: 'http://127.0.0.1:8787/' }),
     'http://127.0.0.1:8787/api/dashboard-data',
   );
+});
+
+test('staticDemoNotice only appears for static snapshots', () => {
+  assert.equal(staticDemoNotice('').enabled, false);
+  assert.deepEqual(staticDemoNotice('./dashboard-data.json'), {
+    enabled: true,
+    label: '演示快照',
+    text: '这是只读演示，不连接后端或实时数据。',
+    actionText: '查看 GitHub repo',
+    actionUrl: 'https://github.com/FUY25/hero-radar',
+  });
 });
 
 test('xAvatarForHandle resolves tweet author avatars for tweet and seed account rows', () => {

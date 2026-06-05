@@ -755,6 +755,17 @@ export function dashboardDataUrl({ apiBase = '', staticUrl = '' } = {}) {
   return cleanStatic || dashboardApiUrl('/api/dashboard-data', apiBase);
 }
 
+export function staticDemoNotice(staticUrl = '') {
+  if (!String(staticUrl || '').trim()) return { enabled: false };
+  return {
+    enabled: true,
+    label: '演示快照',
+    text: '这是只读演示，不连接后端或实时数据。',
+    actionText: '查看 GitHub repo',
+    actionUrl: 'https://github.com/FUY25/hero-radar',
+  };
+}
+
 export function visibleWindowsForChannel(items, channel) {
   const windows = new Set();
   for (const item of items || []) {
