@@ -450,6 +450,7 @@ def run_layer2_feed(
             )
         score_only_rank = 1
         diagnostics_rank = 1
+        suppressed_rows = []
         for row in sorted(scored, key=lambda item: -float(item["l2_score"])):
             route = classify_scored_route(
                 row,
@@ -479,9 +480,21 @@ def run_layer2_feed(
                     group_id=row["group"].group_id,
                     section="scored",
                     rank=score_only_rank,
-                    deepdive_status=ROUTE_SCORE_ONLY,
+                    deepdive_status=route,
                 )
                 score_only_rank += 1
+            elif route == ROUTE_SUPPRESS_OR_LOW:
+                suppressed_rows.append(row)
+        for row in suppressed_rows:
+            _insert_feed_item(
+                conn,
+                feed_run_id=active_feed_run_id,
+                group_id=row["group"].group_id,
+                section="scored",
+                rank=score_only_rank,
+                deepdive_status=ROUTE_SUPPRESS_OR_LOW,
+            )
+            score_only_rank += 1
         for error_row in candidate_errors:
             _record_route_decision(
                 conn,

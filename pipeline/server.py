@@ -293,7 +293,12 @@ def query_feed_payload(feed_run_id: str | None = None) -> dict[str, Any]:
             "today_focus": [
                 item for item in items if item["section"] == "today_focus"
             ],
-            "scored_list": [item for item in items if item["section"] == "scored"],
+            "scored_list": [
+                item
+                for item in items
+                if item["section"] == "scored"
+                or item.get("deepdive_status") == "suppress_or_low"
+            ],
             "diagnostics": [
                 item
                 for item in items

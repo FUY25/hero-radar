@@ -329,6 +329,17 @@ export function feedFocusLayout(items = []) {
   };
 }
 
+export function feedScoredGroups(feed) {
+  const scored = Array.isArray(feed?.scored_list) ? feed.scored_list.filter(Boolean) : [];
+  const lowSignals = scored.filter((item) => item.deepdive_status === 'suppress_or_low');
+  const signals = scored.filter((item) => item.deepdive_status !== 'suppress_or_low');
+  return {
+    signals,
+    lowSignals,
+    totalScoredVisible: (Array.isArray(feed?.today_focus) ? feed.today_focus.length : 0) + scored.length,
+  };
+}
+
 export function feedEmptyState(feed) {
   if (!feed?.feed_run_id) return 'missing';
   if (
@@ -367,6 +378,12 @@ export function feedBriefPreview(item) {
 export function feedRunSummary(feed) {
   const profile = feed?.model_profile || {};
   const telemetry = feed?.telemetry || {};
+  const routes = telemetry.route_counts || {};
+  const groups = feedScoredGroups(feed);
+  const focusCount = Number(routes.score_plus_deepdive ?? (feed?.today_focus || []).length);
+  const signalCount = Number(routes.score_only ?? groups.signals.length);
+  const lowCount = Number(routes.suppress_or_low ?? groups.lowSignals.length);
+  const scoredCount = Number(telemetry.scored ?? groups.totalScoredVisible);
   return {
     run: feed?.feed_run_id || '',
     decision: feed?.decision_run_id || '',
@@ -377,9 +394,15 @@ export function feedRunSummary(feed) {
       profile.brief ? `brief ${profile.brief}` : '',
       profile.deepdive ? `deepdive ${profile.deepdive}` : '',
     ].filter(Boolean).join(' · '),
+    coverage: [
+      `已评分 ${scoredCount}`,
+      `今日重点 ${focusCount}`,
+      `候选 ${signalCount}`,
+      `低信号 ${lowCount}`,
+    ].join(' · '),
     health: [
       feed?.run_status || '',
-      `scored ${Number(telemetry.scored || 0)}`,
+      `scored ${scoredCount}`,
       `briefs ${Number(telemetry.briefs || 0)}`,
       `errors ${Number(telemetry.error_total || 0)}`,
     ].filter(Boolean).join(' · '),

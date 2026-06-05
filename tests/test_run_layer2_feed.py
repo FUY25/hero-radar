@@ -377,6 +377,8 @@ class Layer2RunnerTest(unittest.TestCase):
             items,
             [
                 ("anthropics/claude-plugins-official", "scored", "score_only"),
+                ("d-news/repo", "scored", "suppress_or_low"),
+                ("c-weak/repo", "scored", "suppress_or_low"),
                 ("a-focus/repo", "today_focus", "briefed"),
             ],
         )

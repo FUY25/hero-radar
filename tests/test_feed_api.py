@@ -184,15 +184,49 @@ class FeedApiTest(unittest.TestCase):
         self.assertEqual(payload["diagnostics"][0]["group_id"], "group:repo")
         self.assertEqual(payload["diagnostics"][0]["deepdive_status"], "candidate_error")
 
-    def test_query_feed_payload_filters_legacy_suppressed_diagnostics(self):
+    def test_query_feed_payload_maps_legacy_suppressed_diagnostics_to_scored_list(self):
         import pipeline.server as server
 
         temp, db_path = self.make_db()
         self.addCleanup(temp.cleanup)
         conn = sqlite3.connect(db_path)
         conn.execute(
+            "insert into l2_candidate_groups(group_id, feed_run_id, canonical_entity_id, canonical_name, canonical_key, canonical_link, member_entity_ids_json, level, source_families_json, evidence_hash, grouping_reason_json, context_json) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "group:low",
+                "l2-run",
+                "entity:low",
+                "low/repo",
+                "github:low/repo",
+                "https://github.com/low/repo",
+                '["entity:low"]',
+                "potential",
+                '["github"]',
+                "low-hash",
+                "{}",
+                json.dumps({"evidence_rows": []}),
+            ),
+        )
+        conn.execute(
+            "insert into l2_scores(feed_run_id, group_id, l2_score, axes_json, primary_reason, topic_tags_json, rationale_short, caveats_json, provider, model, prompt_version, cache_key) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "l2-run",
+                "group:low",
+                34,
+                json.dumps({"momentum": 20}),
+                "Low Signal",
+                '["utility"]',
+                "Low confidence utility.",
+                "[]",
+                "kimi",
+                "kimi-k2.5",
+                "v1",
+                "low-cache",
+            ),
+        )
+        conn.execute(
             "insert into l2_feed_items(feed_run_id, group_id, section, rank, deepdive_status) values (?, ?, ?, ?, ?)",
-            ("l2-run", "group:repo", "diagnostics", 1, "suppress_or_low"),
+            ("l2-run", "group:low", "diagnostics", 1, "suppress_or_low"),
         )
         conn.commit()
         conn.close()
@@ -201,6 +235,8 @@ class FeedApiTest(unittest.TestCase):
             payload = server.query_feed_payload()
 
         self.assertEqual(payload["diagnostics"], [])
+        self.assertEqual(payload["scored_list"][0]["group_id"], "group:low")
+        self.assertEqual(payload["scored_list"][0]["deepdive_status"], "suppress_or_low")
 
     def test_query_feed_payload_can_select_explicit_run(self):
         import pipeline.server as server

@@ -26,6 +26,7 @@ import {
   feedEmptyState,
   feedFocusLayout,
   feedRunSummary,
+  feedScoredGroups,
   feedSignalDescription,
   filterCandidateRows,
   formatProjectList,
@@ -1322,6 +1323,7 @@ function DailyFeedView({ payload, onOpenSource }) {
   }
   const summary = feedRunSummary(feed);
   const focusLayout = feedFocusLayout(feed.today_focus || []);
+  const scoredGroups = feedScoredGroups(feed);
   return (
     <section className="daily-feed-shell">
       <div className="feed-run-strip">
@@ -1331,6 +1333,7 @@ function DailyFeedView({ payload, onOpenSource }) {
         </div>
         <div className="feed-run-meta">
           <span>{summary.generated}</span>
+          <span>{summary.coverage}</span>
           <span>{summary.models}</span>
           <span>{summary.health}</span>
         </div>
@@ -1355,14 +1358,27 @@ function DailyFeedView({ payload, onOpenSource }) {
           ) : null}
         </>
       ) : null}
-      {(feed.scored_list || []).length ? (
+      {scoredGroups.signals.length ? (
         <>
           <div className="feed-section-heading compact">
-            <span>Scored backlog</span>
+            <span>Score-only · {scoredGroups.signals.length}</span>
             <strong>候选信号</strong>
           </div>
           <section className="scored-feed-list" aria-label="Scored Feed">
-            {feed.scored_list.map((item, index) => (
+            {scoredGroups.signals.map((item, index) => (
+              <ScoredFeedRow key={item.group_id} item={{ ...item, rank: item.rank || index + 1 }} onOpenSource={onOpenSource} />
+            ))}
+          </section>
+        </>
+      ) : null}
+      {scoredGroups.lowSignals.length ? (
+        <>
+          <div className="feed-section-heading compact low-signal-heading">
+            <span>Complete scored record · {scoredGroups.lowSignals.length}</span>
+            <strong>完整评分记录</strong>
+          </div>
+          <section className="scored-feed-list low-signal-list" aria-label="Low Signal Scored Feed">
+            {scoredGroups.lowSignals.map((item, index) => (
               <ScoredFeedRow key={item.group_id} item={{ ...item, rank: item.rank || index + 1 }} onOpenSource={onOpenSource} />
             ))}
           </section>
@@ -1498,12 +1514,15 @@ function FeedBrief({ item }) {
 function ScoredFeedRow({ item, onOpenSource }) {
   const [expanded, setExpanded] = useState(false);
   const bar = scoreBarStyle(item.l2_score);
-  const description = feedCardDescription(item, { maxChars: 96 });
+  const isLowSignal = item.deepdive_status === 'suppress_or_low';
+  const statusLabel = isLowSignal ? '低信号' : '候选';
+  const description = feedCardDescription(item, { maxChars: isLowSignal ? 86 : 96 });
   return (
-    <article className={`scored-feed-row ${scoreTone(item.l2_score)}`}>
+    <article className={`scored-feed-row ${scoreTone(item.l2_score)} ${isLowSignal ? 'low-signal' : ''}`}>
       <div className="compact-score" style={bar}>
         <span>{bar.label}</span>
         <div aria-hidden="true" />
+        <small>{statusLabel}</small>
       </div>
       <div className="scored-feed-main">
         <strong>{item.title}</strong>
@@ -1511,6 +1530,7 @@ function ScoredFeedRow({ item, onOpenSource }) {
         <p>{description}</p>
       </div>
       <div className="scored-feed-meta">
+        <span className="route-pill">{statusLabel}</span>
         <span>{item.primary_reason}</span>
         {(item.topic_tags || []).slice(0, 2).map((tag) => <span key={tag}>{tag}</span>)}
       </div>

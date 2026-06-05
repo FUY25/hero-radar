@@ -539,14 +539,17 @@ button:disabled {
 
 .feed-run-strip {
   display: flex;
+  align-items: center;
   justify-content: space-between;
   gap: 16px;
   border: 1px solid var(--line);
   border-radius: 8px;
-  padding: 10px 12px;
+  padding: 11px 13px;
   background:
-    linear-gradient(180deg, color-mix(in srgb, var(--head) 46%, transparent), transparent),
+    linear-gradient(90deg, color-mix(in srgb, var(--accent) 7%, transparent), transparent 56%),
+    linear-gradient(180deg, color-mix(in srgb, var(--head) 50%, transparent), transparent),
     color-mix(in srgb, var(--panel) 94%, transparent);
+  box-shadow: var(--shadow-faint);
 }
 
 .feed-run-strip.empty-run {
@@ -571,6 +574,11 @@ button:disabled {
 .feed-run-meta {
   justify-items: end;
   text-align: right;
+}
+
+.feed-run-meta span:nth-child(2) {
+  color: color-mix(in srgb, var(--text) 82%, var(--accent));
+  font-weight: 650;
 }
 
 .feed-section-heading {
@@ -599,17 +607,25 @@ button:disabled {
   margin-top: 2px;
 }
 
+.feed-section-heading.low-signal-heading {
+  margin-top: 8px;
+}
+
+.feed-section-heading.low-signal-heading strong {
+  color: color-mix(in srgb, var(--text) 74%, var(--muted));
+}
+
 .today-focus-grid {
   display: grid;
   gap: 14px;
 }
 
 .today-focus-grid-featured {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(320px, 1fr));
 }
 
 .today-focus-grid-medium {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(280px, 1fr));
   gap: 10px;
   margin-top: -3px;
 }
@@ -621,8 +637,8 @@ button:disabled {
   border-radius: 8px;
   padding: 18px 20px 16px;
   background:
-    radial-gradient(circle at 0 0, color-mix(in srgb, var(--signal-cyan) 10%, transparent), transparent 34%),
-    linear-gradient(180deg, color-mix(in srgb, var(--accent) 4%, var(--panel)), var(--panel) 46%);
+    radial-gradient(circle at 0 0, color-mix(in srgb, var(--signal-cyan) 14%, transparent), transparent 36%),
+    linear-gradient(135deg, color-mix(in srgb, var(--accent) 6%, var(--panel)), var(--panel) 42%, color-mix(in srgb, var(--good) 3%, var(--panel)));
   box-shadow: var(--shadow-soft);
 }
 
@@ -982,9 +998,13 @@ button:disabled {
   gap: 10px;
 }
 
+.scored-feed-list.low-signal-list {
+  gap: 7px;
+}
+
 .scored-feed-row {
   display: grid;
-  grid-template-columns: 74px minmax(220px, 1fr) minmax(150px, 250px) auto auto;
+  grid-template-columns: 78px minmax(220px, 1fr) minmax(150px, 250px) auto auto;
   gap: 14px;
   align-items: center;
   border: 1px solid var(--line);
@@ -996,6 +1016,13 @@ button:disabled {
   box-shadow: var(--shadow-faint);
 }
 
+.scored-feed-row:hover {
+  border-color: color-mix(in srgb, var(--accent) 26%, var(--line));
+  background:
+    linear-gradient(90deg, color-mix(in srgb, var(--accent) 5%, transparent), transparent 52%),
+    color-mix(in srgb, var(--panel) 98%, var(--head));
+}
+
 .scored-feed-row.hot {
   border-color: color-mix(in srgb, var(--accent) 36%, var(--line));
 }
@@ -1004,9 +1031,22 @@ button:disabled {
   border-color: color-mix(in srgb, var(--good) 24%, var(--line));
 }
 
+.scored-feed-row.low-signal {
+  border-color: color-mix(in srgb, var(--line) 84%, var(--panel2));
+  background:
+    linear-gradient(90deg, color-mix(in srgb, var(--panel2) 18%, transparent), transparent 46%),
+    color-mix(in srgb, var(--panel) 92%, var(--head));
+  box-shadow: none;
+}
+
+.scored-feed-row.low-signal .scored-feed-main strong,
+.scored-feed-row.low-signal .scored-feed-meta span {
+  color: color-mix(in srgb, var(--text) 76%, var(--muted));
+}
+
 .compact-score {
   display: grid;
-  gap: 8px;
+  gap: 5px;
   min-width: 0;
 }
 
@@ -1046,6 +1086,14 @@ button:disabled {
   border-radius: inherit;
   background: var(--score-gradient);
   box-shadow: 0 0 14px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+.compact-score small {
+  color: var(--faint);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: .06em;
+  line-height: 1;
 }
 
 .scored-feed-main {
@@ -1096,6 +1144,16 @@ button:disabled {
   color: var(--muted);
   background: var(--panel);
   font-size: 11px;
+}
+
+.scored-feed-meta .route-pill {
+  color: color-mix(in srgb, var(--accent) 78%, var(--text));
+  background: color-mix(in srgb, var(--accent) 8%, var(--panel));
+}
+
+.scored-feed-row.low-signal .route-pill {
+  color: color-mix(in srgb, var(--muted) 88%, var(--text));
+  background: color-mix(in srgb, var(--panel2) 46%, var(--panel));
 }
 
 .scored-detail-toggle {

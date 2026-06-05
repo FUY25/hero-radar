@@ -6,6 +6,7 @@ import {
   feedBriefPreview,
   feedFocusLayout,
   feedSignalDescription,
+  feedScoredGroups,
   feedRows,
   feedRunSummary,
   normalizeFeedPayload,
@@ -101,11 +102,63 @@ test('normalizeFeedPayload preserves run status and telemetry', () => {
 });
 
 test('feedRows merges today focus and scored list with section markers', () => {
-  const rows = feedRows(normalizeFeedPayload(payload));
+  const rows = feedRows(normalizeFeedPayload({
+    ...payload,
+    scored_list: [
+      {
+        group_id: 'group:low',
+        canonical_name: 'low/repo',
+        l2_score: 34,
+        deepdive_status: 'suppress_or_low',
+        context: { members: [] },
+      },
+    ],
+  }));
 
   assert.deepEqual(rows.map((row) => [row.group_id, row.section]), [
     ['group:repo', 'today_focus'],
+    ['group:low', 'scored'],
   ]);
+  assert.equal(rows[1].deepdive_status, 'suppress_or_low');
+});
+
+test('feedScoredGroups separates normal candidates from low signal scored rows', () => {
+  const feed = normalizeFeedPayload({
+    ...payload,
+    telemetry: {
+      scored: 3,
+      briefs: 1,
+      error_total: 0,
+      route_counts: {
+        score_plus_deepdive: 1,
+        score_only: 1,
+        suppress_or_low: 1,
+      },
+    },
+    scored_list: [
+      {
+        group_id: 'group:signal',
+        canonical_name: 'signal/repo',
+        l2_score: 61,
+        deepdive_status: 'score_only',
+        context: { members: [] },
+      },
+      {
+        group_id: 'group:low',
+        canonical_name: 'low/repo',
+        l2_score: 34,
+        deepdive_status: 'suppress_or_low',
+        context: { members: [] },
+      },
+    ],
+  });
+  const groups = feedScoredGroups(feed);
+  const summary = feedRunSummary(feed);
+
+  assert.deepEqual(groups.signals.map((row) => row.group_id), ['group:signal']);
+  assert.deepEqual(groups.lowSignals.map((row) => row.group_id), ['group:low']);
+  assert.equal(groups.totalScoredVisible, 3);
+  assert.equal(summary.coverage, '已评分 3 · 今日重点 1 · 候选 1 · 低信号 1');
 });
 
 test('normalizeFeedPayload preserves diagnostics rows', () => {
