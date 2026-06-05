@@ -21,6 +21,13 @@ class PipelineSourcesTest(unittest.TestCase):
 
         self.assertNotIn("ossinsight", config)
 
+    def test_default_config_keeps_apify_gated_and_daily_layer2_enabled(self) -> None:
+        config = json.loads(Path("pipeline/config.json").read_text())
+
+        self.assertFalse(config["apify"]["enabled"])
+        self.assertTrue(config["layer2"]["enabled"])
+        self.assertEqual(config["layer2"]["max_scored_candidates"], 0)
+
     def test_run_pipeline_writes_per_source_structured_log(self) -> None:
         import pipeline.run_pipeline as run_pipeline
 

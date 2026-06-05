@@ -60,3 +60,20 @@ class Layer2SchedulerTest(unittest.TestCase):
 
         self.assertEqual(schedule.score_now, [])
         self.assertEqual(schedule.skipped[0]["reason"], "unchanged_evidence_hash")
+
+    def test_zero_scored_candidate_cap_means_no_cap(self):
+        from pipeline.decision.layer2_scheduler import schedule_layer2_work
+
+        schedule = schedule_layer2_work(
+            [
+                self.group("c", "potential"),
+                self.group("a", "high_potential"),
+                self.group("b", "potential"),
+            ],
+            previous_hashes={},
+            max_edge_watch_scout=0,
+            max_scored_candidates=0,
+        )
+
+        self.assertEqual([group.group_id for group in schedule.score_now], ["a", "b", "c"])
+        self.assertEqual(schedule.pending, [])

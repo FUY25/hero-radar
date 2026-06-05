@@ -226,6 +226,7 @@ class DailyPipelineTest(unittest.TestCase):
                     "2026-05-31T12:00:00Z",
                     "--skip-sources",
                     "--skip-decision",
+                    "--no-layer2",
                     "--timeout",
                     "5",
                 ],
@@ -279,6 +280,73 @@ class DailyPipelineTest(unittest.TestCase):
                 "2",
             ],
         )
+
+    def test_daily_pipeline_uses_layer2_config_defaults_without_explicit_flag(self):
+        from pipeline.run_daily import run_daily
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = root / "pipeline" / "config.json"
+            config_path.parent.mkdir(parents=True)
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "layer2": {
+                            "enabled": True,
+                            "max_edge_watch_scout": 50,
+                            "max_scored_candidates": 0,
+                            "max_deepdives_per_run": 0,
+                            "deepdive_min_l2_score": 70,
+                            "scoring_model": "kimi-k2.5",
+                            "enable_kimi_web_search": False,
+                            "max_tool_calls_per_candidate": 8,
+                            "max_web_search_calls_per_candidate": 1,
+                            "max_repo_files_per_candidate": 3,
+                            "max_pages_per_candidate": 1,
+                        }
+                    }
+                )
+            )
+            runner = FakeRunner()
+
+            summary = run_daily(
+                root=root,
+                python="py",
+                run_id="decision_daily_configured",
+                now="2026-05-31T12:00:00Z",
+                runner=runner,
+            )
+
+        self.assertTrue(summary["ok"])
+        self.assertEqual(len(runner.calls), 3)
+        layer2_cmd = runner.calls[2]["cmd"]
+        self.assertIn("pipeline.decision.run_layer2_feed", layer2_cmd)
+        self.assertIn("--scoring-limit", layer2_cmd)
+        self.assertEqual(layer2_cmd[layer2_cmd.index("--scoring-limit") + 1], "0")
+        self.assertIn("--max-tool-calls-per-candidate", layer2_cmd)
+        self.assertEqual(layer2_cmd[layer2_cmd.index("--max-tool-calls-per-candidate") + 1], "8")
+
+    def test_explicit_no_layer2_overrides_enabled_config(self):
+        from pipeline.run_daily import run_daily
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = root / "pipeline" / "config.json"
+            config_path.parent.mkdir(parents=True)
+            config_path.write_text(json.dumps({"layer2": {"enabled": True}}))
+            runner = FakeRunner()
+
+            summary = run_daily(
+                root=root,
+                python="py",
+                run_id="decision_daily_no_layer2",
+                now="2026-05-31T12:00:00Z",
+                run_layer2=False,
+                runner=runner,
+            )
+
+        self.assertTrue(summary["ok"])
+        self.assertEqual(len(runner.calls), 2)
 
     def test_daily_pipeline_passes_layer2_web_search_and_tool_budgets(self):
         from pipeline.run_daily import run_daily

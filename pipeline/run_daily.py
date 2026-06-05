@@ -25,6 +25,7 @@ from pipeline.run_logging import JsonlRunLogger
 
 PYTHON = sys.executable or "python3"
 DEFAULT_TIMEOUT_SECONDS = 3600
+CONFIG_RELATIVE_PATH = Path("pipeline") / "config.json"
 
 
 def utc_now() -> str:
@@ -35,6 +36,80 @@ def default_run_id(now: str | None = None) -> str:
     value = now or utc_now()
     compact = value.replace("-", "").replace(":", "").replace("+00:00", "Z")
     return f"decision_daily_{compact.rstrip('Z')}"
+
+
+def read_pipeline_config(root: Path) -> dict[str, Any]:
+    config_path = Path(root) / CONFIG_RELATIVE_PATH
+    if not config_path.exists():
+        return {}
+    return json.loads(config_path.read_text())
+
+
+def _layer2_config(config: dict[str, Any]) -> dict[str, Any]:
+    layer2 = config.get("layer2", {})
+    return layer2 if isinstance(layer2, dict) else {}
+
+
+def _configured_bool(
+    explicit: bool | None,
+    cfg: dict[str, Any],
+    key: str,
+    fallback: bool,
+) -> bool:
+    if explicit is not None:
+        return bool(explicit)
+    return bool(cfg.get(key, fallback))
+
+
+def _configured_int(
+    explicit: int | None,
+    cfg: dict[str, Any],
+    key: str,
+    fallback: int,
+) -> int:
+    if explicit is not None:
+        return int(explicit)
+    value = cfg.get(key, fallback)
+    return int(value)
+
+
+def _configured_optional_int(
+    explicit: int | None,
+    cfg: dict[str, Any],
+    key: str,
+) -> int | None:
+    if explicit is not None:
+        return int(explicit)
+    value = cfg.get(key)
+    if value is None or value == "":
+        return None
+    return int(value)
+
+
+def _configured_optional_float(
+    explicit: float | None,
+    cfg: dict[str, Any],
+    key: str,
+) -> float | None:
+    if explicit is not None:
+        return float(explicit)
+    value = cfg.get(key)
+    if value is None or value == "":
+        return None
+    return float(value)
+
+
+def _configured_optional_str(
+    explicit: str | None,
+    cfg: dict[str, Any],
+    key: str,
+) -> str | None:
+    if explicit:
+        return explicit
+    value = cfg.get(key)
+    if value is None or value == "":
+        return None
+    return str(value)
 
 
 def source_command(
@@ -231,15 +306,15 @@ def run_daily(
     resolver_research_rounds: int = 3,
     npm_backfill_limit: int = 40,
     enrich_readme_limit: int = 100,
-    run_layer2: bool = False,
-    layer2_scout_limit: int = 50,
-    layer2_scoring_limit: int = 150,
-    layer2_deepdive_limit: int = 10,
+    run_layer2: bool | None = None,
+    layer2_scout_limit: int | None = None,
+    layer2_scoring_limit: int | None = None,
+    layer2_deepdive_limit: int | None = None,
     layer2_deepdive_min_l2_score: float | None = None,
     layer2_scout_model: str | None = None,
     layer2_scoring_model: str | None = None,
     layer2_deepdive_model: str | None = None,
-    layer2_enable_kimi_web_search: bool = False,
+    layer2_enable_kimi_web_search: bool | None = None,
     layer2_max_tool_calls: int | None = None,
     layer2_max_web_search_calls: int | None = None,
     layer2_max_repo_files: int | None = None,
@@ -252,6 +327,60 @@ def run_daily(
     active_root = Path(root)
     active_now = now or utc_now()
     active_run_id = run_id or default_run_id(active_now)
+    config = read_pipeline_config(active_root)
+    layer2_cfg = _layer2_config(config)
+    active_run_layer2 = _configured_bool(run_layer2, layer2_cfg, "enabled", False)
+    active_layer2_scout_limit = _configured_int(
+        layer2_scout_limit, layer2_cfg, "max_edge_watch_scout", 50
+    )
+    active_layer2_scoring_limit = _configured_int(
+        layer2_scoring_limit, layer2_cfg, "max_scored_candidates", 150
+    )
+    active_layer2_deepdive_limit = _configured_int(
+        layer2_deepdive_limit, layer2_cfg, "max_deepdives_per_run", 10
+    )
+    active_layer2_deepdive_min_l2_score = _configured_optional_float(
+        layer2_deepdive_min_l2_score, layer2_cfg, "deepdive_min_l2_score"
+    )
+    active_layer2_scout_model = _configured_optional_str(
+        layer2_scout_model, layer2_cfg, "edge_scout_model"
+    )
+    active_layer2_scoring_model = _configured_optional_str(
+        layer2_scoring_model, layer2_cfg, "scoring_model"
+    )
+    active_layer2_deepdive_model = _configured_optional_str(
+        layer2_deepdive_model, layer2_cfg, "deepdive_model"
+    )
+    active_layer2_enable_kimi_web_search = _configured_bool(
+        layer2_enable_kimi_web_search,
+        layer2_cfg,
+        "enable_kimi_web_search",
+        False,
+    )
+    active_layer2_max_tool_calls = _configured_optional_int(
+        layer2_max_tool_calls, layer2_cfg, "max_tool_calls_per_candidate"
+    )
+    active_layer2_max_web_search_calls = _configured_optional_int(
+        layer2_max_web_search_calls,
+        layer2_cfg,
+        "max_web_search_calls_per_candidate",
+    )
+    active_layer2_max_repo_files = _configured_optional_int(
+        layer2_max_repo_files, layer2_cfg, "max_repo_files_per_candidate"
+    )
+    active_layer2_max_pages = _configured_optional_int(
+        layer2_max_pages, layer2_cfg, "max_pages_per_candidate"
+    )
+    active_layer2_max_hn_thread_fetches = _configured_optional_int(
+        layer2_max_hn_thread_fetches,
+        layer2_cfg,
+        "max_hn_thread_fetches_per_candidate",
+    )
+    active_layer2_max_x_context_fetches = _configured_optional_int(
+        layer2_max_x_context_fetches,
+        layer2_cfg,
+        "max_x_context_fetches_per_candidate",
+    )
     lock_path = active_root / "data" / "run_daily.lock"
     log_path = active_root / "data" / "logs" / "run_daily" / f"{active_run_id}.jsonl"
     sources_log_path = log_path.parent / f"{active_run_id}.sources.jsonl"
@@ -267,7 +396,7 @@ def run_daily(
         now=active_now,
         skip_sources=skip_sources,
         skip_decision=skip_decision,
-        run_layer2=run_layer2,
+        run_layer2=active_run_layer2,
         only_sources=only_sources or [],
     )
     try:
@@ -334,7 +463,7 @@ def run_daily(
                 logger.event("run_failed", returncode=summary["returncode"], failed_stage="decision")
                 return summary
 
-        if run_layer2:
+        if active_run_layer2:
             stages.append(
                 _run_logged_stage(
                     logger=logger,
@@ -344,20 +473,20 @@ def run_daily(
                         python=python,
                         decision_run_id=active_run_id,
                         now=active_now,
-                        scout_limit=layer2_scout_limit,
-                        scoring_limit=layer2_scoring_limit,
-                        deepdive_limit=layer2_deepdive_limit,
-                        deepdive_min_l2_score=layer2_deepdive_min_l2_score,
-                        scout_model=layer2_scout_model,
-                        scoring_model=layer2_scoring_model,
-                        deepdive_model=layer2_deepdive_model,
-                        enable_kimi_web_search=layer2_enable_kimi_web_search,
-                        max_tool_calls=layer2_max_tool_calls,
-                        max_web_search_calls=layer2_max_web_search_calls,
-                        max_repo_files=layer2_max_repo_files,
-                        max_pages=layer2_max_pages,
-                        max_hn_thread_fetches=layer2_max_hn_thread_fetches,
-                        max_x_context_fetches=layer2_max_x_context_fetches,
+                        scout_limit=active_layer2_scout_limit,
+                        scoring_limit=active_layer2_scoring_limit,
+                        deepdive_limit=active_layer2_deepdive_limit,
+                        deepdive_min_l2_score=active_layer2_deepdive_min_l2_score,
+                        scout_model=active_layer2_scout_model,
+                        scoring_model=active_layer2_scoring_model,
+                        deepdive_model=active_layer2_deepdive_model,
+                        enable_kimi_web_search=active_layer2_enable_kimi_web_search,
+                        max_tool_calls=active_layer2_max_tool_calls,
+                        max_web_search_calls=active_layer2_max_web_search_calls,
+                        max_repo_files=active_layer2_max_repo_files,
+                        max_pages=active_layer2_max_pages,
+                        max_hn_thread_fetches=active_layer2_max_hn_thread_fetches,
+                        max_x_context_fetches=active_layer2_max_x_context_fetches,
                     ),
                     cwd=active_root,
                     timeout=timeout,
@@ -416,15 +545,26 @@ def main() -> int:
     parser.add_argument("--resolver-research-rounds", type=int, default=3)
     parser.add_argument("--npm-backfill-limit", type=int, default=40)
     parser.add_argument("--enrich-readme-limit", type=int, default=100)
-    parser.add_argument("--run-layer2", action="store_true")
-    parser.add_argument("--layer2-scout-limit", type=int, default=50)
-    parser.add_argument("--layer2-scoring-limit", type=int, default=150)
-    parser.add_argument("--layer2-deepdive-limit", type=int, default=10)
+    parser.add_argument("--run-layer2", dest="run_layer2", action="store_true", default=None)
+    parser.add_argument("--no-layer2", dest="run_layer2", action="store_false")
+    parser.add_argument("--layer2-scout-limit", type=int, default=None)
+    parser.add_argument("--layer2-scoring-limit", type=int, default=None)
+    parser.add_argument("--layer2-deepdive-limit", type=int, default=None)
     parser.add_argument("--layer2-deepdive-min-l2-score", type=float, default=None)
     parser.add_argument("--layer2-scout-model", default=None)
     parser.add_argument("--layer2-scoring-model", default=None)
     parser.add_argument("--layer2-deepdive-model", default=None)
-    parser.add_argument("--layer2-enable-kimi-web-search", action="store_true")
+    parser.add_argument(
+        "--layer2-enable-kimi-web-search",
+        dest="layer2_enable_kimi_web_search",
+        action="store_true",
+        default=None,
+    )
+    parser.add_argument(
+        "--no-layer2-kimi-web-search",
+        dest="layer2_enable_kimi_web_search",
+        action="store_false",
+    )
     parser.add_argument("--layer2-max-tool-calls", type=int, default=None)
     parser.add_argument("--layer2-max-web-search-calls", type=int, default=None)
     parser.add_argument("--layer2-max-repo-files", type=int, default=None)

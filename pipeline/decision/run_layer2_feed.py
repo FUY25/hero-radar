@@ -240,9 +240,7 @@ def run_layer2_feed(
             max_edge_watch_scout=int(
                 cfg.get("max_edge_watch_scout", cfg.get("edge_scout_limit", 50))
             ),
-            max_scored_candidates=int(
-                cfg.get("max_scored_candidates", cfg.get("scoring_limit", 150))
-            ),
+            max_scored_candidates=_configured_scoring_limit(cfg),
         )
         for skipped in schedule.skipped:
             record_stage_event(
@@ -717,6 +715,13 @@ def run_layer2_feed(
 
 
 def _optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    return int(value)
+
+
+def _configured_scoring_limit(cfg: dict[str, Any]) -> int | None:
+    value = cfg.get("max_scored_candidates", cfg.get("scoring_limit", 150))
     if value is None:
         return None
     return int(value)

@@ -464,6 +464,18 @@ test('layer2RunOptionsFromConfig maps settings to run payload defaults', () => {
   );
 });
 
+test('layer2RunOptionsFromConfig preserves zero scoring limit as no cap', () => {
+  const options = layer2RunOptionsFromConfig({
+    layer2: {
+      enabled: true,
+      max_scored_candidates: 0,
+    },
+  });
+
+  assert.equal(options.run_layer2, true);
+  assert.equal(options.layer2_scoring_limit, 0);
+});
+
 test('candidateTableColumns uses Chinese column names', () => {
   const columns = candidateTableColumns();
   assert.deepEqual(columns.map((column) => column.label), ['候选', '重要性', '证据', '来源', '链接', '简介']);

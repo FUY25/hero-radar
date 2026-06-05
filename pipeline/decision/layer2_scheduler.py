@@ -18,7 +18,7 @@ def schedule_layer2_work(
     *,
     previous_hashes: dict[str, str],
     max_edge_watch_scout: int,
-    max_scored_candidates: int,
+    max_scored_candidates: int | None,
 ) -> Layer2Schedule:
     score_now: list[CandidateGroup] = []
     edge_watch: list[CandidateGroup] = []
@@ -33,9 +33,14 @@ def schedule_layer2_work(
             edge_watch.append(group)
         else:
             score_now.append(group)
-    pending = score_now[max_scored_candidates:] + edge_watch[max_edge_watch_scout:]
+    score_cap = None
+    if max_scored_candidates is not None and int(max_scored_candidates) > 0:
+        score_cap = int(max_scored_candidates)
+    capped_score_now = score_now if score_cap is None else score_now[:score_cap]
+    pending_score_now = [] if score_cap is None else score_now[score_cap:]
+    pending = pending_score_now + edge_watch[max_edge_watch_scout:]
     return Layer2Schedule(
-        score_now=score_now[:max_scored_candidates],
+        score_now=capped_score_now,
         scout_edge_watch=edge_watch[:max_edge_watch_scout],
         skipped=skipped,
         pending=pending,

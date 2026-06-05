@@ -960,7 +960,7 @@ export function layer2RunOptionsFromConfig(config = {}) {
   return {
     run_layer2: Boolean(layer2.enabled),
     layer2_scout_limit: numericConfigValue(config, 'layer2.max_edge_watch_scout', 50),
-    layer2_scoring_limit: numericConfigValue(config, 'layer2.max_scored_candidates', 150),
+    layer2_scoring_limit: numericConfigValue(config, 'layer2.max_scored_candidates', 0),
     layer2_deepdive_limit: numericConfigValue(config, 'layer2.max_deepdives_per_run', 10),
     layer2_deepdive_min_l2_score: numericConfigValue(config, 'layer2.deepdive_min_l2_score', 70),
     layer2_scout_model: String(layer2.edge_scout_model || 'kimi-k2.5'),
