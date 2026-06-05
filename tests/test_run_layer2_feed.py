@@ -410,6 +410,98 @@ class Layer2RunnerTest(unittest.TestCase):
             "major_company_score_only",
         )
 
+    def test_run_layer2_routes_known_paradigms_to_score_only(self):
+        from pipeline.decision.llm_provider import FakeLLMProvider
+        from pipeline.decision.run_layer2_feed import run_layer2_feed
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "hero.sqlite"
+            self.make_db_with_potentials(
+                db_path,
+                [
+                    "NousResearch/hermes-agent",
+                    "new-workflow/repo",
+                ],
+            )
+            provider = FakeLLMProvider(
+                [
+                    self.valid_score_response(
+                        "Known Paradigm",
+                        axes={
+                            "workflow_shift": 92,
+                            "technical_substance": 88,
+                            "product_market_fit": 84,
+                            "momentum": 80,
+                            "confidence": 82,
+                        },
+                    ),
+                    self.valid_score_response(
+                        "New Workflow",
+                        axes={
+                            "workflow_shift": 74,
+                            "technical_substance": 72,
+                            "product_market_fit": 74,
+                            "momentum": 70,
+                            "confidence": 76,
+                        },
+                    ),
+                    self.valid_brief_response(),
+                ]
+            )
+
+            run_layer2_feed(
+                db_path=db_path,
+                decision_run_id="decision-run",
+                feed_run_id="l2-known-paradigm",
+                now="2026-06-01T12:00:00Z",
+                provider=provider,
+                config={
+                    "max_scored_candidates": 2,
+                    "brief_min_score": 70,
+                    "score_only_min_score": 50,
+                    "brief_target_count": 1,
+                    "brief_max_count": 1,
+                },
+            )
+
+            conn = sqlite3.connect(db_path)
+            items = conn.execute(
+                """
+                select g.canonical_name, fi.section, fi.deepdive_status
+                from l2_feed_items fi
+                join l2_candidate_groups g
+                  on g.feed_run_id = fi.feed_run_id and g.group_id = fi.group_id
+                where fi.feed_run_id = ?
+                order by fi.section, fi.rank
+                """,
+                ("l2-known-paradigm",),
+            ).fetchall()
+            route_rows = conn.execute(
+                """
+                select g.canonical_name, e.metadata_json
+                from l2_stage_events e
+                join l2_candidate_groups g
+                  on g.feed_run_id = e.feed_run_id and g.group_id = e.group_id
+                where e.feed_run_id = ? and e.stage = ? and e.status = ?
+                order by g.canonical_name
+                """,
+                ("l2-known-paradigm", "route", "route_decision"),
+            ).fetchall()
+            conn.close()
+
+        self.assertEqual(
+            items,
+            [
+                ("NousResearch/hermes-agent", "scored", "score_only"),
+                ("new-workflow/repo", "today_focus", "briefed"),
+            ],
+        )
+        route_metadata = {name: json.loads(metadata) for name, metadata in route_rows}
+        self.assertEqual(
+            route_metadata["NousResearch/hermes-agent"]["route_reason"],
+            "known_paradigm_score_only",
+        )
+
     def test_run_layer2_keeps_selected_focus_item_when_brief_fails(self):
         from pipeline.decision.llm_provider import FakeLLMProvider
         from pipeline.decision.run_layer2_feed import run_layer2_feed

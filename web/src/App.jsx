@@ -19,6 +19,7 @@ import {
   columnWidthKey,
   columnWidthStyle,
   dashboardApiUrl,
+  dashboardDataUrl,
   defaultRangeId as modelDefaultRangeId,
   detailRowsForItem,
   feedBriefPreview,
@@ -48,6 +49,7 @@ import {
 } from './dashboardModel.js';
 
 const API_BASE = import.meta.env.VITE_API_BASE || '';
+const STATIC_DASHBOARD_DATA_URL = import.meta.env.VITE_STATIC_DASHBOARD_DATA_URL || '';
 const PAGE_SIZES = [50, 100, 200, 500];
 
 function readColumnWidths(channel) {
@@ -1942,7 +1944,8 @@ function App() {
   const [configBusy, setConfigBusy] = useState(false);
 
   useEffect(() => {
-    fetch(dashboardApiUrl('/api/dashboard-data', API_BASE))
+    const dataUrl = dashboardDataUrl({ apiBase: API_BASE, staticUrl: STATIC_DASHBOARD_DATA_URL });
+    fetch(dataUrl)
       .then((response) => {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         return response.json();
@@ -2229,7 +2232,7 @@ function App() {
         <div className="workspace">
           <main>
             {error ? <div className="error visible">Failed to load dashboard data: {error}</div> : null}
-            {!payload || !state ? <div className="empty">Loading dashboard data from {dashboardApiUrl('/api/dashboard-data', API_BASE)}...</div> : null}
+            {!payload || !state ? <div className="empty">Loading dashboard data from {dashboardDataUrl({ apiBase: API_BASE, staticUrl: STATIC_DASHBOARD_DATA_URL })}...</div> : null}
             {payload && state && activeSection === 'sources' ? <SourcesView payload={payload} state={state} onStateChange={patchState} hiddenSources={hiddenSources} /> : null}
             {payload && state && activeSection === 'settings' ? (
               <SettingsView

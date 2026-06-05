@@ -162,7 +162,6 @@ export function activeChannelList(payload, section) {
 
 export function workspaceSections() {
   return [
-    { id: 'explore', label: 'Explore', icon: 'search', enabled: false },
     { id: 'feed', label: 'Feed', icon: 'feed', enabled: true },
     { id: 'sources', label: 'Sources', icon: 'database', enabled: true },
     { id: 'settings', label: 'Settings', icon: 'settings', enabled: true },
@@ -378,11 +377,10 @@ export function feedBriefPreview(item) {
 export function feedRunSummary(feed) {
   const profile = feed?.model_profile || {};
   const telemetry = feed?.telemetry || {};
-  const routes = telemetry.route_counts || {};
   const groups = feedScoredGroups(feed);
-  const focusCount = Number(routes.score_plus_deepdive ?? (feed?.today_focus || []).length);
-  const signalCount = Number(routes.score_only ?? groups.signals.length);
-  const lowCount = Number(routes.suppress_or_low ?? groups.lowSignals.length);
+  const focusCount = (feed?.today_focus || []).length;
+  const signalCount = groups.signals.length;
+  const lowCount = groups.lowSignals.length;
   const scoredCount = Number(telemetry.scored ?? groups.totalScoredVisible);
   return {
     run: feed?.feed_run_id || '',
@@ -750,6 +748,11 @@ export function dashboardApiUrl(path, base = '') {
   const cleanPath = path.startsWith('/') ? path : `/${path}`;
   const cleanBase = String(base || '').replace(/\/+$/, '');
   return cleanBase ? `${cleanBase}${cleanPath}` : cleanPath;
+}
+
+export function dashboardDataUrl({ apiBase = '', staticUrl = '' } = {}) {
+  const cleanStatic = String(staticUrl || '').trim();
+  return cleanStatic || dashboardApiUrl('/api/dashboard-data', apiBase);
 }
 
 export function visibleWindowsForChannel(items, channel) {

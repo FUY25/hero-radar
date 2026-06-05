@@ -1,69 +1,105 @@
 # Hero Radar
 
-Internal tool for finding AI product/application-layer opportunities that are starting to move.
+Hero Radar 是一个用于发现 AI 应用层机会的本地 intelligence dashboard。
 
-Current focus:
+它做的事情很简单：每天从 GitHub、HN、Product Hunt、npm、PyPI、Hugging Face、X 等公开来源抓信号，把同一个项目的跨来源证据合并成候选，再用 Layer 2 Scoring Investigator 做有限工具调用和判分，最后生成 Daily Feed。
 
-- Collect many low-friction public data sources.
-- Keep the source dashboard factual: show each source's own ranks, counts, text, links, and metadata.
-- Save raw snapshots so a later derived scoring layer can compute heat, velocity, and acceleration separately.
-- Keep the system lightweight enough to use daily.
+当前目标不是做一个“新闻列表”。目标是找到还没有完全成为共识、但已经出现产品/工作流突破的项目。
 
-Primary spec: [docs/product-spec-v0.7.md](/Users/fuyuming/Documents/Hero%20radar/docs/product-spec-v0.7.md)
+![Daily Feed](docs/assets/hero-radar-feed.png)
 
-## First Pipeline Slice
+## 当前界面
 
-Run:
+Web app 保留一个工作台 shell，目前开放三个入口：
+
+- `Feed`：每日重点、候选信号、完整评分记录。
+- `Sources`：原始来源表格，保留每个 source 自己的排序、窗口、指标和链接。
+- `Settings`：本地配置控制台，控制 source、搜索词、Layer 2 budgets 和运行按钮。
+
+`Explore` 入口暂时隐藏。这个 agent/search 入口还没有做完整，不应该出现在当前产品里。
+
+### Feed
+
+Daily Feed 分三层：
+
+- `今日重点`：被 scorer 选中并生成中文 brief 的项目。
+- `候选信号`：已经评分，分数或质量值得保留，但没有进入今日重点。
+- `完整评分记录`：已经评分但低信号、非产品、证据不足或被 scorer 压低的项目。不会隐藏，方便 audit。
+
+Hermes Agent 已被放入 known paradigm，不再作为新范式重点捕捉。它仍会评分，但默认进入下面的 `score_only` 区域。
+
+### Candidate Pool
+
+![Candidate Pool](docs/assets/hero-radar-candidates.png)
+
+候选池保持表格。这里看的是 pre-Layer2 的候选宇宙，包括 `high_potential`、`potential` 和 `edge_watch`。
+
+### Sources
+
+![Sources](docs/assets/hero-radar-sources.png)
+
+Sources 页只展示 source 自己的事实，不做模型判断。这个页面用于追溯证据来源、查看原始窗口、排名、描述和元数据。
+
+### Settings
+
+![Settings](docs/assets/hero-radar-settings.png)
+
+Settings 页改的是下一次 pipeline run 的配置。保存会写 `pipeline/config.json`，服务端会先做 timestamped backup。
+
+## 架构
+
+```mermaid
+flowchart TD
+  A["Source collectors"] --> B["SQLite: data/hero_radar.sqlite"]
+  B --> C["Decision Layer v1"]
+  C --> D["Candidate groups"]
+  D --> E["Layer 2 Scoring Investigator"]
+  E --> F["Route: today_focus / score_only / suppress_or_low"]
+  F --> G["Feed API"]
+  G --> H["React web app"]
+  B --> I["Sources API"]
+  I --> H
+```
+
+核心存储是本地 SQLite：
+
+- `entities`：项目/实体。
+- `source_items`：每个 source 的原始行。
+- `evidence_rows`：候选触发和证据。
+- `potential_candidates` / `edge_watch_candidates`：Layer 1 候选池。
+- `l2_candidate_groups`：Layer 2 分组后的候选。
+- `l2_scores`：Scoring Investigator 输出。
+- `l2_scoring_investigations`：ReAct/tool trace。
+- `l2_deepdive_briefs`：中文 brief。
+- `l2_feed_runs` / `l2_feed_items`：Daily Feed run 和展示路由。
+
+## Pipeline
+
+### 1. Source collection
 
 ```bash
 python3 pipeline/run_pipeline.py
 ```
 
-Run only the GitHub momentum adapter without refreshing the other channels:
+这一步抓公开 source 并写入 `data/hero_radar.sqlite`。常见 source：
+
+- GitHub Trending
+- GitHub Search
+- Trending Repos / RepoFOMO
+- Hacker News Algolia / Firebase
+- Product Hunt
+- Hugging Face Spaces
+- npm Search
+- PyPI RSS
+- X tweets via Apify
+
+只跑某个 source：
 
 ```bash
 python3 pipeline/run_pipeline.py --only github_movers
 ```
 
-This exports two dashboard tabs: `Trending Repos` and `RepoFOMO`.
-
-Regenerate exports from the latest local snapshots without collecting anything:
-
-```bash
-python3 pipeline/run_pipeline.py --export-only
-```
-
-Outputs:
-
-- `data/hero_radar.sqlite`
-- `data/exports/latest_items.json`
-- `data/exports/latest_scores.md`
-- `data/exports/dashboard.html`
-
-Open the first local dashboard:
-
-```bash
-open data/exports/dashboard.html
-```
-
-Or serve the dashboard with the local backend:
-
-```bash
-python3 pipeline/server.py --port 8787
-open http://127.0.0.1:8787/
-```
-
-Local backend endpoints:
-
-- `GET /api/config`: read `pipeline/config.json` plus schedule metadata.
-- `POST /api/config`: replace `pipeline/config.json`; a timestamped backup is created first. Changes take effect on the next pipeline run.
-- `POST /api/run`: manually trigger `pipeline/run_pipeline.py`; pass `{"only":["github_movers"]}` to run selected adapters.
-
-Cron is not configured yet. The current product assumption is one full run every 24 hours once scheduling is added.
-
-## Decision Pipeline Slice
-
-Run the deterministic pre-Layer2 decision pipeline:
+### 2. Decision Layer v1
 
 ```bash
 python3 -m pipeline.decision.run_decision \
@@ -71,118 +107,191 @@ python3 -m pipeline.decision.run_decision \
   --export-json data/exports/candidates_latest.json
 ```
 
-This reads the latest source snapshots, performs Stage A entity resolution,
-evaluates deterministic source rules, writes `potential_candidates`,
-`edge_watch_candidates`, `backfill_jobs`, and `evidence_rows`, then exports
-`data/exports/candidates_latest.json`.
+这一步做：
 
-This command does not call any LLM and does not run Layer 2 Daily Feed selection.
+- entity resolution
+- deterministic source rules
+- candidate pool
+- evidence rows
+- optional README enrichment
+- optional resolver/backfill
 
-Run pending precise backfill jobs for a decision run:
+### 3. Layer 2 Daily Feed
 
 ```bash
-python3 -m pipeline.decision.backfill \
+python3 -m pipeline.decision.run_layer2_feed \
   --db data/hero_radar.sqlite \
-  --run-id decision_20260531
+  --decision-run-id latest \
+  --feed-run-id l2_manual_$(date -u +%Y%m%dT%H%M%SZ)
 ```
 
-Backfill only runs on `backfill_jobs`; it does not scan every repo.
+Layer 2 现在默认使用 Scoring Investigator harness：
 
-## Candidate Pool Web Shell
+- concurrency 默认 5。
+- 每个候选最多 3 个 investigation turns。
+- 每个候选最多 8 次工具调用。
+- web search / GitHub README / repo file / homepage fetch 都有单候选 caps。
+- candidate-level failure 不会让整轮 run 崩掉。
+- scorer 先判断信息是否足够，不足时才调用最小必要工具。
+- 高分项目生成中文 `deepdive_brief`。
+- known paradigms，例如 `github:nousresearch/hermes-agent`，默认不进今日重点。
 
-Start the local API:
+### 4. Full daily run
 
 ```bash
-python3 pipeline/server.py --port 8787
+python3 pipeline/run_daily.py --run-layer2
 ```
 
-Start the React shell:
+这是一整套日常流程：source collection -> decision layer -> Layer 2 feed。
+
+长批处理建议在本地或 worker 环境跑。Vercel 只适合 UI/API/trigger/small smoke，不适合当主 batch worker。
+
+## 本地运行 Web App
+
+启动 API：
+
+```bash
+python3 pipeline/server.py --host 127.0.0.1 --port 8792
+```
+
+启动前端：
 
 ```bash
 cd web
 npm install
-VITE_API_BASE=http://127.0.0.1:8787 npm run dev
+VITE_API_BASE=http://127.0.0.1:8792 npm run dev -- --port 5176
 ```
 
-Open `http://127.0.0.1:5173/`. The `Daily Feed` internal tab is an empty state in
-this slice. `Candidate Pool` reads `/api/candidates` and shows the pre-Layer2
-candidate universe.
-
-After `npm run build`, the local backend also serves the built shell at
-`http://127.0.0.1:8787/app/`.
-
-Optional environment variables:
-
-- `GITHUB_TOKEN`: increases GitHub Search/Core API rate limits.
-- `PRODUCTHUNT_TOKEN`: enables Product Hunt GraphQL launches/posts collection.
-- `PRODUCTHUNT_USER_CONTEXT`: optional Product Hunt user context.
-- `APIFY_TOKEN`: used by the manual X following / X tweets Apify scripts.
-- `APIFY_ENABLE_RUNS`: must be `true` before any Apify actor execution is allowed.
-- `DEEPSEEK_API_KEY`: for the next LLM-analysis slice, not required yet.
-
-## X Following Seed Expansion
-
-This is intentionally separate from the main pipeline because it spends Apify credits.
-
-Dry run:
+打开：
 
 ```bash
-python3 pipeline/run_apify_x_following.py --max-results 600 --top 100
+open http://127.0.0.1:5176/?section=feed&feed=daily
 ```
 
-Real capped run:
+常用 API：
 
-```bash
-APIFY_ENABLE_RUNS=true python3 pipeline/run_apify_x_following.py --run --max-results 600 --top 100
+- `GET /api/dashboard-data`：Web app 主 payload。
+- `GET /api/feed`：Daily Feed payload，可传 `feed_run_id`。
+- `GET /api/candidates`：候选池。
+- `GET /api/evidence`：证据查询。
+- `GET /api/entity/<entity_id>`：单实体上下文。
+- `GET /api/config`：读取配置和 API 状态。
+- `POST /api/config`：保存配置，自动备份。
+- `POST /api/run`：触发本地 pipeline。
+- `POST /api/feed/feedback`：记录 Feed 反馈。
+
+## API keys 和本地 secrets
+
+不要把 key 写进 tracked 文件。
+
+支持的环境变量：
+
+- `GITHUB_TOKEN`：推荐。提高 GitHub Search/Core API rate limit，也用于 README/repo file fetch。
+- `PRODUCTHUNT_TOKEN`：启用 Product Hunt GraphQL。
+- `PRODUCTHUNT_USER_CONTEXT`：Product Hunt 可选 user context。
+- `APIFY_TOKEN`：用于 X following / X tweets actor。
+- `APIFY_ENABLE_RUNS=true`：付费 Apify actor 的显式开关，没有它不会真正跑付费 actor。
+- `X_AUTH_TOKEN` / `X_CT0`：部分 X actor 需要的登录 cookie，只有跑对应 Apify actor 时才需要。
+- `KIMI_API_KEY` 或 `MOONSHOT_API_KEY`：Layer 2 Scoring Investigator / brief。
+- `KIMI_BASE_URL` 或 `MOONSHOT_BASE_URL`：可选，默认 `https://api.moonshot.ai/v1`。
+- `KIMI_MODEL`：可选，默认使用 repo 内配置的 Kimi 模型。
+- `DEEPSEEK_API_KEY`：旧 LLM classifier/eval 路径可能用到，当前 Layer 2 主路径不依赖它。
+
+Kimi 也支持本地 JSON secret：
+
+```json
+{
+  "kimi": {
+    "api_key": "...",
+    "base_url": "https://api.moonshot.ai/v1",
+    "model": "kimi-k2.5"
+  }
+}
 ```
 
-Latest exports:
+文件路径：`pipeline/secrets.local.json`。这个文件被 git ignore，不要提交。
 
-- `data/exports/x_following_top100_latest.md`
-- `data/exports/x_following_ai_seed_candidates_latest.md`
+## 静态 Demo
 
-## X Tweets / Mention Signals
+如果只是给别人看当前版本，推荐用 GitHub Pages 的静态快照，不推荐直接上 Vercel 连接本地 DB。
 
-This is also separate from the main pipeline because it spends Apify credits. It
-uses the top AI-related accounts from your X following export, then scrapes
-recent tweets for the dashboard:
+原因：
 
-- `x_tweets`: single-tweet rows with text, author, created time, and extracted mentions. Engagement is retained in metadata but is not a dashboard ranking signal.
+- GitHub Pages 不需要后端，不需要 API key。
+- Demo 是 read-only，不会触发 pipeline，不会花 Apify/Kimi/GitHub quota。
+- 当前 UI、Feed、候选池、Sources、Settings 都能展示。
 
-`x_project_mentions` was removed from the source dashboard because it was mostly
-X accounts/keywords rather than reliable project entities. Keep the raw tweet
-evidence first; derive project candidates later in a separate scoring layer.
-
-Dry run:
+生成静态 JSON 快照：
 
 ```bash
-python3 pipeline/run_apify_x_tweets.py --accounts 50 --per-account 30 --since-days 30
+python3 pipeline/export_static_demo.py \
+  --output docs/demo/dashboard-data.json \
+  --max-items-per-channel-window 20
 ```
 
-Real capped run:
+构建静态 app：
 
 ```bash
-APIFY_ENABLE_RUNS=true python3 pipeline/run_apify_x_tweets.py --run --accounts 50 --per-account 30 --since-days 30
+cd web
+VITE_STATIC_DASHBOARD_DATA_URL=./dashboard-data.json \
+  npm run build -- --base ./ --outDir ../docs/demo --emptyOutDir
 ```
 
-Latest exports:
-
-- `data/exports/x_tweets_latest.json`
-- `data/exports/x_tweets_latest.md`
-
-The X actor output is also upserted into SQLite by `tweet_id`:
-
-- `x_tweets_store`: all normalized tweets fetched from the actor, including rows outside the current dashboard windows.
-- `x_account_cursor`: latest seen tweet per seed account.
-
-The dashboard X tab is generated from `x_tweets_store` by filtering `created_at`
-into the configured `24h / 7d / 30d / 30d+` windows. `30d+` keeps older seed
-account tweets visible as background evidence while recent windows stay truthful.
-This means repeated actor runs can overlap safely without duplicating tweets.
-
-After refreshing X tweets, run the main pipeline again:
+本地预览：
 
 ```bash
-python3 pipeline/run_pipeline.py
-open data/exports/dashboard.html
+python3 -m http.server 4180 --directory docs/demo
+open http://127.0.0.1:4180/
+```
+
+GitHub Pages 发布方式：
+
+1. push `docs/demo` 到 GitHub。
+2. 在 GitHub repo 里打开 `Settings -> Pages`。
+3. Source 选 `Deploy from a branch`。
+4. Branch 选 `main`，folder 选 `/docs`。
+5. 页面地址会类似：`https://<user>.github.io/<repo>/demo/`。
+
+如果用 Vercel，也建议只部署 `docs/demo` 这个静态目录。不要把 full batch worker 放到 Vercel 上跑。
+
+## 数据和提交规则
+
+不要提交：
+
+- `data/hero_radar.sqlite`
+- `data/raw/`
+- `data/exports/`
+- `.env`
+- `pipeline/secrets.local.json`
+- 任何 token/key 文件
+
+可以提交：
+
+- pipeline 代码
+- tests
+- docs
+- `docs/demo` 静态 read-only demo
+- `docs/assets` 截图
+
+## 测试
+
+后端：
+
+```bash
+python3 -m unittest tests.test_run_layer2_feed tests.test_feed_api
+```
+
+前端：
+
+```bash
+cd web
+npm test
+npm run build
+```
+
+静态 demo：
+
+```bash
+python3 pipeline/export_static_demo.py --output /tmp/hero-dashboard-demo.json
+python3 -m json.tool /tmp/hero-dashboard-demo.json >/dev/null
 ```

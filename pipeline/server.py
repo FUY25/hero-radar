@@ -282,6 +282,18 @@ def query_feed_payload(feed_run_id: str | None = None) -> dict[str, Any]:
                 (active_feed_run_id,),
             ).fetchall()
         ]
+        scored_items = [
+            item
+            for item in items
+            if item["section"] == "scored"
+            or item.get("deepdive_status") == "suppress_or_low"
+        ]
+        scored_items.sort(
+            key=lambda item: (
+                0 if item["section"] == "scored" else 1,
+                int(item.get("rank") or 0),
+            )
+        )
         return {
             "feed_run_id": active_feed_run_id,
             "decision_run_id": run[0],
@@ -293,12 +305,7 @@ def query_feed_payload(feed_run_id: str | None = None) -> dict[str, Any]:
             "today_focus": [
                 item for item in items if item["section"] == "today_focus"
             ],
-            "scored_list": [
-                item
-                for item in items
-                if item["section"] == "scored"
-                or item.get("deepdive_status") == "suppress_or_low"
-            ],
+            "scored_list": scored_items,
             "diagnostics": [
                 item
                 for item in items

@@ -11,6 +11,7 @@ import {
   columnWidthKey,
   columnWidthStyle,
   dashboardApiUrl,
+  dashboardDataUrl,
   detailRowsForItem,
   filterCandidateRows,
   filterAndSortRows,
@@ -77,8 +78,8 @@ test('detailRowsForItem exposes metadata and raw fields for detail panel', () =>
 
 test('workspaceSections keeps old top-level surfaces and feed candidate tab', () => {
   const sections = workspaceSections();
-  assert.deepEqual(sections.map((row) => row.id), ['explore', 'feed', 'sources', 'settings']);
-  assert.deepEqual(sections.map((row) => row.icon), ['search', 'feed', 'database', 'settings']);
+  assert.deepEqual(sections.map((row) => row.id), ['feed', 'sources', 'settings']);
+  assert.deepEqual(sections.map((row) => row.icon), ['feed', 'database', 'settings']);
 });
 
 test('candidateRowsForFeed merges potential and edge watch rows', () => {
@@ -274,6 +275,17 @@ test('dashboardApiUrl defaults to same-origin api and respects explicit base', (
   assert.equal(dashboardApiUrl('/api/dashboard-data', ''), '/api/dashboard-data');
   assert.equal(
     dashboardApiUrl('/api/dashboard-data', 'http://127.0.0.1:8787/'),
+    'http://127.0.0.1:8787/api/dashboard-data',
+  );
+});
+
+test('dashboardDataUrl prefers a static demo snapshot when configured', () => {
+  assert.equal(
+    dashboardDataUrl({ apiBase: '', staticUrl: './demo/dashboard-data.json' }),
+    './demo/dashboard-data.json',
+  );
+  assert.equal(
+    dashboardDataUrl({ apiBase: 'http://127.0.0.1:8787/' }),
     'http://127.0.0.1:8787/api/dashboard-data',
   );
 });

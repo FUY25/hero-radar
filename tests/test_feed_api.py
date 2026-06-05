@@ -226,6 +226,10 @@ class FeedApiTest(unittest.TestCase):
         )
         conn.execute(
             "insert into l2_feed_items(feed_run_id, group_id, section, rank, deepdive_status) values (?, ?, ?, ?, ?)",
+            ("l2-run", "group:repo", "scored", 1, "score_only"),
+        )
+        conn.execute(
+            "insert into l2_feed_items(feed_run_id, group_id, section, rank, deepdive_status) values (?, ?, ?, ?, ?)",
             ("l2-run", "group:low", "diagnostics", 1, "suppress_or_low"),
         )
         conn.commit()
@@ -235,8 +239,10 @@ class FeedApiTest(unittest.TestCase):
             payload = server.query_feed_payload()
 
         self.assertEqual(payload["diagnostics"], [])
-        self.assertEqual(payload["scored_list"][0]["group_id"], "group:low")
-        self.assertEqual(payload["scored_list"][0]["deepdive_status"], "suppress_or_low")
+        self.assertEqual(payload["scored_list"][0]["group_id"], "group:repo")
+        self.assertEqual(payload["scored_list"][0]["deepdive_status"], "score_only")
+        self.assertEqual(payload["scored_list"][1]["group_id"], "group:low")
+        self.assertEqual(payload["scored_list"][1]["deepdive_status"], "suppress_or_low")
 
     def test_query_feed_payload_can_select_explicit_run(self):
         import pipeline.server as server

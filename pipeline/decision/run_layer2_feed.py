@@ -59,6 +59,7 @@ from pipeline.decision.schema import init_decision_db, to_json, utc_now
 
 ROOT = Path(__file__).resolve().parents[2]
 DB_PATH = ROOT / "data" / "hero_radar.sqlite"
+DEFAULT_KNOWN_PARADIGM_KEYS = frozenset({"github:nousresearch/hermes-agent"})
 
 
 def default_feed_run_id(now: str | None = None) -> str:
@@ -411,8 +412,11 @@ def run_layer2_feed(
                         error=exc,
                     )
         if bool(cfg.get("enable_deepdive_briefs", True)):
+            brief_scored = [
+                row for row in scored if not _is_known_paradigm_row(row, cfg)
+            ]
             selected_for_brief = select_deepdive_brief_candidates(
-                scored,
+                brief_scored,
                 min_score=float(cfg.get("brief_min_score", 70)),
                 target_count=int(cfg.get("brief_target_count", 8)),
                 max_count=int(cfg.get("brief_max_count", 10)),
@@ -437,7 +441,7 @@ def run_layer2_feed(
                 metadata={
                     "brief_min_score": cfg.get("brief_min_score", 70),
                     "brief_rank": rank,
-                    **_route_reason_metadata(row),
+                    **_route_reason_metadata(row, cfg),
                 },
             )
             _insert_feed_item(
@@ -470,7 +474,7 @@ def run_layer2_feed(
                 metadata={
                     "brief_min_score": cfg.get("brief_min_score", 70),
                     "score_only_min_score": cfg.get("score_only_min_score", 50),
-                    **_route_reason_metadata(row),
+                    **_route_reason_metadata(row, cfg),
                 },
             )
             if route == ROUTE_SCORE_ONLY:
@@ -781,7 +785,12 @@ def _record_route_decision(
     )
 
 
-def _route_reason_metadata(row: dict[str, Any]) -> dict[str, Any]:
+def _route_reason_metadata(row: dict[str, Any], cfg: dict[str, Any]) -> dict[str, Any]:
+    if _is_known_paradigm_row(row, cfg):
+        return {
+            "known_paradigm": True,
+            "route_reason": "known_paradigm_score_only",
+        }
     major_company = major_company_label_for_row(row)
     if not major_company:
         return {}
@@ -789,6 +798,52 @@ def _route_reason_metadata(row: dict[str, Any]) -> dict[str, Any]:
         "major_company": major_company,
         "route_reason": "major_company_score_only",
     }
+
+
+def _is_known_paradigm_row(row: dict[str, Any], cfg: dict[str, Any]) -> bool:
+    known_keys = _known_paradigm_keys(cfg)
+    if not known_keys:
+        return False
+    return any(value in known_keys for value in _row_identity_values(row))
+
+
+def _known_paradigm_keys(cfg: dict[str, Any]) -> set[str]:
+    configured = cfg.get("known_paradigm_keys")
+    if configured is None or not isinstance(configured, list):
+        return set(DEFAULT_KNOWN_PARADIGM_KEYS)
+    return {
+        _normalize_known_paradigm_value(value)
+        for value in configured
+        if str(value or "").strip()
+    }
+
+
+def _row_identity_values(row: dict[str, Any]) -> set[str]:
+    group = row.get("group")
+    raw_values = {
+        getattr(group, "group_id", ""),
+        getattr(group, "canonical_name", ""),
+        getattr(group, "canonical_key", ""),
+        getattr(group, "canonical_link", ""),
+        row.get("group_id", ""),
+        row.get("canonical_name", ""),
+        row.get("canonical_key", ""),
+        row.get("canonical_link", ""),
+    }
+    return {
+        _normalize_known_paradigm_value(value)
+        for value in raw_values
+        if str(value or "").strip()
+    }
+
+
+def _normalize_known_paradigm_value(value: Any) -> str:
+    text = str(value or "").strip().lower().rstrip("/")
+    if text.startswith("https://github.com/") or text.startswith("http://github.com/"):
+        parts = text.split("github.com/", 1)[1].split("/")
+        if len(parts) >= 2 and parts[0] and parts[1]:
+            return f"github:{parts[0]}/{parts[1]}"
+    return text
 
 
 def _update_feed_item_status(
