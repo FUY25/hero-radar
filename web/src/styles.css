@@ -587,7 +587,7 @@ button:disabled {
 
 .today-focus-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 16px;
 }
 
@@ -643,6 +643,24 @@ button:disabled {
 
 .signal-title-block {
   min-width: 0;
+}
+
+.feed-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 7px;
+}
+
+.feed-badges span {
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--line));
+  border-radius: 999px;
+  padding: 3px 7px;
+  color: color-mix(in srgb, var(--accent) 72%, var(--text));
+  background: color-mix(in srgb, var(--accent) 8%, var(--panel));
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1.2;
 }
 
 .signal-title-block p {
@@ -760,7 +778,7 @@ button:disabled {
 
 .feed-brief-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 16px;
 }
 
@@ -834,7 +852,7 @@ button:disabled {
 
 .scored-feed-row {
   display: grid;
-  grid-template-columns: 74px minmax(220px, 1fr) minmax(150px, 260px) auto;
+  grid-template-columns: 74px minmax(220px, 1fr) minmax(150px, 250px) auto auto;
   gap: 14px;
   align-items: center;
   border: 1px solid var(--line);
@@ -900,6 +918,14 @@ button:disabled {
   min-width: 0;
 }
 
+.scored-feed-main .feed-badges {
+  margin: 5px 0 0;
+}
+
+.scored-feed-main .feed-badges span {
+  font-size: 10px;
+}
+
 .scored-feed-main strong {
   display: block;
   overflow: hidden;
@@ -936,6 +962,111 @@ button:disabled {
   color: var(--muted);
   background: var(--panel);
   font-size: 11px;
+}
+
+.scored-detail-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 5px 9px;
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.scored-detail-toggle:hover,
+.scored-detail-toggle[aria-expanded="true"] {
+  border-color: var(--accent);
+  color: var(--text);
+  background: var(--accent-soft);
+}
+
+.scored-detail-toggle[aria-expanded="true"] svg {
+  transform: rotate(180deg);
+}
+
+.scored-detail-card {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: minmax(280px, 1.45fr) minmax(220px, .75fr);
+  gap: 14px 18px;
+  margin-top: 2px;
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+
+.scored-detail-copy {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+}
+
+.scored-detail-copy > span {
+  color: var(--faint);
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: .06em;
+}
+
+.scored-detail-copy p {
+  display: block;
+  margin: 0;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.48;
+  -webkit-line-clamp: initial;
+}
+
+.scored-detail-copy ul {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-left: 16px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.scored-axis-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(54px, 1fr));
+  gap: 8px;
+  align-self: start;
+}
+
+.scored-axis-grid div {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 7px 8px;
+  background: color-mix(in srgb, var(--panel) 94%, var(--head));
+}
+
+.scored-axis-grid span {
+  display: block;
+  overflow: hidden;
+  color: var(--faint);
+  font-size: 10px;
+  line-height: 1.1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scored-axis-grid strong {
+  display: block;
+  margin-top: 5px;
+  color: var(--text);
+  font-size: 15px;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.scored-detail-card .feed-evidence,
+.scored-detail-card .feed-links {
+  grid-column: 1 / -1;
 }
 
 .candidate-panel {
@@ -1844,6 +1975,12 @@ th:nth-last-child(-n+2) .hint::after {
   }
 }
 
+@media (max-width: 1080px) {
+  .today-focus-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 @media (max-width: 760px) {
   .app-shell,
   .app-root.settings-mode .app-shell,
@@ -1895,6 +2032,12 @@ th:nth-last-child(-n+2) .hint::after {
   .feed-run-strip,
   .scored-feed-row {
     display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .today-focus-grid,
+  .scored-detail-card,
+  .scored-axis-grid {
     grid-template-columns: 1fr;
   }
 

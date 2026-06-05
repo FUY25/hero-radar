@@ -26,6 +26,7 @@ const payload = {
       canonical_link: 'https://github.com/owner/repo',
       level: 'potential',
       l2_score: 88,
+      major_company: 'Anthropic',
       primary_reason: 'Workflow Shift',
       topic_tags: ['agent workflow'],
       rationale_short: 'Worth reading.',
@@ -79,6 +80,7 @@ test('normalizeFeedPayload keeps run summary and item evidence', () => {
   assert.equal(normalized.today_focus[0].source_links[0].channel_label, 'GitHub Trending');
   assert.equal(normalized.today_focus[0].deepdive_brief.category.primary, '开发工具');
   assert.equal(normalized.today_focus[0].deepdive_brief.core_highlights[0], '把分散开发流程压到一个工具里。');
+  assert.equal(normalized.today_focus[0].major_company, 'Anthropic');
 });
 
 test('normalizeFeedPayload preserves run status and telemetry', () => {

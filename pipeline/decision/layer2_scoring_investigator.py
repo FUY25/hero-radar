@@ -27,6 +27,27 @@ DEEPDIVE_BLOCKED_OBJECT_TYPES = {
     "tutorial",
 }
 
+MAJOR_COMPANY_OWNERS = {
+    "anthropic": {"anthropic", "anthropics", "anthropic-ai"},
+    "openai": {"openai"},
+    "google": {"google", "google-deepmind", "googledeepmind", "google-research", "googleapis"},
+    "microsoft": {"microsoft", "microsoftresearch"},
+}
+
+MAJOR_COMPANY_DOMAINS = {
+    "anthropic": {"anthropic.com"},
+    "openai": {"openai.com"},
+    "google": {"google.com", "deepmind.google", "ai.google"},
+    "microsoft": {"microsoft.com", "azure.microsoft.com"},
+}
+
+MAJOR_COMPANY_LABELS = {
+    "anthropic": "Anthropic",
+    "openai": "OpenAI",
+    "google": "Google",
+    "microsoft": "Microsoft",
+}
+
 
 SCORING_INVESTIGATOR_SYSTEM_PROMPT = """
 You are the Layer 2 Scoring Investigator for Hero Radar.
@@ -227,6 +248,8 @@ def classify_scored_route(
 def _is_deepdive_eligible(row: dict[str, Any], *, min_score: float) -> bool:
     if float(row.get("l2_score") or 0) < min_score:
         return False
+    if major_company_label_for_row(row):
+        return False
     return classify_scored_route(row, min_score=min_score) == ROUTE_SCORE_ONLY
 
 
@@ -246,7 +269,7 @@ def generate_deepdive_briefs(
     prompt_version: str = DEFAULT_BRIEF_PROMPT_VERSION,
 ) -> list[dict[str, Any]]:
     briefs: list[dict[str, Any]] = []
-    for rank, row in enumerate(selected, start=1):
+    for row in selected:
         group = row["group"]
         payload = {
             "group_id": group.group_id,
@@ -314,15 +337,6 @@ def generate_deepdive_briefs(
             where feed_run_id = ? and group_id = ?
             """,
             ("briefed", feed_run_id, group.group_id),
-        )
-        conn.execute(
-            """
-            insert or replace into l2_feed_items(
-              feed_run_id, group_id, section, rank, deepdive_status
-            )
-            values (?, ?, ?, ?, ?)
-            """,
-            (feed_run_id, group.group_id, "today_focus", rank, "briefed"),
         )
         briefs.append({"group": group, "brief": brief})
     conn.commit()
@@ -763,6 +777,81 @@ def _candidate_identity(group: CandidateGroup) -> dict[str, Any]:
         "source_families": group.source_families,
         "evidence_hash": group.evidence_hash,
     }
+
+
+def major_company_label_for_row(row: dict[str, Any]) -> str:
+    group = row.get("group")
+    if group is None:
+        return ""
+    return major_company_label_for_identity(
+        canonical_name=str(getattr(group, "canonical_name", "") or ""),
+        canonical_key=str(getattr(group, "canonical_key", "") or ""),
+        canonical_link=str(getattr(group, "canonical_link", "") or ""),
+    )
+
+
+def major_company_label_for_identity(
+    *,
+    canonical_name: str = "",
+    canonical_key: str = "",
+    canonical_link: str = "",
+) -> str:
+    owners = _identity_owners(
+        canonical_name=canonical_name,
+        canonical_key=canonical_key,
+        canonical_link=canonical_link,
+    )
+    domains = _identity_domains(canonical_link)
+    for company, company_owners in MAJOR_COMPANY_OWNERS.items():
+        if owners & company_owners:
+            return MAJOR_COMPANY_LABELS[company]
+        if domains & MAJOR_COMPANY_DOMAINS[company]:
+            return MAJOR_COMPANY_LABELS[company]
+    return ""
+
+
+def _identity_owners(
+    *,
+    canonical_name: str,
+    canonical_key: str,
+    canonical_link: str,
+) -> set[str]:
+    owners: set[str] = set()
+    for value in [canonical_name, canonical_key, canonical_link]:
+        normalized = str(value or "").strip().lower()
+        if not normalized:
+            continue
+        if normalized.startswith("github:"):
+            owners.add(normalized.removeprefix("github:").split("/", 1)[0])
+        elif "github.com/" in normalized:
+            owners.add(normalized.split("github.com/", 1)[1].split("/", 1)[0])
+        elif normalized.startswith("npm:@"):
+            owners.add(normalized.removeprefix("npm:@").split("/", 1)[0])
+        elif normalized.startswith("@"):
+            owners.add(normalized.removeprefix("@").split("/", 1)[0])
+        elif "/" in normalized:
+            owners.add(normalized.split("/", 1)[0])
+    return {owner.strip().strip("@") for owner in owners if owner.strip()}
+
+
+def _identity_domains(canonical_link: str) -> set[str]:
+    link = str(canonical_link or "").strip().lower()
+    if not link.startswith(("http://", "https://")):
+        return set()
+    try:
+        from urllib.parse import urlparse
+
+        host = urlparse(link).hostname or ""
+    except Exception:
+        return set()
+    host = host.removeprefix("www.")
+    parts = host.split(".")
+    domains = {host}
+    if len(parts) >= 2:
+        domains.add(".".join(parts[-2:]))
+    if len(parts) >= 3:
+        domains.add(".".join(parts[-3:]))
+    return domains
 
 
 def _limits_payload(limits: InvestigatorLimits) -> dict[str, int]:

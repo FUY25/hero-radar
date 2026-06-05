@@ -137,6 +137,34 @@ class FeedApiTest(unittest.TestCase):
             "owner/repo 值得今天重点看",
         )
 
+    def test_query_feed_payload_exposes_major_company_label(self):
+        import pipeline.server as server
+
+        temp, db_path = self.make_db()
+        self.addCleanup(temp.cleanup)
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            """
+            update l2_candidate_groups
+            set canonical_name = ?, canonical_key = ?, canonical_link = ?
+            where feed_run_id = ? and group_id = ?
+            """,
+            (
+                "anthropics/claude-plugins-official",
+                "github:anthropics/claude-plugins-official",
+                "https://github.com/anthropics/claude-plugins-official",
+                "l2-run",
+                "group:repo",
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+        with mock.patch.object(server, "DB_PATH", db_path):
+            payload = server.query_feed_payload()
+
+        self.assertEqual(payload["today_focus"][0]["major_company"], "Anthropic")
+
     def test_query_feed_payload_returns_diagnostics_section(self):
         import pipeline.server as server
 

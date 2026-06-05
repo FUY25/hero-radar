@@ -289,6 +289,7 @@ export function normalizeFeedPayload(payload = {}) {
       ...item,
       section,
       title: String(item?.canonical_name || item?.canonical_key || item?.group_id || ''),
+      major_company: String(item?.major_company || ''),
       l2_score: Number(item?.l2_score || 0),
       topic_tags: Array.isArray(item?.topic_tags) ? item.topic_tags : [],
       evidence_bullets: evidence,

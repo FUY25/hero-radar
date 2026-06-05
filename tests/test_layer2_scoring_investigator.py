@@ -81,6 +81,9 @@ def scored_row(
     level: str = "potential",
     should_print: bool = True,
     group_id: str = "group:repo",
+    canonical_name: str = "owner/repo",
+    canonical_key: str = "github:owner/repo",
+    canonical_link: str = "https://github.com/owner/repo",
     object_type: str = "repo",
     is_product_or_repo: bool = True,
 ) -> dict:
@@ -89,6 +92,9 @@ def scored_row(
         **{
             **group.__dict__,
             "group_id": group_id,
+            "canonical_name": canonical_name,
+            "canonical_key": canonical_key,
+            "canonical_link": canonical_link,
         }
     )
     return {
@@ -405,6 +411,51 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
 
         self.assertEqual([row["group"].group_id for row in selected], ["repo"])
 
+    def test_selects_briefs_skip_major_ai_labs_by_default(self):
+        from pipeline.decision.layer2_scoring_investigator import (
+            major_company_label_for_row,
+            select_deepdive_brief_candidates,
+        )
+
+        selected = select_deepdive_brief_candidates(
+            [
+                scored_row(
+                    score=92,
+                    group_id="anthropic",
+                    canonical_name="anthropics/claude-plugins-official",
+                    canonical_key="github:anthropics/claude-plugins-official",
+                    canonical_link="https://github.com/anthropics/claude-plugins-official",
+                    should_print=True,
+                ),
+                scored_row(
+                    score=88,
+                    group_id="openai",
+                    canonical_name="openai/codex",
+                    canonical_key="github:openai/codex",
+                    canonical_link="https://github.com/openai/codex",
+                    should_print=True,
+                ),
+                scored_row(score=86, group_id="indie", should_print=True),
+            ],
+            min_score=70,
+            target_count=8,
+            max_count=10,
+        )
+
+        self.assertEqual([row["group"].group_id for row in selected], ["indie"])
+        self.assertEqual(
+            major_company_label_for_row(
+                scored_row(
+                    score=92,
+                    group_id="anthropic",
+                    canonical_name="anthropics/claude-plugins-official",
+                    canonical_key="github:anthropics/claude-plugins-official",
+                    canonical_link="https://github.com/anthropics/claude-plugins-official",
+                )
+            ),
+            "Anthropic",
+        )
+
     def test_classifies_scoring_to_deepdive_routes(self):
         from pipeline.decision.layer2_scoring_investigator import classify_scored_route
 
@@ -417,6 +468,18 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
         )
         self.assertEqual(
             classify_scored_route(scored_row(score=74, group_id="score-only")),
+            "score_only",
+        )
+        self.assertEqual(
+            classify_scored_route(
+                scored_row(
+                    score=92,
+                    group_id="anthropic",
+                    canonical_name="anthropics/knowledge-work-plugins",
+                    canonical_key="github:anthropics/knowledge-work-plugins",
+                    canonical_link="https://github.com/anthropics/knowledge-work-plugins",
+                )
+            ),
             "score_only",
         )
         self.assertEqual(

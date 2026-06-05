@@ -278,7 +278,7 @@ class Layer2RunnerTest(unittest.TestCase):
                 db_path,
                 [
                     "a-focus/repo",
-                    "b-score-only/repo",
+                    "anthropics/claude-plugins-official",
                     "c-weak/repo",
                     "d-news/repo",
                 ],
@@ -378,7 +378,7 @@ class Layer2RunnerTest(unittest.TestCase):
             [
                 ("d-news/repo", "diagnostics", "suppress_or_low"),
                 ("c-weak/repo", "diagnostics", "suppress_or_low"),
-                ("b-score-only/repo", "scored", "score_only"),
+                ("anthropics/claude-plugins-official", "scored", "score_only"),
                 ("a-focus/repo", "today_focus", "briefed"),
             ],
         )
@@ -395,10 +395,19 @@ class Layer2RunnerTest(unittest.TestCase):
             {name: json.loads(metadata)["route"] for name, metadata in route_rows},
             {
                 "a-focus/repo": "score_plus_deepdive",
-                "b-score-only/repo": "score_only",
+                "anthropics/claude-plugins-official": "score_only",
                 "c-weak/repo": "suppress_or_low",
                 "d-news/repo": "suppress_or_low",
             },
+        )
+        route_metadata = {name: json.loads(metadata) for name, metadata in route_rows}
+        self.assertEqual(
+            route_metadata["anthropics/claude-plugins-official"]["major_company"],
+            "Anthropic",
+        )
+        self.assertEqual(
+            route_metadata["anthropics/claude-plugins-official"]["route_reason"],
+            "major_company_score_only",
         )
 
     def test_run_layer2_keeps_selected_focus_item_when_brief_fails(self):
@@ -444,6 +453,49 @@ class Layer2RunnerTest(unittest.TestCase):
         self.assertEqual(summary["briefs"], 0)
         self.assertEqual(item, ("today_focus", "brief_error"))
         self.assertEqual(brief_count, 0)
+
+    def test_run_layer2_preserves_today_focus_ranks_after_briefs(self):
+        from pipeline.decision.llm_provider import FakeLLMProvider
+        from pipeline.decision.run_layer2_feed import run_layer2_feed
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "hero.sqlite"
+            self.make_db_with_potentials(db_path, ["top/repo", "second/repo"])
+            provider = FakeLLMProvider(
+                [
+                    self.valid_score_response("Top"),
+                    self.valid_score_response("Second"),
+                    self.valid_brief_response(),
+                    self.valid_brief_response(),
+                ]
+            )
+
+            run_layer2_feed(
+                db_path=db_path,
+                decision_run_id="decision-run",
+                feed_run_id="l2-rank-stable",
+                now="2026-06-01T12:00:00Z",
+                provider=provider,
+                config={
+                    "brief_min_score": 70,
+                    "brief_target_count": 2,
+                    "brief_max_count": 2,
+                },
+            )
+
+            conn = sqlite3.connect(db_path)
+            ranks = conn.execute(
+                """
+                select rank
+                from l2_feed_items
+                where feed_run_id = ? and section = ?
+                order by rank
+                """,
+                ("l2-rank-stable", "today_focus"),
+            ).fetchall()
+            conn.close()
+
+        self.assertEqual([row[0] for row in ranks], [1, 2])
 
     def test_run_layer2_continues_when_one_scoring_candidate_fails(self):
         from pipeline.decision.llm_provider import FakeLLMProvider

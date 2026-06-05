@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   ArrowSquareOut,
+  CaretDown,
   ChartLineUp,
   Lightning,
   ThumbsDown,
@@ -1370,6 +1371,7 @@ function FeedSignalCard({ item, onOpenSource }) {
       <div className="signal-card-head">
         <div className="signal-title-block">
           <h2>{item.title}</h2>
+          <FeedBadges item={item} />
           <p>{description}</p>
         </div>
         <div className="signal-score-card" style={scoreStyle} aria-label={`信号分 ${Math.round(item.l2_score)}`}>
@@ -1387,6 +1389,16 @@ function FeedSignalCard({ item, onOpenSource }) {
       </div>
     </article>
   );
+}
+
+function FeedBadges({ item }) {
+  const badges = [];
+  if (item.major_company) badges.push(`BigCo · ${item.major_company}`);
+  return badges.length ? (
+    <div className="feed-badges" aria-label="Feed tags">
+      {badges.map((badge) => <span key={badge}>{badge}</span>)}
+    </div>
+  ) : null;
 }
 
 function FeedBrief({ item }) {
@@ -1428,6 +1440,7 @@ function FeedBrief({ item }) {
 }
 
 function ScoredFeedRow({ item, onOpenSource }) {
+  const [expanded, setExpanded] = useState(false);
   const bar = scoreBarStyle(item.l2_score);
   const description = feedCardDescription(item, { maxChars: 96 });
   return (
@@ -1438,6 +1451,7 @@ function ScoredFeedRow({ item, onOpenSource }) {
       </div>
       <div className="scored-feed-main">
         <strong>{item.title}</strong>
+        <FeedBadges item={item} />
         <p>{description}</p>
       </div>
       <div className="scored-feed-meta">
@@ -1445,7 +1459,52 @@ function ScoredFeedRow({ item, onOpenSource }) {
         {(item.topic_tags || []).slice(0, 2).map((tag) => <span key={tag}>{tag}</span>)}
       </div>
       <FeedLinks item={item} onOpenSource={onOpenSource} />
+      <button
+        type="button"
+        className="scored-detail-toggle"
+        aria-expanded={expanded}
+        onClick={() => setExpanded((value) => !value)}
+      >
+        详情 <CaretDown size={14} weight="bold" aria-hidden="true" />
+      </button>
+      {expanded ? <ScoredDetailCard item={item} onOpenSource={onOpenSource} /> : null}
     </article>
+  );
+}
+
+function ScoredDetailCard({ item, onOpenSource }) {
+  const axes = item.axes || {};
+  const axisRows = [
+    ['Workflow', axes.workflow_shift],
+    ['Technical', axes.technical_substance],
+    ['PMF', axes.product_market_fit],
+    ['Momentum', axes.momentum],
+    ['Confidence', axes.confidence],
+  ].filter(([, value]) => value !== undefined && value !== null && value !== '');
+  return (
+    <section className="scored-detail-card" aria-label={`${item.title} detail`}>
+      <div className="scored-detail-copy">
+        <span>判断摘要</span>
+        <p>{item.rationale_short || item.primary_reason || item.context_preview}</p>
+        {(item.caveats || []).length ? (
+          <ul>
+            {item.caveats.slice(0, 3).map((caveat) => <li key={caveat}>{caveat}</li>)}
+          </ul>
+        ) : null}
+      </div>
+      {axisRows.length ? (
+        <div className="scored-axis-grid" aria-label="Score axes">
+          {axisRows.map(([label, value]) => (
+            <div key={label}>
+              <span>{label}</span>
+              <strong>{Math.round(Number(value || 0))}</strong>
+            </div>
+          ))}
+        </div>
+      ) : null}
+      <FeedEvidence item={item} />
+      <FeedLinks item={item} onOpenSource={onOpenSource} />
+    </section>
   );
 }
 

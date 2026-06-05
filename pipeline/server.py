@@ -27,6 +27,7 @@ if str(ROOT) not in sys.path:
 
 from pipeline.dashboard_data import build_dashboard_data
 from pipeline.decision.candidate_context import context_bundle_for_entity
+from pipeline.decision.layer2_scoring_investigator import major_company_label_for_identity
 from pipeline.decision.schema import init_decision_db
 
 CONFIG_PATH = ROOT / "pipeline" / "config.json"
@@ -329,6 +330,11 @@ def _feed_item(row: tuple[Any, ...]) -> dict[str, Any]:
         "canonical_name": row[5],
         "canonical_key": row[6],
         "canonical_link": row[7],
+        "major_company": major_company_label_for_identity(
+            canonical_name=str(row[5] or ""),
+            canonical_key=str(row[6] or ""),
+            canonical_link=str(row[7] or ""),
+        ),
         "entity_ids": json_loads(row[8], []),
         "level": row[9],
         "source_families": json_loads(row[10], []),

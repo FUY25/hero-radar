@@ -48,6 +48,7 @@ from pipeline.decision.layer2_scoring_investigator import (
     ROUTE_SUPPRESS_OR_LOW,
     classify_scored_route,
     generate_deepdive_briefs,
+    major_company_label_for_row,
     score_with_investigator,
     select_deepdive_brief_candidates,
 )
@@ -438,6 +439,7 @@ def run_layer2_feed(
                 metadata={
                     "brief_min_score": cfg.get("brief_min_score", 70),
                     "brief_rank": rank,
+                    **_route_reason_metadata(row),
                 },
             )
             _insert_feed_item(
@@ -469,6 +471,7 @@ def run_layer2_feed(
                 metadata={
                     "brief_min_score": cfg.get("brief_min_score", 70),
                     "score_only_min_score": cfg.get("score_only_min_score", 50),
+                    **_route_reason_metadata(row),
                 },
             )
             if route == ROUTE_SCORE_ONLY:
@@ -768,6 +771,16 @@ def _record_route_decision(
         status="route_decision",
         metadata=route_metadata,
     )
+
+
+def _route_reason_metadata(row: dict[str, Any]) -> dict[str, Any]:
+    major_company = major_company_label_for_row(row)
+    if not major_company:
+        return {}
+    return {
+        "major_company": major_company,
+        "route_reason": "major_company_score_only",
+    }
 
 
 def _update_feed_item_status(
