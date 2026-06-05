@@ -1619,7 +1619,6 @@ function FeedView({ payload, tab = 'daily', onTabChange, onOpenSource }) {
   const [expandedEvidenceIds, setExpandedEvidenceIds] = useState(() => new Set());
   const [expandedSourceIds, setExpandedSourceIds] = useState(() => new Set());
   const [expandedContextIds, setExpandedContextIds] = useState(() => new Set());
-  const [selectedCandidateId, setSelectedCandidateId] = useState(null);
   const [columnWidths, setColumnWidths] = useState(() => readColumnWidths('candidate_pool'));
   const columns = candidateTableColumns();
   const rows = useMemo(() => candidateRowsForFeed(payload.candidates), [payload.candidates]);
@@ -1627,10 +1626,6 @@ function FeedView({ payload, tab = 'daily', onTabChange, onOpenSource }) {
   const filteredRows = useMemo(
     () => filterCandidateRows(rows, { levelFilter, sourceFilters }),
     [rows, levelFilter, sourceFilters],
-  );
-  const selectedCandidate = useMemo(
-    () => filteredRows.find((row) => row.entity_id === selectedCandidateId) || rows.find((row) => row.entity_id === selectedCandidateId) || null,
-    [filteredRows, rows, selectedCandidateId],
   );
   const toggleSourceFilter = (source) => {
     setSourceFilters((current) => (
@@ -1733,8 +1728,7 @@ function FeedView({ payload, tab = 'daily', onTabChange, onOpenSource }) {
               </div>
             </div>
           </section>
-          <div className={`candidate-workspace ${selectedCandidate ? 'has-detail' : ''}`}>
-            <div className="table-wrap candidate-table-wrap">
+          <div className="table-wrap">
               <table className="candidate-table">
                 <thead>
                   <tr>
@@ -1768,20 +1762,11 @@ function FeedView({ payload, tab = 'daily', onTabChange, onOpenSource }) {
                     const evidence = candidateVisibleEvidence(row, expandedEvidenceIds.has(row.entity_id));
                     const sources = candidateVisibleSources(row, expandedSourceIds.has(row.entity_id));
                     const context = candidateContextSummary(row.context_preview || row.first_trigger_at || row.status || '', expandedContextIds.has(row.entity_id));
-                    const selected = selectedCandidate?.entity_id === row.entity_id;
                     return (
-                      <tr key={`${row.pool_type}:${row.entity_id}`} className={selected ? 'candidate-row selected-candidate-row' : 'candidate-row'}>
+                      <tr key={`${row.pool_type}:${row.entity_id}`}>
                         <td className="candidate-name-cell" style={columnWidthStyle(columnWidths, 0)}>
                           <strong>{row.canonical_entity || row.entity_id}</strong>
                           <code>{row.canonical_key || row.entity_id}</code>
-                          <button
-                            type="button"
-                            className="candidate-mini-card-button"
-                            aria-pressed={selected}
-                            onClick={() => setSelectedCandidateId(selected ? null : row.entity_id)}
-                          >
-                            信息卡
-                          </button>
                         </td>
                         <td style={columnWidthStyle(columnWidths, 1)}><span className={`badge ${row.level}`}>{levelLabel(row.level)}</span></td>
                         <td style={columnWidthStyle(columnWidths, 2)}>
@@ -1887,79 +1872,10 @@ function FeedView({ payload, tab = 'daily', onTabChange, onOpenSource }) {
                   )}
                 </tbody>
               </table>
-            </div>
-            {selectedCandidate ? (
-              <CandidateInsightPanel
-                row={selectedCandidate}
-                onClose={() => setSelectedCandidateId(null)}
-                onOpenSource={onOpenSource}
-              />
-            ) : null}
           </div>
         </section>
       )}
     </>
-  );
-}
-
-function CandidateInsightPanel({ row, onClose, onOpenSource }) {
-  const evidence = candidateVisibleEvidence(row, true);
-  const sources = candidateVisibleSources(row, true, 10);
-  const context = candidateContextSummary(row.context_preview || row.first_trigger_at || row.status || '', false);
-  return (
-    <aside className="candidate-insight-panel" aria-label={`${row.canonical_entity || row.entity_id} 信息卡`}>
-      <div className="candidate-insight-head">
-        <div>
-          <span>Candidate card</span>
-          <strong>{row.canonical_entity || row.entity_id}</strong>
-        </div>
-        <button type="button" onClick={onClose} aria-label="关闭候选信息卡">关闭</button>
-      </div>
-      <div className="candidate-insight-meta">
-        <span className={`badge ${row.level}`}>{levelLabel(row.level)}</span>
-        {row.binding_confidence ? <span>{row.binding_confidence}</span> : null}
-        {row.pool_type ? <span>{row.pool_type}</span> : null}
-      </div>
-      {context.text ? (
-        <section>
-          <h3>简介</h3>
-          <p>{context.text}</p>
-        </section>
-      ) : null}
-      <section>
-        <h3>证据</h3>
-        <ul className="evidence-list insight-evidence-list">
-          {evidence.bullets.map((bullet) => (
-            <li className="evidence-bullet" key={`${row.entity_id}:panel:${bullet.label}:${bullet.origin_type}`}>
-              <span>{bullet.display_label || bullet.label}</span>
-              {bullet.display_badge === 'LLM' ? <small className="evidence-llm-badge">LLM</small> : null}
-            </li>
-          ))}
-        </ul>
-      </section>
-      <section>
-        <h3>来源</h3>
-        <div className="candidate-source-list insight-source-list">
-          {sources.sources.map((sourceGroup) => (
-            <button
-              type="button"
-              className="candidate-source-row"
-              key={`${row.entity_id}:panel:${sourceGroup.key}`}
-              title={sourceGroupTitle(sourceGroup)}
-              onClick={() => onOpenSource?.(sourceGroup.link)}
-            >
-              <span>{sourceGroup.label}</span>
-              {sourceGroup.count > 1 ? <small>{sourceGroup.count}</small> : null}
-            </button>
-          ))}
-        </div>
-      </section>
-      {row.canonical_link ? (
-        <a className="candidate-insight-open" href={row.canonical_link} target="_blank" rel="noreferrer">
-          <ArrowSquareOut size={15} aria-hidden="true" /> 打开项目
-        </a>
-      ) : null}
-    </aside>
   );
 }
 
