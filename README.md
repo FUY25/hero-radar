@@ -6,11 +6,78 @@ Hero Radar 是一个用于发现 AI 应用层机会的本地 intelligence dashbo
 
 当前目标不是做一个“新闻列表”。目标是找到还没有完全成为共识、但已经出现产品/工作流突破的项目。
 
-## 第一轮校准结果
+在线只读演示：
+[https://demo-six-sigma-28.vercel.app](https://demo-six-sigma-28.vercel.app)
 
-Hero Radar 的第一步不是先把界面做漂亮，而是先验证它能不能抓住“我真的想看的项目”，同时避免把已经成为共识的范式反复推到最上面。
+## 第一步：历史回测
 
-当前 Layer 2 Scoring Investigator 的 deterministic eval 结果是 `9/9` 通过：
+Hero Radar 的第一步不是先把界面做漂亮，而是先回答一个更硬的问题：如果我们当时在跑这套系统，它能不能在 OpenClaw / Hermes Agent 变成共识前，把它们放进 closer-look 队列？
+
+回测文档：
+
+- [docs/benchmark-hermes-openclaw.md](docs/benchmark-hermes-openclaw.md)
+- [docs/benchmark-hermes-openclaw-observation-table.md](docs/benchmark-hermes-openclaw-observation-table.md)
+- [docs/product-spec-v0.7.md](docs/product-spec-v0.7.md)
+
+这不是最终推荐分数，而是 source-level benchmark：哪些事实足够早、足够强，应该触发高召回 closer look。
+
+### 回测 Anchor
+
+| 项目 | 有用捕捉点 | 太晚的点 | 结论 |
+| --- | --- | --- | --- |
+| Hermes Agent | 2026-03-11T13:51:05Z 附近的二阶导/加速度 lift，star band 约 `3.4k-5.5k`，中点约 `4.45k` | 2026-04-06T13:29:32Z 的一阶导/velocity peak，star band 已到 `23.3k-37.7k` | 要抓 acceleration，不要等它已经成为大规模共识。 |
+| OpenClaw | 2026-01-25 到 2026-01-26 之间，GitHub/HN/npm/HF/PH 围绕 `clawdbot` / `openclaw` 同时亮起 | 只等新名字 `openclaw` 或只看后续大 star 总量 | 必须把 alias resolution 当成信号的一部分，否则会漏掉早期 wave。 |
+| Claude Code | 约 `500-800` stars，repo 创建后约 `2.38` 天，star velocity 约 `92.33 stars/hour` | 等它已经几千上万 stars | 早期速度比总量更重要。 |
+
+### Hermes Agent 回测结果
+
+Hermes 是 GitHub acceleration-first case。
+
+- T0：`2026-03-11T13:51:05Z`，二阶导/加速度峰值，star band 约 `3.4k-5.5k`。
+- GitHub stargazer page probe 验证：page 34 约 `3.3k-3.4k`，page 45 约 `4.4k-4.5k`，page 55 约 `5.4k-5.5k`。
+- T0 到 T+24h 的 GitHub star delta 是 `1094`；T-7d 到 T+7d 的 star delta 是 `6834`。
+- T0 到 T+24h 的 fork delta 是 `94`；T0 到 T+7d 的 fork delta 是 `449`。
+- HN 在 T0 前后有弱但有用的 canonical corroboration，例如 2026-03-05、2026-03-09、2026-03-11 的 Hermes Agent 相关 story。
+- Product Hunt、exact npm、PyPI、HF exact resource 对 Hermes T0 都不够早；它们不能作为 Hermes-like 项目的必需条件。
+- 2026-05-30 的 forward-looking snapshot 里，Trending Repos 显示 daily/weekly/monthly rank `9 / 9 / 4`，`stars_velocity=1290.0`，`forks_velocity=330.0`；RepoFOMO 显示 `7d=910`、`30d=5673`、`60d=23204`、`new_forks=1227`。这些适合未来 daily capture，但不能倒推成历史 T0 证据。
+
+Takeaway：Hermes 应该被系统识别为高质量 agent framework，但现在它已经是已知范式，所以在当前产品里会被标记为 `known_paradigm`，默认 score-only，不再占用今日重点。
+
+### OpenClaw 回测结果
+
+OpenClaw 是 alias-chain + cross-source resonance case。
+
+- T0：`2026-01-26T10:32:47Z`，一阶导和二阶导同时峰值，star band 约 `23.3k-37.7k`，中点约 `30.5k`。
+- GitHub repo id `1103012935` 证明旧 repo `clawdbot/clawdbot` 会 redirect 到 canonical `openclaw/openclaw`。
+- GitHub stargazer page probe 验证：page 233 约 `23.2k-23.3k`，page 305 约 `30.4k-30.5k`，page 310 约 `30.9k-31.0k`，page 377 约 `37.6k-37.7k`。
+- T-24h 到 T0 的 GitHub star delta 是 `19760`；T0 到 2026-01-26T19:17:49Z 的 star delta 至少 `9024`；T-7d 到 2026-01-26T19:17:49Z 的 star delta 至少 `35140`。
+- Fork velocity 极强：T0 到 T+24h fork delta `3123`，T0 到 T+7d fork delta `16723`，T-7d 到 T+7d fork delta `19294`。
+- npm old alias `clawdbot` 是强早期信号：2026-01-24 日下载 `16,242`，01-25 `70,768`，01-26 `106,024`，01-27 `139,824`。
+- `@clawdbot/*` scoped package 在 2026-01-25 同步 release，`matrix`、`msteams`、`voice-call`、`zalo` 几乎同一分钟出现。
+- HN old alias 很强：紧窗口 2026-01-25..2026-01-27 mixed-case alias query 约 `42` stories；如果只搜 `openclaw`，早期 tight window 会错过。
+- Product Hunt 在 2026-01-27T08:01:00Z 出现 `OpenClaw` launch，daily rank `2`，weekly rank `3`，votes `835`，comments `53`。
+- Hugging Face 在 T0 前后出现 `KALLLA/clawdbot` model 和多个 `clawdbot` spaces，说明生态 echo 与主 repo 同步。
+- 2026-05-30 的 forward-looking snapshot 里，Trending Repos 显示 daily rank `86`、monthly rank `63`、language rank `26`、`stars_velocity=213.5`、`forks_velocity=76.0`；RepoFOMO 显示 `7d=226`、`30d=1735`、`60d=6816`、`new_forks=546`。
+
+Takeaway：OpenClaw 这类项目不能只靠 canonical name。Candidate Pool 必须把 alias、redirect、package family、HN old-name discussion、PH launch、HF echo 合成一个 entity，再交给 Layer 2 判断。
+
+### 回测后形成的高召回规则
+
+回测后，Candidate Pool/Decision Layer 的 closer-look 规则更偏召回：
+
+- GitHub acceleration / recent velocity 异常时入池。
+- Trending Repos daily rank <= 100、monthly rank <= 75、language rank <= 30，尤其 `stars_velocity >= 150` 或 `forks_velocity >= 50` 时入池。
+- RepoFOMO `stars_7d >= 200`、`stars_30d >= 1000`、`stars_60d >= 5000` 或 `new_forks >= 100` 时入池。
+- npm daily downloads 超过 `10k` 且快速上升，或同一 package family 在短时间内集体出现时入池。
+- HN 7 天内 >= 3 条匹配 story，或 GitHub acceleration 同日出现 meaningful HN story 时入池。
+- Product Hunt daily rank <= 5 是强 corroboration，但不要求每类项目都有 PH。
+- Hugging Face 同 alias model/dataset/space 在 48h 内出现多个，或在 GitHub/npm/HN 强信号附近出现，作为 ecosystem echo。
+
+这就是 Candidate Pool 为什么不直接追求 precision：它负责别漏掉 OpenClaw/Hermes 这类事件；precision 留给 Layer 2。
+
+## Layer 2 校准结果
+
+在历史回测之后，Layer 2 Scoring Investigator 再负责判断“这是不是今天值得读”。当前 deterministic eval 结果是 `9/9` 通过：
 
 | 案例 | 期望 | 结果 | 分数 | 判断 |
 | --- | --- | --- | ---: | --- |
@@ -23,11 +90,6 @@ Hero Radar 的第一步不是先把界面做漂亮，而是先验证它能不能
 | Standalone model release | low | low | 32.05 | 单独模型发布如果没有 workflow wrapper，不应进入重点。 |
 | Tutorial/resource list | low | low | 25.20 | 教程、资源列表不是产品机会本身。 |
 | Ordinary dashboard/editor/calculator | low | low | 37.35 | 普通工具即使带 AI 标签，没有明确工作流突破也不该高分。 |
-
-这个校准带来两个产品决策：
-
-- OpenClaw 这类“新工作流 + 多来源验证”的项目应该被推上 Daily Feed。
-- Hermes Agent 这类已经成为明确范式的项目仍会被高分识别，但被标记为 `known_paradigm`，默认只进入 score-only，不再占用今日重点卡位。
 
 ![Daily Feed](docs/assets/hero-radar-feed.png)
 
@@ -296,6 +358,9 @@ Kimi 也支持本地 JSON secret：
 ## 静态 Demo / Vercel
 
 如果只是给别人看当前版本，推荐部署静态快照，不要直接把 Vercel 连到本地 DB 或完整 batch worker。
+
+当前线上 demo：
+[https://demo-six-sigma-28.vercel.app](https://demo-six-sigma-28.vercel.app)
 
 原因：
 
