@@ -119,6 +119,29 @@ class Layer2RunnerTest(unittest.TestCase):
             "l2_20260531T123456",
         )
 
+    def test_latest_decision_run_accepts_ok_with_errors(self):
+        from pipeline.decision.run_layer2_feed import latest_decision_run
+
+        conn = sqlite3.connect(":memory:")
+        init_decision_db(conn)
+        conn.execute(
+            "insert into decision_runs(run_id, source_snapshot_run_id, started_at, completed_at, status, config_hash, rule_version, note) values (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "decision-partial",
+                "source-run",
+                "2026-06-01T00:00:00Z",
+                "2026-06-01T00:01:00Z",
+                "ok_with_errors",
+                "hash",
+                "rules-v1",
+                "one isolated candidate failed",
+            ),
+        )
+        conn.commit()
+
+        self.assertEqual(latest_decision_run(conn), "decision-partial")
+        conn.close()
+
     def test_pre_full_run_helpers_create_explicit_ids_and_backup_db(self):
         from pipeline.decision.run_layer2_feed import (
             backup_sqlite_db,
@@ -791,6 +814,258 @@ class Layer2RunnerTest(unittest.TestCase):
         self.assertEqual(summary["scored"], 6)
         self.assertGreaterEqual(max_active, 2)
 
+    def test_scoring_worker_uses_thread_owned_connections_for_parallel_db_tools(self):
+        from pipeline.decision.run_layer2_feed import run_layer2_feed
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "hero.sqlite"
+            self.make_db_with_potentials(db_path, ["owner/repo"])
+            conn = sqlite3.connect(db_path)
+            conn.execute(
+                """
+                insert into evidence_rows(
+                  entity_id, canonical_entity, alias, source, event_at,
+                  relative_to_reference, metric_name, metric_value, family,
+                  rule_id, rule_version, signal_label, historical_safety,
+                  note, raw_url_or_ref, run_id
+                )
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "entity:0",
+                    "owner/repo",
+                    None,
+                    "github",
+                    "2026-06-01T00:00:00Z",
+                    None,
+                    "stars_today",
+                    "100",
+                    "github",
+                    "rule",
+                    "v1",
+                    "GitHub momentum",
+                    "safe",
+                    "note",
+                    "https://github.com/owner/repo",
+                    "decision-run",
+                ),
+            )
+            conn.commit()
+            conn.close()
+            final = self.valid_score_response("Parallel DB tools")
+
+            class ToolRequestingProvider:
+                provider_name = "fake"
+                model = "fake-json"
+
+                def __init__(self):
+                    self.calls = 0
+
+                def complete_json(self, **kwargs):
+                    self.calls += 1
+                    if self.calls == 1:
+                        return {
+                            "action": "use_tools",
+                            "information_need": "Need two evidence reads.",
+                            "tool_requests": [
+                                {
+                                    "name": "read_evidence_rows",
+                                    "arguments": {"entity_id": "entity:0"},
+                                },
+                                {
+                                    "name": "read_evidence_rows",
+                                    "arguments": {"entity_id": "entity:0"},
+                                },
+                            ],
+                        }
+                    return final
+
+            summary = run_layer2_feed(
+                db_path=db_path,
+                decision_run_id="decision-run",
+                feed_run_id="l2-parallel-db-tools",
+                now="2026-06-01T12:00:00Z",
+                scoring_provider_factory=ToolRequestingProvider,
+                config={
+                    "max_scored_candidates": 1,
+                    "scoring_concurrency": 2,
+                    "max_parallel_tool_calls_per_turn": 2,
+                    "enable_deepdive_briefs": False,
+                },
+            )
+
+            conn = sqlite3.connect(db_path)
+            tool_trace = json.loads(
+                conn.execute(
+                    "select tool_trace_json from l2_scoring_investigations where feed_run_id = ?",
+                    ("l2-parallel-db-tools",),
+                ).fetchone()[0]
+            )
+            conn.close()
+
+        self.assertEqual(summary["scored"], 1)
+        self.assertEqual(
+            [row["tool"] for row in tool_trace],
+            ["read_evidence_rows", "read_evidence_rows"],
+        )
+        self.assertTrue(all(row["status"] == "ok" for row in tool_trace))
+
+    def test_run_layer2_generates_selected_briefs_concurrently_with_isolated_providers(self):
+        from pipeline.decision.llm_provider import FakeLLMProvider
+        from pipeline.decision.run_layer2_feed import run_layer2_feed
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "hero.sqlite"
+            names = ["one/repo", "two/repo", "three/repo", "four/repo"]
+            self.make_db_with_potentials(db_path, names)
+            scoring_provider = FakeLLMProvider(
+                [self.valid_score_response(name) for name in names]
+            )
+            lock = threading.Lock()
+            active = 0
+            max_active = 0
+            provider_ids: set[int] = set()
+
+            class ConcurrentBriefProvider:
+                provider_name = "fake"
+                model = "fake-brief-json"
+
+                def complete_json(self, **kwargs):
+                    nonlocal active, max_active
+                    with lock:
+                        provider_ids.add(id(self))
+                        active += 1
+                        max_active = max(max_active, active)
+                    try:
+                        canonical_name = kwargs["input_payload"]["candidate_identity"][
+                            "canonical_name"
+                        ]
+                        time.sleep(0.05)
+                        return {
+                            "category": {"primary": "开发工具", "tags": ["agent"]},
+                            "headline": f"{canonical_name} brief",
+                            "core_highlights": ["并发生成但候选映射保持稳定。"],
+                            "use_cases": ["开发者使用项目完成任务。"],
+                        }
+                    finally:
+                        with lock:
+                            active -= 1
+
+            summary = run_layer2_feed(
+                db_path=db_path,
+                decision_run_id="decision-run",
+                feed_run_id="l2-concurrent-briefs",
+                now="2026-06-01T12:00:00Z",
+                provider=scoring_provider,
+                brief_provider_factory=ConcurrentBriefProvider,
+                config={
+                    "max_scored_candidates": 4,
+                    "brief_min_score": 0,
+                    "brief_target_count": 4,
+                    "brief_max_count": 4,
+                    "brief_concurrency": 4,
+                },
+            )
+
+            conn = sqlite3.connect(db_path)
+            rows = conn.execute(
+                """
+                select g.canonical_name, fi.rank, fi.deepdive_status, b.brief_json
+                from l2_feed_items fi
+                join l2_candidate_groups g
+                  on g.feed_run_id = fi.feed_run_id and g.group_id = fi.group_id
+                join l2_deepdive_briefs b
+                  on b.feed_run_id = fi.feed_run_id and b.group_id = fi.group_id
+                where fi.feed_run_id = ? and fi.section = 'today_focus'
+                order by fi.rank
+                """,
+                ("l2-concurrent-briefs",),
+            ).fetchall()
+            conn.close()
+
+        self.assertEqual(summary["briefs"], 4)
+        self.assertGreaterEqual(max_active, 2)
+        self.assertEqual(len(provider_ids), 4)
+        self.assertEqual([row[1] for row in rows], [1, 2, 3, 4])
+        self.assertTrue(all(row[2] == "briefed" for row in rows))
+        self.assertTrue(
+            all(
+                name in json.loads(brief_json)["headline"]
+                for name, _rank, _status, brief_json in rows
+            )
+        )
+
+    def test_concurrent_brief_failure_is_isolated_to_its_candidate(self):
+        from pipeline.decision.llm_provider import FakeLLMProvider
+        from pipeline.decision.run_layer2_feed import run_layer2_feed
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "hero.sqlite"
+            names = ["good-one/repo", "bad/repo", "good-two/repo"]
+            self.make_db_with_potentials(db_path, names)
+            scoring_provider = FakeLLMProvider(
+                [self.valid_score_response(name) for name in names]
+            )
+
+            class PartiallyFailingBriefProvider:
+                provider_name = "fake"
+                model = "fake-brief-json"
+
+                def complete_json(self, **kwargs):
+                    canonical_name = kwargs["input_payload"]["candidate_identity"][
+                        "canonical_name"
+                    ]
+                    if canonical_name == "bad/repo":
+                        raise TimeoutError("brief timed out")
+                    return {
+                        "category": {"primary": "开发工具", "tags": []},
+                        "headline": f"{canonical_name} brief",
+                        "core_highlights": ["候选自己的能力说明。"],
+                        "use_cases": ["开发者使用项目完成任务。"],
+                    }
+
+            summary = run_layer2_feed(
+                db_path=db_path,
+                decision_run_id="decision-run",
+                feed_run_id="l2-concurrent-brief-error",
+                now="2026-06-01T12:00:00Z",
+                provider=scoring_provider,
+                brief_provider_factory=PartiallyFailingBriefProvider,
+                config={
+                    "max_scored_candidates": 3,
+                    "brief_min_score": 0,
+                    "brief_target_count": 3,
+                    "brief_max_count": 3,
+                    "brief_concurrency": 3,
+                },
+            )
+
+            conn = sqlite3.connect(db_path)
+            statuses = dict(
+                conn.execute(
+                    """
+                    select g.canonical_name, fi.deepdive_status
+                    from l2_feed_items fi
+                    join l2_candidate_groups g
+                      on g.feed_run_id = fi.feed_run_id and g.group_id = fi.group_id
+                    where fi.feed_run_id = ? and fi.section = 'today_focus'
+                    """,
+                    ("l2-concurrent-brief-error",),
+                ).fetchall()
+            )
+            brief_count = conn.execute(
+                "select count(*) from l2_deepdive_briefs where feed_run_id = ?",
+                ("l2-concurrent-brief-error",),
+            ).fetchone()[0]
+            conn.close()
+
+        self.assertEqual(summary["status"], "ok_with_errors")
+        self.assertEqual(summary["briefs"], 2)
+        self.assertEqual(brief_count, 2)
+        self.assertEqual(statuses["bad/repo"], "brief_error")
+        self.assertEqual(statuses["good-one/repo"], "briefed")
+        self.assertEqual(statuses["good-two/repo"], "briefed")
+
     def test_run_layer2_disables_edge_scout_by_default(self):
         from pipeline.decision.llm_provider import FakeLLMProvider
         from pipeline.decision.run_layer2_feed import run_layer2_feed
@@ -949,3 +1224,6 @@ class Layer2RunnerTest(unittest.TestCase):
         self.assertEqual(default_config["brief_target_count"], 8)
         self.assertEqual(default_config["score_only_min_score"], 50)
         self.assertEqual(default_config["scoring_concurrency"], 5)
+        self.assertEqual(default_config["brief_concurrency"], 4)
+        self.assertEqual(default_config["max_parallel_tool_calls_per_turn"], 4)
+        self.assertEqual(default_config["github_tool_concurrency"], 5)

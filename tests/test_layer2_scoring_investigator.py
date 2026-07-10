@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
+import time
 import unittest
 
 from pipeline.decision.layer2_models import CandidateGroup
@@ -208,6 +210,130 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
             ).fetchone()[0]
         )
         self.assertEqual(tool_trace[1]["status"], "budget_exceeded")
+
+    def test_same_turn_tools_run_concurrently_and_trace_keeps_request_order(self):
+        from pipeline.decision.layer2_scoring_investigator import (
+            InvestigatorLimits,
+            score_with_investigator,
+        )
+
+        conn = self.make_conn()
+        provider = FakeLLMProvider(
+            [
+                {
+                    "action": "use_tools",
+                    "information_need": "Need independent evidence.",
+                    "tool_requests": [
+                        {"name": "slow", "arguments": {"value": "first"}},
+                        {"name": "fast", "arguments": {"value": "second"}},
+                        {"name": "middle", "arguments": {"value": "third"}},
+                    ],
+                },
+                final_response(),
+            ]
+        )
+        lock = threading.Lock()
+        release = threading.Event()
+        active = 0
+        max_active = 0
+
+        def concurrent_tool(arguments):
+            nonlocal active, max_active
+            with lock:
+                active += 1
+                max_active = max(max_active, active)
+                if active == 3:
+                    release.set()
+            release.wait(timeout=1)
+            time.sleep({"first": 0.03, "second": 0.0, "third": 0.01}[arguments["value"]])
+            with lock:
+                active -= 1
+            return {"status": "ok", "value": arguments["value"]}
+
+        results = score_with_investigator(
+            conn,
+            feed_run_id="l2-run",
+            groups=[make_group()],
+            provider=provider,
+            tools={
+                "slow": concurrent_tool,
+                "fast": concurrent_tool,
+                "middle": concurrent_tool,
+            },
+            limits=InvestigatorLimits(max_parallel_tool_calls_per_turn=3),
+        )
+
+        self.assertGreaterEqual(max_active, 2)
+        self.assertEqual(
+            [row["tool"] for row in results[0]["tool_trace"]],
+            ["slow", "fast", "middle"],
+        )
+        self.assertEqual(
+            [row["result"]["value"] for row in results[0]["tool_trace"]],
+            ["first", "second", "third"],
+        )
+
+    def test_parallel_tool_reservation_enforces_total_and_family_budgets_in_order(self):
+        from pipeline.decision.layer2_scoring_investigator import (
+            InvestigatorLimits,
+            score_with_investigator,
+        )
+
+        conn = self.make_conn()
+        provider = FakeLLMProvider(
+            [
+                {
+                    "action": "use_tools",
+                    "information_need": "Need bounded evidence.",
+                    "tool_requests": [
+                        {"name": "web_search", "arguments": {"query": "one"}},
+                        {"name": "web_search", "arguments": {"query": "two"}},
+                        {
+                            "name": "fetch_github_file",
+                            "arguments": {"repo_key": "owner/repo", "path": "package.json"},
+                        },
+                        {"name": "read_evidence_rows", "arguments": {"entity_id": "entity:repo"}},
+                    ],
+                },
+                final_response(),
+            ]
+        )
+        calls: list[tuple[str, dict]] = []
+        lock = threading.Lock()
+
+        def tool(name):
+            def run(arguments):
+                with lock:
+                    calls.append((name, arguments))
+                return {"status": "ok", "name": name}
+
+            return run
+
+        results = score_with_investigator(
+            conn,
+            feed_run_id="l2-run",
+            groups=[make_group()],
+            provider=provider,
+            tools={
+                "web_search": tool("web_search"),
+                "fetch_github_file": tool("fetch_github_file"),
+                "read_evidence_rows": tool("read_evidence_rows"),
+            },
+            limits=InvestigatorLimits(
+                max_tool_calls_per_candidate=2,
+                max_web_search_calls_per_candidate=1,
+                max_parallel_tool_calls_per_turn=4,
+            ),
+        )
+
+        self.assertCountEqual(
+            [name for name, _arguments in calls],
+            ["web_search", "fetch_github_file"],
+        )
+        self.assertEqual(
+            [row["status"] for row in results[0]["tool_trace"]],
+            ["ok", "budget_exceeded", "ok", "budget_exceeded"],
+        )
 
     def test_investigator_repairs_invalid_final_score_once(self):
         from pipeline.decision.layer2_scoring_investigator import (

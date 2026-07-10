@@ -7,9 +7,10 @@ import os
 import sqlite3
 import urllib.parse
 import urllib.request
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import PurePosixPath
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 from pipeline.decision.cache import (
     api_cache_key,
@@ -88,22 +89,44 @@ class PageFetchClient:
 class ScoringInvestigatorTools:
     def __init__(
         self,
-        conn: sqlite3.Connection,
+        conn: sqlite3.Connection | None = None,
         *,
+        connection_factory: Callable[[], sqlite3.Connection] | None = None,
         decision_run_id: str,
         readme_client: Any | None = None,
         github_file_client: Any | None = None,
         page_client: Any | None = None,
         web_search_client: Any | None = None,
         limits: InvestigatorToolLimits | None = None,
+        family_limiters: dict[str, Any] | None = None,
     ) -> None:
+        if conn is None and connection_factory is None:
+            raise ValueError("conn or connection_factory is required")
         self.conn = conn
+        self.connection_factory = connection_factory
         self.decision_run_id = decision_run_id
         self.readme_client = readme_client
         self.github_file_client = github_file_client
         self.page_client = page_client
         self.web_search_client = web_search_client
         self.limits = limits or InvestigatorToolLimits()
+        self.family_limiters = family_limiters or {}
+
+    @contextmanager
+    def _connection(self) -> Iterator[sqlite3.Connection]:
+        if self.connection_factory is None:
+            if self.conn is None:
+                raise RuntimeError("investigator tool connection is not configured")
+            yield self.conn
+            return
+        conn = self.connection_factory()
+        try:
+            yield conn
+        finally:
+            conn.close()
+
+    def _external_limit(self, family: str) -> Any:
+        return self.family_limiters.get(family) or nullcontext()
 
     def available_tools(self) -> dict[str, ToolFn]:
         tools = {
@@ -120,17 +143,22 @@ class ScoringInvestigatorTools:
         entity_id = str(arguments.get("entity_id") or "")
         if not entity_id:
             return {"status": "rejected", "error": "entity_id is required", "rows": []}
-        rows = self.conn.execute(
-            """
-            select source, event_at, metric_name, metric_value, family,
-                   signal_label, note, raw_url_or_ref
-            from evidence_rows
-            where run_id = ? and entity_id = ?
-            order by event_at desc, id desc
-            limit ?
-            """,
-            (self.decision_run_id, entity_id, max(1, self.limits.max_evidence_rows)),
-        ).fetchall()
+        with self._connection() as conn:
+            rows = conn.execute(
+                """
+                select source, event_at, metric_name, metric_value, family,
+                       signal_label, note, raw_url_or_ref
+                from evidence_rows
+                where run_id = ? and entity_id = ?
+                order by event_at desc, id desc
+                limit ?
+                """,
+                (
+                    self.decision_run_id,
+                    entity_id,
+                    max(1, self.limits.max_evidence_rows),
+                ),
+            ).fetchall()
         return {
             "status": "ok",
             "rows": [
@@ -154,9 +182,11 @@ class ScoringInvestigatorTools:
             return {"status": "rejected", "error": "valid repo_key is required"}
         if self.readme_client is None:
             return {"status": "unavailable", "error": "readme client is not configured"}
-        response = fetch_and_cache_readme_excerpt(
-            self.conn, client=self.readme_client, repo_key=repo_key
-        )
+        with self._external_limit("github"):
+            with self._connection() as conn:
+                response = fetch_and_cache_readme_excerpt(
+                    conn, client=self.readme_client, repo_key=repo_key
+                )
         return {"status": "ok", **response}
 
     def fetch_github_file(self, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -180,26 +210,28 @@ class ScoringInvestigatorTools:
                 "max_chars": self.limits.max_github_file_chars,
             },
         )
-        cached = get_api_cache(self.conn, cache_key)
-        if cached:
-            return cached
-        text = str(self.github_file_client.get_file_text(repo_key, path) or "")
-        response = {
-            "status": "ok",
-            "repo_key": repo_key,
-            "path": path,
-            "excerpt": text[: self.limits.max_github_file_chars],
-            "chars": min(len(text), self.limits.max_github_file_chars),
-        }
-        put_api_cache(
-            self.conn,
-            cache_key=cache_key,
-            source=GITHUB_FILE_SOURCE,
-            external_id=f"{repo_key}:{path}",
-            window=TOOL_WINDOW,
-            input_hash=input_hash,
-            response=response,
-        )
+        with self._external_limit("github"):
+            with self._connection() as conn:
+                cached = get_api_cache(conn, cache_key)
+                if cached:
+                    return cached
+                text = str(self.github_file_client.get_file_text(repo_key, path) or "")
+                response = {
+                    "status": "ok",
+                    "repo_key": repo_key,
+                    "path": path,
+                    "excerpt": text[: self.limits.max_github_file_chars],
+                    "chars": min(len(text), self.limits.max_github_file_chars),
+                }
+                put_api_cache(
+                    conn,
+                    cache_key=cache_key,
+                    source=GITHUB_FILE_SOURCE,
+                    external_id=f"{repo_key}:{path}",
+                    window=TOOL_WINDOW,
+                    input_hash=input_hash,
+                    response=response,
+                )
         return response
 
     def fetch_homepage_or_docs(self, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -218,25 +250,27 @@ class ScoringInvestigatorTools:
                 "max_chars": self.limits.max_homepage_chars,
             },
         )
-        cached = get_api_cache(self.conn, cache_key)
-        if cached:
-            return cached
-        text = str(self.page_client.fetch_text(normalized_url) or "")
-        response = {
-            "status": "ok",
-            "url": normalized_url,
-            "excerpt": text[: self.limits.max_homepage_chars],
-            "chars": min(len(text), self.limits.max_homepage_chars),
-        }
-        put_api_cache(
-            self.conn,
-            cache_key=cache_key,
-            source=HOMEPAGE_SOURCE,
-            external_id=normalized_url,
-            window=TOOL_WINDOW,
-            input_hash=input_hash,
-            response=response,
-        )
+        with self._external_limit("homepage"):
+            with self._connection() as conn:
+                cached = get_api_cache(conn, cache_key)
+                if cached:
+                    return cached
+                text = str(self.page_client.fetch_text(normalized_url) or "")
+                response = {
+                    "status": "ok",
+                    "url": normalized_url,
+                    "excerpt": text[: self.limits.max_homepage_chars],
+                    "chars": min(len(text), self.limits.max_homepage_chars),
+                }
+                put_api_cache(
+                    conn,
+                    cache_key=cache_key,
+                    source=HOMEPAGE_SOURCE,
+                    external_id=normalized_url,
+                    window=TOOL_WINDOW,
+                    input_hash=input_hash,
+                    response=response,
+                )
         return response
 
     def web_search(self, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -257,29 +291,31 @@ class ScoringInvestigatorTools:
             external_id=query,
             payload={"query": query, "limit": limit},
         )
-        cached = get_api_cache(self.conn, cache_key)
-        if cached:
-            return cached
-        try:
-            raw_results = self.web_search_client.search(query, limit=limit)
-        except TypeError:
-            raw_results = self.web_search_client.search(
-                query=query, max_results=limit
-            )
-        response = {
-            "status": "ok",
-            "query": query,
-            "results": _normalize_search_results(raw_results, limit),
-        }
-        put_api_cache(
-            self.conn,
-            cache_key=cache_key,
-            source=WEB_SEARCH_SOURCE,
-            external_id=query,
-            window=TOOL_WINDOW,
-            input_hash=input_hash,
-            response=response,
-        )
+        with self._external_limit("web_search"):
+            with self._connection() as conn:
+                cached = get_api_cache(conn, cache_key)
+                if cached:
+                    return cached
+                try:
+                    raw_results = self.web_search_client.search(query, limit=limit)
+                except TypeError:
+                    raw_results = self.web_search_client.search(
+                        query=query, max_results=limit
+                    )
+                response = {
+                    "status": "ok",
+                    "query": query,
+                    "results": _normalize_search_results(raw_results, limit),
+                }
+                put_api_cache(
+                    conn,
+                    cache_key=cache_key,
+                    source=WEB_SEARCH_SOURCE,
+                    external_id=query,
+                    window=TOOL_WINDOW,
+                    input_hash=input_hash,
+                    response=response,
+                )
         return response
 
 

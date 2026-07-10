@@ -7,6 +7,7 @@ import shutil
 import sqlite3
 import sys
 from pathlib import Path
+from threading import BoundedSemaphore
 from typing import Any, Callable
 
 from pipeline.decision.kimi_provider import (
@@ -46,9 +47,10 @@ from pipeline.decision.layer2_scoring_investigator import (
     ROUTE_SCORE_ONLY,
     ROUTE_SCORE_PLUS_DEEPDIVE,
     ROUTE_SUPPRESS_OR_LOW,
+    build_deepdive_brief,
     classify_scored_route,
-    generate_deepdive_briefs,
     major_company_label_for_row,
+    persist_deepdive_brief,
     score_with_investigator,
     select_deepdive_brief_candidates,
 )
@@ -101,7 +103,7 @@ def latest_decision_run(conn: sqlite3.Connection) -> str:
         """
         select run_id
         from decision_runs
-        where status = 'ok'
+        where status in ('ok', 'ok_with_errors')
         order by coalesce(completed_at, started_at) desc
         limit 1
         """
@@ -171,6 +173,7 @@ def run_layer2_feed(
     provider: Any | None = None,
     deepdive_provider: Any | None = None,
     scoring_provider_factory: Callable[[], Any] | None = None,
+    brief_provider_factory: Callable[[], Any] | None = None,
     config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     cfg = config or {}
@@ -201,6 +204,7 @@ def run_layer2_feed(
         active_deepdive_provider = deepdive_provider or provider or KimiProvider(
             model=str(cfg.get("deepdive_model") or DEFAULT_KIMI_DEEPDIVE_MODEL)
         )
+        tool_family_limiters = _tool_family_limiters_from_config(cfg)
         model_profile = {
             "scout": getattr(scout_provider, "model", ""),
             "scoring": getattr(scoring_provider, "model", ""),
@@ -343,6 +347,7 @@ def run_layer2_feed(
                         group,
                         cfg,
                         worker_factory,
+                        tool_family_limiters,
                     ): group
                     for group in scoring_candidates
                 }
@@ -361,10 +366,12 @@ def run_layer2_feed(
                         )
         else:
             investigator_tools = _investigator_tools_for(
-                conn,
+                None,
                 decision_run_id=active_decision_run_id,
                 scoring_provider=scoring_provider,
                 cfg=cfg,
+                connection_factory=lambda: sqlite3.connect(db_path, timeout=30),
+                family_limiters=tool_family_limiters,
             )
             investigator_limits = _investigator_limits_from_config(cfg)
             for group in scoring_candidates:
@@ -519,7 +526,7 @@ def run_layer2_feed(
             diagnostics_rank += 1
         conn.commit()
         briefs = []
-        if bool(cfg.get("enable_deepdive_briefs", True)):
+        if bool(cfg.get("enable_deepdive_briefs", True)) and selected_for_brief:
             for row in selected_for_brief:
                 group = row["group"]
                 record_stage_event(
@@ -529,36 +536,56 @@ def run_layer2_feed(
                     stage="brief",
                     status="brief_selected",
                 )
-                try:
-                    active_brief_provider = CachedTelemetryLLMProvider(
-                        scoring_provider,
-                        conn=conn,
-                        feed_run_id=active_feed_run_id,
-                        group_id=group.group_id,
-                        stage="brief",
-                        timeout_seconds=_optional_int(
-                            cfg.get(
-                                "brief_timeout_seconds",
-                                cfg.get("scoring_timeout_seconds"),
-                            )
-                        ),
+            conn.commit()
+            if brief_provider_factory is not None:
+                active_brief_provider_factory = brief_provider_factory
+            elif provider is not None:
+                active_brief_provider_factory = lambda: scoring_provider
+            elif scoring_provider_factory is not None:
+                active_brief_provider_factory = scoring_provider_factory
+            else:
+                active_brief_provider_factory = lambda: KimiProvider(
+                    model=str(cfg.get("scoring_model") or DEFAULT_KIMI_SCORING_MODEL)
+                )
+            brief_concurrency = _active_brief_concurrency(
+                provider_injected=provider is not None,
+                factory_injected=brief_provider_factory is not None,
+                cfg=cfg,
+            )
+            brief_worker_slots: list[dict[str, Any] | None] = [None] * len(
+                selected_for_brief
+            )
+            if brief_concurrency > 1:
+                with ThreadPoolExecutor(max_workers=brief_concurrency) as executor:
+                    futures = {
+                        executor.submit(
+                            _brief_group_worker,
+                            db_path,
+                            active_feed_run_id,
+                            row,
+                            cfg,
+                            active_brief_provider_factory,
+                        ): index
+                        for index, row in enumerate(selected_for_brief)
+                    }
+                    for future in as_completed(futures):
+                        index = futures[future]
+                        result = future.result()
+                        brief_worker_slots[index] = result
+            else:
+                for index, row in enumerate(selected_for_brief):
+                    result = _brief_group_worker(
+                        db_path,
+                        active_feed_run_id,
+                        row,
+                        cfg,
+                        active_brief_provider_factory,
                     )
-                    briefs.extend(
-                        generate_deepdive_briefs(
-                            conn,
-                            feed_run_id=active_feed_run_id,
-                            selected=[row],
-                            provider=active_brief_provider,
-                        )
-                    )
-                    record_stage_event(
-                        conn,
-                        feed_run_id=active_feed_run_id,
-                        group_id=group.group_id,
-                        stage="brief",
-                        status="brief_ok",
-                    )
-                except Exception as exc:
+                    brief_worker_slots[index] = result
+            for row, worker_result in zip(selected_for_brief, brief_worker_slots):
+                result = worker_result.get("result") if worker_result else None
+                if result is None:
+                    group = row["group"]
                     _update_feed_item_status(
                         conn,
                         feed_run_id=active_feed_run_id,
@@ -572,8 +599,25 @@ def run_layer2_feed(
                         group_id=group.group_id,
                         stage="brief",
                         status="brief_error",
-                        error=exc,
+                        error=(worker_result or {}).get(
+                            "error", "brief worker returned no result"
+                        ),
                     )
+                    continue
+                persist_deepdive_brief(
+                    conn,
+                    feed_run_id=active_feed_run_id,
+                    result=result,
+                )
+                record_stage_event(
+                    conn,
+                    feed_run_id=active_feed_run_id,
+                    group_id=result["group"].group_id,
+                    stage="brief",
+                    status="brief_ok",
+                )
+                briefs.append({"group": result["group"], "brief": result["brief"]})
+            conn.commit()
 
         reports = []
         if bool(cfg.get("enable_legacy_deepdive", False)):
@@ -872,6 +916,31 @@ def _active_scoring_concurrency(
     return max(1, int(cfg.get("scoring_concurrency", 5)))
 
 
+def _active_brief_concurrency(
+    *,
+    provider_injected: bool,
+    factory_injected: bool,
+    cfg: dict[str, Any],
+) -> int:
+    if provider_injected and not factory_injected:
+        return 1
+    return max(1, int(cfg.get("brief_concurrency", 4)))
+
+
+def _tool_family_limiters_from_config(cfg: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "github": BoundedSemaphore(
+            max(1, int(cfg.get("github_tool_concurrency", 5)))
+        ),
+        "homepage": BoundedSemaphore(
+            max(1, int(cfg.get("homepage_tool_concurrency", 4)))
+        ),
+        "web_search": BoundedSemaphore(
+            max(1, int(cfg.get("web_search_tool_concurrency", 2)))
+        ),
+    }
+
+
 def _investigator_limits_from_config(cfg: dict[str, Any]) -> InvestigatorLimits:
     return InvestigatorLimits(
         max_investigation_turns=int(cfg.get("max_investigation_turns", 3)),
@@ -892,15 +961,20 @@ def _investigator_limits_from_config(cfg: dict[str, Any]) -> InvestigatorLimits:
                 cfg.get("max_pages_per_candidate", 1),
             )
         ),
+        max_parallel_tool_calls_per_turn=int(
+            cfg.get("max_parallel_tool_calls_per_turn", 4)
+        ),
     )
 
 
 def _investigator_tools_for(
-    conn: sqlite3.Connection,
+    conn: sqlite3.Connection | None,
     *,
     decision_run_id: str,
     scoring_provider: Any,
     cfg: dict[str, Any],
+    connection_factory: Callable[[], sqlite3.Connection] | None = None,
+    family_limiters: dict[str, Any] | None = None,
 ) -> ScoringInvestigatorTools:
     scoring_web_search_timeout = _optional_int(cfg.get("web_search_timeout_seconds"))
     if scoring_web_search_timeout is not None and hasattr(scoring_provider, "timeout"):
@@ -912,6 +986,7 @@ def _investigator_tools_for(
     )
     return ScoringInvestigatorTools(
         conn,
+        connection_factory=connection_factory,
         decision_run_id=decision_run_id,
         readme_client=GitHubReadmeClient(),
         github_file_client=GitHubFileClient(),
@@ -923,6 +998,7 @@ def _investigator_tools_for(
             max_homepage_chars=int(cfg.get("max_homepage_chars", 6000)),
             max_web_results=int(cfg.get("max_web_results", 5)),
         ),
+        family_limiters=family_limiters,
     )
 
 
@@ -933,6 +1009,7 @@ def _score_group_worker(
     group: Any,
     cfg: dict[str, Any],
     scoring_provider_factory: Callable[[], Any],
+    family_limiters: dict[str, Any],
 ) -> dict[str, Any]:
     conn = sqlite3.connect(db_path, timeout=30)
     init_decision_db(conn)
@@ -952,10 +1029,12 @@ def _score_group_worker(
             groups=[group],
             provider=active_scoring_provider,
             tools=_investigator_tools_for(
-                conn,
+                None,
                 decision_run_id=decision_run_id,
                 scoring_provider=scoring_provider,
                 cfg=cfg,
+                connection_factory=lambda: sqlite3.connect(db_path, timeout=30),
+                family_limiters=family_limiters,
             ).available_tools(),
             limits=_investigator_limits_from_config(cfg),
         )[0]
@@ -983,6 +1062,40 @@ def _score_group_worker(
         conn.close()
 
 
+def _brief_group_worker(
+    db_path: Path,
+    feed_run_id: str,
+    row: dict[str, Any],
+    cfg: dict[str, Any],
+    brief_provider_factory: Callable[[], Any],
+) -> dict[str, Any]:
+    group = row["group"]
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = sqlite3.connect(db_path, timeout=30)
+        brief_provider = brief_provider_factory()
+        active_brief_provider = CachedTelemetryLLMProvider(
+            brief_provider,
+            conn=conn,
+            feed_run_id=feed_run_id,
+            group_id=group.group_id,
+            stage="brief",
+            timeout_seconds=_optional_int(
+                cfg.get("brief_timeout_seconds", cfg.get("scoring_timeout_seconds"))
+            ),
+        )
+        result = build_deepdive_brief(
+            row=row,
+            provider=active_brief_provider,
+        )
+        return {"result": result}
+    except Exception as exc:
+        return {"result": None, "error": str(exc)[:800]}
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run Layer 2 Kimi Feed")
     parser.add_argument("--decision-run-id", default=None)
@@ -1006,6 +1119,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--enable-kimi-web-search", action="store_true")
     parser.add_argument("--max-total-scoring-candidates", type=int, default=None)
     parser.add_argument("--scoring-concurrency", type=int, default=5)
+    parser.add_argument("--brief-concurrency", type=int, default=4)
+    parser.add_argument("--max-parallel-tool-calls-per-turn", type=int, default=4)
+    parser.add_argument("--github-tool-concurrency", type=int, default=5)
+    parser.add_argument("--homepage-tool-concurrency", type=int, default=4)
+    parser.add_argument("--web-search-tool-concurrency", type=int, default=2)
     parser.add_argument("--scout-timeout-seconds", type=int, default=None)
     parser.add_argument("--scoring-timeout-seconds", type=int, default=None)
     parser.add_argument("--deepdive-timeout-seconds", type=int, default=None)
@@ -1046,6 +1164,11 @@ def config_from_args(args: argparse.Namespace) -> dict[str, Any]:
         "enable_kimi_web_search": args.enable_kimi_web_search,
         "max_total_scoring_candidates": args.max_total_scoring_candidates,
         "scoring_concurrency": args.scoring_concurrency,
+        "brief_concurrency": args.brief_concurrency,
+        "max_parallel_tool_calls_per_turn": args.max_parallel_tool_calls_per_turn,
+        "github_tool_concurrency": args.github_tool_concurrency,
+        "homepage_tool_concurrency": args.homepage_tool_concurrency,
+        "web_search_tool_concurrency": args.web_search_tool_concurrency,
         "scout_timeout_seconds": args.scout_timeout_seconds,
         "scoring_timeout_seconds": args.scoring_timeout_seconds,
         "deepdive_timeout_seconds": args.deepdive_timeout_seconds,

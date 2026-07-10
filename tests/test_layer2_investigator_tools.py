@@ -1,7 +1,13 @@
 from __future__ import annotations
 
 import sqlite3
+import tempfile
+import threading
+import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from threading import BoundedSemaphore
 
 from pipeline.decision.schema import init_decision_db
 
@@ -123,6 +129,118 @@ class InvestigatorToolsTest(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
         self.assertEqual(len(result["rows"]), 3)
         self.assertEqual(result["rows"][0]["metric_name"], "stars_today")
+
+    def test_connection_factory_gives_parallel_tool_calls_thread_owned_connections(self) -> None:
+        from pipeline.decision.layer2_investigator_tools import (
+            ScoringInvestigatorTools,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "hero.sqlite"
+            conn = sqlite3.connect(db_path)
+            init_decision_db(conn)
+            conn.execute(
+                """
+                insert into evidence_rows(
+                  entity_id, canonical_entity, alias, source, event_at,
+                  relative_to_reference, metric_name, metric_value, family,
+                  rule_id, rule_version, signal_label, historical_safety,
+                  note, raw_url_or_ref, run_id
+                )
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "entity:repo",
+                    "owner/repo",
+                    None,
+                    "github",
+                    "2026-06-01T00:00:00Z",
+                    None,
+                    "stars_today",
+                    "100",
+                    "github",
+                    "rule",
+                    "v1",
+                    "GitHub momentum",
+                    "safe",
+                    "note",
+                    "https://github.com/owner/repo",
+                    "decision-run",
+                ),
+            )
+            conn.commit()
+            conn.close()
+
+            tools = ScoringInvestigatorTools(
+                connection_factory=lambda: sqlite3.connect(db_path, timeout=30),
+                decision_run_id="decision-run",
+            )
+            read_rows = tools.available_tools()["read_evidence_rows"]
+            with ThreadPoolExecutor(max_workers=3) as executor:
+                results = list(
+                    executor.map(
+                        read_rows,
+                        [{"entity_id": "entity:repo"} for _index in range(3)],
+                    )
+                )
+
+        self.assertEqual(
+            [result["status"] for result in results], ["ok", "ok", "ok"]
+        )
+        self.assertTrue(
+            all(
+                result["rows"][0]["metric_name"] == "stars_today"
+                for result in results
+            )
+        )
+
+    def test_external_family_limiter_bounds_parallel_github_fetches(self) -> None:
+        from pipeline.decision.layer2_investigator_tools import (
+            ScoringInvestigatorTools,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "hero.sqlite"
+            conn = sqlite3.connect(db_path)
+            init_decision_db(conn)
+            conn.close()
+            lock = threading.Lock()
+            active = 0
+            max_active = 0
+
+            class SlowGitHubFileClient:
+                def get_file_text(self, repo_key: str, path: str) -> str:
+                    nonlocal active, max_active
+                    with lock:
+                        active += 1
+                        max_active = max(max_active, active)
+                    try:
+                        time.sleep(0.03)
+                        return f"{repo_key}:{path}"
+                    finally:
+                        with lock:
+                            active -= 1
+
+            tools = ScoringInvestigatorTools(
+                connection_factory=lambda: sqlite3.connect(db_path, timeout=30),
+                decision_run_id="decision-run",
+                github_file_client=SlowGitHubFileClient(),
+                family_limiters={"github": BoundedSemaphore(1)},
+            )
+            fetch = tools.available_tools()["fetch_github_file"]
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                results = list(
+                    executor.map(
+                        fetch,
+                        [
+                            {"repo_key": "owner/repo", "path": "package.json"},
+                            {"repo_key": "owner/repo", "path": "pyproject.toml"},
+                        ],
+                    )
+                )
+
+        self.assertEqual([result["status"] for result in results], ["ok", "ok"])
+        self.assertEqual(max_active, 1)
 
     def test_fetch_github_readme_uses_existing_cache(self) -> None:
         from pipeline.decision.layer2_investigator_tools import (

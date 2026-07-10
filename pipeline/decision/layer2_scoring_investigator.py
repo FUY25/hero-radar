@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -130,6 +131,16 @@ class InvestigatorLimits:
     max_github_file_calls_per_candidate: int = 3
     max_homepage_fetches_per_candidate: int = 1
     max_tool_result_chars: int = 6000
+    max_parallel_tool_calls_per_turn: int = 4
+
+
+@dataclass(frozen=True)
+class _ReservedToolRequest:
+    index: int
+    name: str
+    arguments: dict[str, Any]
+    family: str
+    tool: ToolFn
 
 
 def aggregate_investigator_score(
@@ -273,77 +284,108 @@ def generate_deepdive_briefs(
 ) -> list[dict[str, Any]]:
     briefs: list[dict[str, Any]] = []
     for row in selected:
-        group = row["group"]
-        payload = {
-            "group_id": group.group_id,
-            "candidate": group.context,
-            "candidate_identity": _candidate_identity(group),
-            "score": {
-                key: row.get(key)
-                for key in [
-                    "object_type",
-                    "is_product_or_repo",
-                    "axes",
-                    "l2_score",
-                    "supporting_evidence",
-                    "negative_evidence",
-                    "known_gaps",
-                    "primary_reason",
-                    "rationale_short",
-                    "topic_tags",
-                    "caveats",
-                ]
-            },
-            "investigation_trace": row.get("trace") or [],
-            "tool_trace": row.get("tool_trace") or [],
-            "schema": _brief_schema(),
-        }
-        response = provider.complete_json(
-            task="layer2_scoring_investigator_brief",
+        result = build_deepdive_brief(
+            row=row,
+            provider=provider,
             prompt_version=prompt_version,
-            input_payload=payload,
-            system_prompt=BRIEF_SYSTEM_PROMPT,
         )
-        brief = normalize_deepdive_brief(response)
-        cache_payload = {**payload, "brief": brief}
-        cache_key = _cache_key(
+        persist_deepdive_brief(conn, feed_run_id=feed_run_id, result=result)
+        briefs.append({"group": result["group"], "brief": result["brief"]})
+    conn.commit()
+    return briefs
+
+
+def build_deepdive_brief(
+    *,
+    row: dict[str, Any],
+    provider: Any,
+    prompt_version: str = DEFAULT_BRIEF_PROMPT_VERSION,
+) -> dict[str, Any]:
+    group = row["group"]
+    payload = {
+        "group_id": group.group_id,
+        "candidate": group.context,
+        "candidate_identity": _candidate_identity(group),
+        "score": {
+            key: row.get(key)
+            for key in [
+                "object_type",
+                "is_product_or_repo",
+                "axes",
+                "l2_score",
+                "supporting_evidence",
+                "negative_evidence",
+                "known_gaps",
+                "primary_reason",
+                "rationale_short",
+                "topic_tags",
+                "caveats",
+            ]
+        },
+        "investigation_trace": row.get("trace") or [],
+        "tool_trace": row.get("tool_trace") or [],
+        "schema": _brief_schema(),
+    }
+    response = provider.complete_json(
+        task="layer2_scoring_investigator_brief",
+        prompt_version=prompt_version,
+        input_payload=payload,
+        system_prompt=BRIEF_SYSTEM_PROMPT,
+    )
+    brief = normalize_deepdive_brief(response)
+    cache_payload = {**payload, "brief": brief}
+    return {
+        "group": group,
+        "brief": brief,
+        "provider": provider.provider_name,
+        "model": provider.model,
+        "prompt_version": prompt_version,
+        "cache_key": _cache_key(
             provider.provider_name,
             provider.model,
             prompt_version,
             cache_payload,
+        ),
+    }
+
+
+def persist_deepdive_brief(
+    conn: sqlite3.Connection,
+    *,
+    feed_run_id: str,
+    result: dict[str, Any],
+) -> None:
+    group = result["group"]
+    brief = result["brief"]
+    conn.execute(
+        """
+        insert or replace into l2_deepdive_briefs(
+          feed_run_id, group_id, status, brief_json, language,
+          provider, model, prompt_version, cache_key, created_at
         )
-        conn.execute(
-            """
-            insert or replace into l2_deepdive_briefs(
-              feed_run_id, group_id, status, brief_json, language,
-              provider, model, prompt_version, cache_key, created_at
-            )
-            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                feed_run_id,
-                group.group_id,
-                "ok",
-                to_json(brief),
-                "zh",
-                provider.provider_name,
-                provider.model,
-                prompt_version,
-                cache_key,
-                utc_now(),
-            ),
-        )
-        conn.execute(
-            """
-            update l2_feed_items
-            set deepdive_status = ?
-            where feed_run_id = ? and group_id = ?
-            """,
-            ("briefed", feed_run_id, group.group_id),
-        )
-        briefs.append({"group": group, "brief": brief})
-    conn.commit()
-    return briefs
+        values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            feed_run_id,
+            group.group_id,
+            "ok",
+            to_json(brief),
+            "zh",
+            result["provider"],
+            result["model"],
+            result["prompt_version"],
+            result["cache_key"],
+            utc_now(),
+        ),
+    )
+    conn.execute(
+        """
+        update l2_feed_items
+        set deepdive_status = ?
+        where feed_run_id = ? and group_id = ?
+        """,
+        ("briefed", feed_run_id, group.group_id),
+    )
 
 
 def normalize_deepdive_brief(response: dict[str, Any]) -> dict[str, Any]:
@@ -432,15 +474,14 @@ def _score_one_group(
             requests = response.get("tool_requests")
             if not isinstance(requests, list):
                 requests = []
-            for request in requests:
-                trace_row, total_tool_calls = _run_tool_request(
-                    request if isinstance(request, dict) else {},
-                    tools=tools,
-                    limits=limits,
-                    tool_counts=tool_counts,
-                    total_tool_calls=total_tool_calls,
-                )
-                tool_trace.append(trace_row)
+            turn_tool_trace, total_tool_calls = _run_tool_requests(
+                [request if isinstance(request, dict) else {} for request in requests],
+                tools=tools,
+                limits=limits,
+                tool_counts=tool_counts,
+                total_tool_calls=total_tool_calls,
+            )
+            tool_trace.extend(turn_tool_trace)
             state["tool_trace"] = tool_trace
 
         if final_response is None:
@@ -646,37 +687,108 @@ def _run_tool_request(
     tool_counts: dict[str, int],
     total_tool_calls: int,
 ) -> tuple[dict[str, Any], int]:
-    name = str(request.get("name") or "")
-    arguments = request.get("arguments") if isinstance(request.get("arguments"), dict) else {}
-    family = _tool_family(name)
-    if total_tool_calls >= max(0, limits.max_tool_calls_per_candidate):
-        return _trace_row(name, arguments, family, "budget_exceeded", {}), total_tool_calls
-    if not _within_family_budget(tool_counts, family, limits):
-        return _trace_row(name, arguments, family, "budget_exceeded", {}), total_tool_calls
-    if name not in tools:
-        return _trace_row(name, arguments, family, "unavailable", {}), total_tool_calls
-    total_tool_calls += 1
-    tool_counts[family] = tool_counts.get(family, 0) + 1
-    try:
-        result = tools[name](arguments)
-    except Exception as exc:
-        return (
-            {
-                **_trace_row(name, arguments, family, "error", {}),
-                "error_type": type(exc).__name__,
-                "error": sanitize_text(exc),
-            },
-            total_tool_calls,
+    rows, updated_total = _run_tool_requests(
+        [request],
+        tools=tools,
+        limits=limits,
+        tool_counts=tool_counts,
+        total_tool_calls=total_tool_calls,
+        max_workers=1,
+    )
+    return rows[0], updated_total
+
+
+def _run_tool_requests(
+    requests: list[dict[str, Any]],
+    *,
+    tools: dict[str, ToolFn],
+    limits: InvestigatorLimits,
+    tool_counts: dict[str, int],
+    total_tool_calls: int,
+    max_workers: int | None = None,
+) -> tuple[list[dict[str, Any]], int]:
+    """Reserve budgets in request order, execute accepted calls concurrently."""
+    trace_rows: list[dict[str, Any] | None] = [None] * len(requests)
+    reserved: list[_ReservedToolRequest] = []
+
+    for index, request in enumerate(requests):
+        name = str(request.get("name") or "")
+        arguments = (
+            request.get("arguments")
+            if isinstance(request.get("arguments"), dict)
+            else {}
         )
-    return (
-        _trace_row(
-            name,
-            arguments,
-            family,
-            str(result.get("status") or "ok") if isinstance(result, dict) else "ok",
-            _trim_result(result if isinstance(result, dict) else {"result": result}, limits.max_tool_result_chars),
+        family = _tool_family(name)
+        if total_tool_calls >= max(0, limits.max_tool_calls_per_candidate):
+            trace_rows[index] = _trace_row(
+                name, arguments, family, "budget_exceeded", {}
+            )
+            continue
+        if not _within_family_budget(tool_counts, family, limits):
+            trace_rows[index] = _trace_row(
+                name, arguments, family, "budget_exceeded", {}
+            )
+            continue
+        if name not in tools:
+            trace_rows[index] = _trace_row(name, arguments, family, "unavailable", {})
+            continue
+        total_tool_calls += 1
+        tool_counts[family] = tool_counts.get(family, 0) + 1
+        reserved.append(
+            _ReservedToolRequest(
+                index=index,
+                name=name,
+                arguments=arguments,
+                family=family,
+                tool=tools[name],
+            )
+        )
+
+    if reserved:
+        worker_count = max_workers
+        if worker_count is None:
+            worker_count = limits.max_parallel_tool_calls_per_turn
+        worker_count = min(len(reserved), max(1, int(worker_count)))
+        if worker_count == 1:
+            completed = [_execute_reserved_tool_request(plan, limits) for plan in reserved]
+        else:
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                completed = list(
+                    executor.map(
+                        lambda plan: _execute_reserved_tool_request(plan, limits),
+                        reserved,
+                    )
+                )
+        for plan, trace_row in zip(reserved, completed):
+            trace_rows[plan.index] = trace_row
+
+    return [row for row in trace_rows if row is not None], total_tool_calls
+
+
+def _execute_reserved_tool_request(
+    request: _ReservedToolRequest,
+    limits: InvestigatorLimits,
+) -> dict[str, Any]:
+    name = request.name
+    arguments = request.arguments
+    family = request.family
+    try:
+        result = request.tool(arguments)
+    except Exception as exc:
+        return {
+            **_trace_row(name, arguments, family, "error", {}),
+            "error_type": type(exc).__name__,
+            "error": sanitize_text(exc),
+        }
+    return _trace_row(
+        name,
+        arguments,
+        family,
+        str(result.get("status") or "ok") if isinstance(result, dict) else "ok",
+        _trim_result(
+            result if isinstance(result, dict) else {"result": result},
+            limits.max_tool_result_chars,
         ),
-        total_tool_calls,
     )
 
 
@@ -864,6 +976,7 @@ def _limits_payload(limits: InvestigatorLimits) -> dict[str, int]:
         "max_web_search_calls_per_candidate": limits.max_web_search_calls_per_candidate,
         "max_github_file_calls_per_candidate": limits.max_github_file_calls_per_candidate,
         "max_homepage_fetches_per_candidate": limits.max_homepage_fetches_per_candidate,
+        "max_parallel_tool_calls_per_turn": limits.max_parallel_tool_calls_per_turn,
     }
 
 
