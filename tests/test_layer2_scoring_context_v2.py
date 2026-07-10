@@ -132,6 +132,33 @@ class Layer2ScoringContextV2Test(unittest.TestCase):
         self.assertEqual(provider.calls[1]["task"], "layer2_scoring_investigator_repair")
         self.assertEqual(result["supporting_claims"][0]["evidence_refs"], ["evidence:42"])
 
+    def test_v2_repair_receives_the_exact_primary_reason_character_limit(self):
+        from pipeline.decision.layer2_scoring_investigator import score_with_investigator
+
+        invalid = attributable_final()
+        invalid["score"]["primary_reason"] = "x" * 81
+        provider = FakeLLMProvider([invalid, attributable_final()])
+        conn = sqlite3.connect(":memory:")
+        self.addCleanup(conn.close)
+        init_decision_db(conn)
+
+        score_with_investigator(
+            conn,
+            feed_run_id="l2-run",
+            groups=[make_group()],
+            provider=provider,
+            tools={},
+            prompt_version="layer2-scoring-investigator-v2",
+        )
+
+        self.assertEqual(
+            provider.calls[1]["input_payload"]["validation_error"],
+            (
+                "scoring v2 primary_reason must be a non-empty string "
+                "of at most 80 characters"
+            ),
+        )
+
     def test_v2_rejects_unknown_claim_fields_and_repairs_once(self):
         from pipeline.decision.layer2_scoring_investigator import score_with_investigator
 

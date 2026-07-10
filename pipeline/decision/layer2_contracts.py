@@ -212,7 +212,10 @@ def _require_exact_keys(value: dict[str, Any], expected: set[str], field: str) -
 
 def _require_bounded_string(value: Any, field: str, max_chars: int) -> str:
     if not isinstance(value, str) or not value or len(value) > max_chars:
-        raise ValueError(f"scoring v2 {field} must be a non-empty bounded string")
+        raise ValueError(
+            f"scoring v2 {field} must be a non-empty string "
+            f"of at most {max_chars} characters"
+        )
     return value
 
 
