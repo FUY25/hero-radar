@@ -7,7 +7,9 @@ import hashlib
 import json
 import os
 import sqlite3
+import threading
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -60,6 +62,27 @@ def _stage_completed(logger: JsonlRunLogger, stage: str, started: float, **field
 def _stage_skipped(logger: JsonlRunLogger, stage: str, **fields: Any) -> None:
     logger.event("decision_stage_skipped", stage=stage, **fields)
 CLASSIFIER_EVIDENCE_SOURCES = {"hn_llm_classifier", "x_tweets", "npm_registry"}
+
+
+class _ConcurrencyLimitedProvider:
+    """Share one bounded call budget across concurrent classifier branches."""
+
+    def __init__(self, provider: Any, semaphore: threading.BoundedSemaphore) -> None:
+        self._provider = provider
+        self._semaphore = semaphore
+
+    def complete_json(self, **kwargs: Any) -> dict[str, Any]:
+        with self._semaphore:
+            return self._provider.complete_json(**kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._provider, name)
+
+
+def _decision_branch_connection(db_path: Path) -> sqlite3.Connection:
+    conn = sqlite3.connect(db_path, timeout=60)
+    conn.execute("pragma busy_timeout = 60000")
+    return conn
 
 
 def read_latest_items(conn: sqlite3.Connection) -> list[dict[str, Any]]:
@@ -553,6 +576,8 @@ def run_decision(
     x_llm_provider: Any | None = None,
     x_classifier_limit: int = 0,
     llm_concurrency: int = 1,
+    io_concurrency: int = 5,
+    io_rate_limit_per_second: float = 2.0,
     x_stage1_batch_size: int = 100,
     x_credible_handles: set[str] | None = None,
     npm_client: Any | None = None,
@@ -566,6 +591,12 @@ def run_decision(
     enrich_readme_limit: int = 0,
     log_path: Path | None = None,
 ) -> dict[str, int | str]:
+    if llm_concurrency <= 0:
+        raise ValueError("llm_concurrency must be positive")
+    if io_concurrency <= 0:
+        raise ValueError("io_concurrency must be positive")
+    if io_rate_limit_per_second < 0:
+        raise ValueError("io_rate_limit_per_second cannot be negative")
     rules = load_rules()
     logger = JsonlRunLogger(log_path, run_id=run_id)
     logger.event(
@@ -651,31 +682,58 @@ def run_decision(
             persist_pending_backfill_jobs(conn, pass1.backfill_jobs)
             _stage_completed(logger, "persist_backfill_shortlist", started, entities=len(referenced))
 
-        if github_client is not None and pass1.backfill_jobs:
+        # External enrichment is a DAG after pass 1. Each branch owns a SQLite
+        # connection; WAL/busy_timeout let SQLite serialize the short writes while
+        # network/LLM waits overlap. X stage 2 remains dependent on X stage 1.
+        conn.execute("pragma journal_mode = WAL").fetchone()
+        conn.execute("pragma busy_timeout = 60000")
+        provider_wrappers: dict[int, Any] = {}
+        provider_semaphore = threading.BoundedSemaphore(llm_concurrency)
+
+        def limited_provider(provider: Any | None) -> Any | None:
+            if provider is None:
+                return None
+            key = id(provider)
+            if key not in provider_wrappers:
+                provider_wrappers[key] = _ConcurrencyLimitedProvider(
+                    provider,
+                    provider_semaphore,
+                )
+            return provider_wrappers[key]
+
+        limited_hn_provider = limited_provider(hn_llm_provider)
+        limited_x_provider = limited_provider(x_llm_provider)
+        limited_resolver_provider = limited_provider(resolver_research_provider)
+        potential_item_ids, edge_item_ids = candidate_impact_item_ids(pass1, resolution)
+
+        def github_branch() -> dict[str, Any]:
             from pipeline.decision.backfill import run_backfill_jobs
 
+            branch_conn = _decision_branch_connection(db_path)
             started = _stage_started(logger, "github_backfill", jobs=len(pass1.backfill_jobs))
-            extra_github_signals = run_backfill_jobs(
-                conn,
-                run_id=run_id,
-                github_client=github_client,
-                now=now,
-            ).get("signals", {})
-            _stage_completed(logger, "github_backfill", started, signals=len(extra_github_signals))
-        else:
-            _stage_skipped(
-                logger,
-                "github_backfill",
-                reason="client_or_jobs_missing",
-                client_enabled=github_client is not None,
-                jobs=len(pass1.backfill_jobs),
-            )
+            try:
+                result = run_backfill_jobs(
+                    branch_conn,
+                    run_id=run_id,
+                    github_client=github_client,
+                    now=now,
+                    concurrency=io_concurrency,
+                    rate_limit_per_second=io_rate_limit_per_second,
+                )
+                _stage_completed(
+                    logger,
+                    "github_backfill",
+                    started,
+                    signals=len(result.get("signals") or {}),
+                )
+                return result
+            finally:
+                branch_conn.close()
 
-        hn_summary: dict[str, Any] = {"classified": 0}
-        if hn_llm_provider is not None and hn_classifier_limit > 0:
+        def hn_branch() -> dict[str, Any]:
             from pipeline.decision.hn_classifier import run_hn_classifier
 
-            potential_item_ids, edge_item_ids = candidate_impact_item_ids(pass1, resolution)
+            branch_conn = _decision_branch_connection(db_path)
             started = _stage_started(
                 logger,
                 "hn_classifier",
@@ -683,118 +741,104 @@ def run_decision(
                 potential_item_ids=len(potential_item_ids),
                 edge_item_ids=len(edge_item_ids),
             )
-            hn_summary = run_hn_classifier(
-                conn,
-                run_id=run_id,
-                provider=hn_llm_provider,
-                limit=hn_classifier_limit,
-                now=now,
-                llm_concurrency=llm_concurrency,
-                potential_item_ids=potential_item_ids,
-                edge_item_ids=edge_item_ids,
-            )
-            _stage_completed(
-                logger,
-                "hn_classifier",
-                started,
-                classified=int(hn_summary.get("classified") or 0),
-            )
-        else:
-            _stage_skipped(
-                logger,
-                "hn_classifier",
-                reason="limit_or_provider_disabled",
-                limit=hn_classifier_limit,
-                provider_enabled=hn_llm_provider is not None,
-            )
+            try:
+                result = run_hn_classifier(
+                    branch_conn,
+                    run_id=run_id,
+                    provider=limited_hn_provider,
+                    limit=hn_classifier_limit,
+                    now=now,
+                    llm_concurrency=llm_concurrency,
+                    potential_item_ids=potential_item_ids,
+                    edge_item_ids=edge_item_ids,
+                )
+                _stage_completed(
+                    logger,
+                    "hn_classifier",
+                    started,
+                    classified=int(result.get("classified") or 0),
+                )
+                return result
+            finally:
+                branch_conn.close()
 
-        x_stage1_summary: dict[str, Any] = {"mentions": 0}
-        x_stage2_summary: dict[str, Any] = {"tiered": 0}
-        if x_llm_provider is not None and x_classifier_limit > 0:
+        def x_branch() -> tuple[dict[str, Any], dict[str, Any]]:
             from pipeline.decision.x_classifier import run_x_stage1, run_x_stage2
 
-            started = _stage_started(
-                logger,
-                "x_stage1",
-                limit=x_classifier_limit,
-                batch_size=x_stage1_batch_size,
-                credible_handles=len(x_credible_handles or set()),
-            )
-            x_stage1_summary = run_x_stage1(
-                conn,
-                run_id=run_id,
-                provider=x_llm_provider,
-                credible_handles=x_credible_handles or set(),
-                now=now,
-                limit=x_classifier_limit,
-                batch_size=x_stage1_batch_size,
-            )
-            _stage_completed(
-                logger,
-                "x_stage1",
-                started,
-                mentions=int(x_stage1_summary.get("mentions") or 0),
-            )
-            started = _stage_started(logger, "x_stage2", limit=x_classifier_limit)
-            x_stage2_summary = run_x_stage2(
-                conn,
-                run_id=run_id,
-                provider=x_llm_provider,
-                now=now,
-                limit=x_classifier_limit,
-            )
-            _stage_completed(
-                logger,
-                "x_stage2",
-                started,
-                tiered=int(x_stage2_summary.get("tiered") or 0),
-            )
-        else:
-            _stage_skipped(
-                logger,
-                "x_classifier",
-                reason="limit_or_provider_disabled",
-                limit=x_classifier_limit,
-                provider_enabled=x_llm_provider is not None,
-            )
+            branch_conn = _decision_branch_connection(db_path)
+            try:
+                started = _stage_started(
+                    logger,
+                    "x_stage1",
+                    limit=x_classifier_limit,
+                    batch_size=x_stage1_batch_size,
+                    credible_handles=len(x_credible_handles or set()),
+                )
+                stage1 = run_x_stage1(
+                    branch_conn,
+                    run_id=run_id,
+                    provider=limited_x_provider,
+                    credible_handles=x_credible_handles or set(),
+                    now=now,
+                    limit=x_classifier_limit,
+                    batch_size=x_stage1_batch_size,
+                    llm_concurrency=llm_concurrency,
+                )
+                _stage_completed(
+                    logger,
+                    "x_stage1",
+                    started,
+                    mentions=int(stage1.get("mentions") or 0),
+                )
+                started = _stage_started(logger, "x_stage2", limit=x_classifier_limit)
+                stage2 = run_x_stage2(
+                    branch_conn,
+                    run_id=run_id,
+                    provider=limited_x_provider,
+                    now=now,
+                    limit=x_classifier_limit,
+                    llm_concurrency=llm_concurrency,
+                )
+                _stage_completed(
+                    logger,
+                    "x_stage2",
+                    started,
+                    tiered=int(stage2.get("tiered") or 0),
+                )
+                return stage1, stage2
+            finally:
+                branch_conn.close()
 
-        npm_summary: dict[str, Any] = {"completed": 0, "failed": 0}
-        if npm_client is not None and npm_backfill_limit > 0:
+        def npm_branch() -> dict[str, Any]:
             from pipeline.decision.npm_backfill import run_npm_backfill
 
+            branch_conn = _decision_branch_connection(db_path)
             started = _stage_started(logger, "npm_backfill", limit=npm_backfill_limit)
-            npm_summary = run_npm_backfill(
-                conn,
-                run_id=run_id,
-                client=npm_client,
-                now=now,
-                limit=npm_backfill_limit,
-            )
-            _stage_completed(
-                logger,
-                "npm_backfill",
-                started,
-                completed=int(npm_summary.get("completed") or 0),
-                failed=int(npm_summary.get("failed") or 0),
-            )
-        else:
-            _stage_skipped(
-                logger,
-                "npm_backfill",
-                reason="limit_or_client_disabled",
-                limit=npm_backfill_limit,
-                client_enabled=npm_client is not None,
-            )
+            try:
+                result = run_npm_backfill(
+                    branch_conn,
+                    run_id=run_id,
+                    client=npm_client,
+                    now=now,
+                    limit=npm_backfill_limit,
+                    concurrency=io_concurrency,
+                    rate_limit_per_second=io_rate_limit_per_second,
+                )
+                _stage_completed(
+                    logger,
+                    "npm_backfill",
+                    started,
+                    completed=int(result.get("completed") or 0),
+                    failed=int(result.get("failed") or 0),
+                )
+                return result
+            finally:
+                branch_conn.close()
 
-        resolver_summary: dict[str, Any] = {
-            "enriched": 0,
-            "aliases": 0,
-            "proposals": 0,
-            "researched": 0,
-        }
-        if hn_summary.get("classified") or x_stage2_summary.get("tiered"):
+        def resolver_branch() -> dict[str, Any]:
             from pipeline.decision.resolver import enrich_classifier_candidates
 
+            branch_conn = _decision_branch_connection(db_path)
             started = _stage_started(
                 logger,
                 "classifier_resolver",
@@ -802,34 +846,119 @@ def run_decision(
                 research_limit=resolver_research_limit,
                 research_rounds=resolver_research_rounds,
             )
-            resolver_summary = enrich_classifier_candidates(
-                conn,
-                run_id=run_id,
-                search_client=resolver_search_client,
-                max_searches_per_candidate=resolver_search_limit,
-                research_provider=(
-                    resolver_research_provider if resolver_research_limit > 0 else None
-                ),
-                max_research_rounds=resolver_research_rounds,
-                now=now,
-            )
-            _stage_completed(
-                logger,
-                "classifier_resolver",
-                started,
-                enriched=int(resolver_summary.get("enriched") or 0),
-                aliases=int(resolver_summary.get("aliases") or 0),
-                proposals=int(resolver_summary.get("proposals") or 0),
-                researched=int(resolver_summary.get("researched") or 0),
-            )
-        else:
-            _stage_skipped(
-                logger,
-                "classifier_resolver",
-                reason="no_classifier_output",
-                hn_classified=int(hn_summary.get("classified") or 0),
-                x_tiered=int(x_stage2_summary.get("tiered") or 0),
-            )
+            try:
+                result = enrich_classifier_candidates(
+                    branch_conn,
+                    run_id=run_id,
+                    search_client=resolver_search_client,
+                    max_searches_per_candidate=resolver_search_limit,
+                    research_provider=(
+                        limited_resolver_provider if resolver_research_limit > 0 else None
+                    ),
+                    max_research_rounds=resolver_research_rounds,
+                    now=now,
+                    concurrency=io_concurrency,
+                    rate_limit_per_second=io_rate_limit_per_second,
+                )
+                for error in result.get("errors") or []:
+                    logger.event(
+                        "decision_candidate_failed",
+                        stage="classifier_resolver",
+                        **error,
+                    )
+                _stage_completed(
+                    logger,
+                    "classifier_resolver",
+                    started,
+                    enriched=int(result.get("enriched") or 0),
+                    aliases=int(result.get("aliases") or 0),
+                    proposals=int(result.get("proposals") or 0),
+                    researched=int(result.get("researched") or 0),
+                    failed=int(result.get("failed") or 0),
+                )
+                return result
+            finally:
+                branch_conn.close()
+
+        hn_summary: dict[str, Any] = {"classified": 0}
+        x_stage1_summary: dict[str, Any] = {"mentions": 0}
+        x_stage2_summary: dict[str, Any] = {"tiered": 0}
+        npm_summary: dict[str, Any] = {"completed": 0, "failed": 0}
+        resolver_summary: dict[str, Any] = {
+            "enriched": 0,
+            "aliases": 0,
+            "proposals": 0,
+            "researched": 0,
+            "failed": 0,
+            "errors": [],
+        }
+        futures: dict[str, Future[Any]] = {}
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            if github_client is not None and pass1.backfill_jobs:
+                futures["github"] = executor.submit(github_branch)
+            else:
+                _stage_skipped(
+                    logger,
+                    "github_backfill",
+                    reason="client_or_jobs_missing",
+                    client_enabled=github_client is not None,
+                    jobs=len(pass1.backfill_jobs),
+                )
+            if limited_hn_provider is not None and hn_classifier_limit > 0:
+                futures["hn"] = executor.submit(hn_branch)
+            else:
+                _stage_skipped(
+                    logger,
+                    "hn_classifier",
+                    reason="limit_or_provider_disabled",
+                    limit=hn_classifier_limit,
+                    provider_enabled=hn_llm_provider is not None,
+                )
+            if limited_x_provider is not None and x_classifier_limit > 0:
+                futures["x"] = executor.submit(x_branch)
+            else:
+                _stage_skipped(
+                    logger,
+                    "x_classifier",
+                    reason="limit_or_provider_disabled",
+                    limit=x_classifier_limit,
+                    provider_enabled=x_llm_provider is not None,
+                )
+            if npm_client is not None and npm_backfill_limit > 0:
+                futures["npm"] = executor.submit(npm_branch)
+            else:
+                _stage_skipped(
+                    logger,
+                    "npm_backfill",
+                    reason="limit_or_client_disabled",
+                    limit=npm_backfill_limit,
+                    client_enabled=npm_client is not None,
+                )
+
+            if "hn" in futures:
+                hn_summary = futures["hn"].result()
+            if "x" in futures:
+                x_stage1_summary, x_stage2_summary = futures["x"].result()
+
+            resolver_future: Future[Any] | None = None
+            if hn_summary.get("classified") or x_stage2_summary.get("tiered"):
+                resolver_future = executor.submit(resolver_branch)
+            else:
+                _stage_skipped(
+                    logger,
+                    "classifier_resolver",
+                    reason="no_classifier_output",
+                    hn_classified=int(hn_summary.get("classified") or 0),
+                    x_tiered=int(x_stage2_summary.get("tiered") or 0),
+                )
+
+            if "github" in futures:
+                github_summary = futures["github"].result()
+                extra_github_signals = github_summary.get("signals", {})
+            if "npm" in futures:
+                npm_summary = futures["npm"].result()
+            if resolver_future is not None:
+                resolver_summary = resolver_future.result()
 
         started = _stage_started(logger, "read_classifier_evidence")
         classifier_evidence = read_classifier_evidence(conn, run_id)
@@ -886,6 +1015,8 @@ def run_decision(
                 run_id=run_id,
                 client=readme_client,
                 limit=enrich_readme_limit,
+                concurrency=io_concurrency,
+                rate_limit_per_second=io_rate_limit_per_second,
             )
             _stage_completed(
                 logger,
@@ -906,7 +1037,23 @@ def run_decision(
         started = _stage_started(logger, "export_candidates", export=str(export_json_path))
         export_candidates(conn, run_id, export_json_path)
         _stage_completed(logger, "export_candidates", started, export=str(export_json_path))
-        finish_decision_run(conn, run_id=run_id, status="ok", note="done")
+        resolver_failed = int(resolver_summary.get("failed") or 0)
+        decision_status = "ok_with_errors" if resolver_failed else "ok"
+        finish_decision_run(
+            conn,
+            run_id=run_id,
+            status=decision_status,
+            note=(
+                to_json(
+                    {
+                        "resolver_failed": resolver_failed,
+                        "resolver_errors": resolver_summary.get("errors") or [],
+                    }
+                )
+                if resolver_failed
+                else "done"
+            ),
+        )
 
         summary: dict[str, int | str] = {
             "entities": len(referenced),
@@ -921,12 +1068,13 @@ def run_decision(
             "resolver_aliases": int(resolver_summary.get("aliases") or 0),
             "resolver_proposals": int(resolver_summary.get("proposals") or 0),
             "resolver_researched": int(resolver_summary.get("researched") or 0),
+            "resolver_failed": resolver_failed,
             "readme_fetched": int(readme_summary.get("fetched") or 0),
             "readme_cached": int(readme_summary.get("cached") or 0),
             "export": str(export_json_path),
         }
         summary.update(preflight_summary)
-        logger.event("decision_run_completed", ok=True, **summary)
+        logger.event("decision_run_completed", ok=True, status=decision_status, **summary)
         return summary
     except Exception as exc:
         logger.event("decision_run_failed", ok=False, error=type(exc).__name__, message=str(exc))
@@ -1019,6 +1167,10 @@ def run_from_args(
         x_llm_provider=llm_provider if x_limit > 0 else None,
         x_classifier_limit=x_limit,
         llm_concurrency=int(getattr(args, "llm_concurrency", 1) or 1),
+        io_concurrency=int(getattr(args, "io_concurrency", 5) or 5),
+        io_rate_limit_per_second=float(
+            getattr(args, "io_rate_limit_per_second", 2.0) or 0
+        ),
         x_stage1_batch_size=args.x_stage1_batch_size,
         x_credible_handles=parse_credible_handles(args.x_credible_handles),
         npm_client=npm_client_builder(args) if npm_backfill_limit > 0 else None,
@@ -1047,6 +1199,8 @@ def main() -> None:
     parser.add_argument("--classify-x-limit", type=int, default=0)
     parser.add_argument("--llm-model", default=None)
     parser.add_argument("--llm-concurrency", type=int, default=1)
+    parser.add_argument("--io-concurrency", type=int, default=5)
+    parser.add_argument("--io-rate-limit-per-second", type=float, default=2.0)
     parser.add_argument("--x-stage1-batch-size", type=int, default=100)
     parser.add_argument("--x-credible-handles", default="")
     parser.add_argument("--resolver-search-limit", type=int, default=0)

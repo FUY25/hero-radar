@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any
 
 from pipeline.decision.schema import utc_now
+from pipeline.decision.bounded_parallel import bounded_parallel_map
+from pipeline.decision.rate_limit import RateLimitedClient
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -224,7 +226,11 @@ def run_npm_backfill(
     client: Any,
     now: str,
     limit: int,
+    concurrency: int = 1,
+    rate_limit_per_second: float = 0,
 ) -> dict[str, Any]:
+    if concurrency <= 0:
+        raise ValueError("concurrency must be positive")
     if limit <= 0:
         return {"completed": 0, "failed": 0, "signals": {}}
 
@@ -238,24 +244,71 @@ def run_npm_backfill(
         """,
         (run_id, int(limit)),
     ).fetchall()
-    completed = 0
-    failed = 0
-    signals: dict[str, dict[str, float | str]] = {}
-
+    work: list[dict[str, Any]] = []
+    limited_client = RateLimitedClient(client, starts_per_second=rate_limit_per_second)
     for job_id, entity_id, reason in jobs:
         try:
             package = package_from_reason(str(reason))
-            canonical_entity = entity_label(conn, str(entity_id))
+        except Exception as exc:
+            work.append({"job_id": job_id, "entity_id": str(entity_id), "error": exc})
+            continue
+        work.append(
+            {
+                "job_id": job_id,
+                "entity_id": str(entity_id),
+                "package": package,
+                "canonical_entity": entity_label(conn, str(entity_id)),
+                "error": None,
+            }
+        )
+
+    def collect(job: dict[str, Any]) -> dict[str, Any]:
+        if job.get("error") is not None:
+            return job
+        try:
+            package = job["package"]
             package_url = npm_package_url(package)
-            metadata = client.package_metadata(package)
-            daily_downloads = download_count(client.downloads(package, "last-day"))
-            weekly_downloads = optional_weekly_downloads(client, package)
+            metadata = limited_client.package_metadata(package)
+            daily_downloads = download_count(limited_client.downloads(package, "last-day"))
+            weekly_downloads = optional_weekly_downloads(limited_client, package)
             repository_url = repository_url_from_metadata(metadata if isinstance(metadata, dict) else {})
             github_key = github_key_from_repository(repository_url)
+            return {
+                **job,
+                "package_url": package_url,
+                "daily_downloads": daily_downloads,
+                "weekly_downloads": weekly_downloads,
+                "repository_url": repository_url,
+                "github_key": github_key,
+            }
+        except Exception as exc:
+            return {**job, "error": exc}
+
+    results = bounded_parallel_map(work, collect, concurrency=concurrency)
+    completed = 0
+    failed = 0
+    signals: dict[str, dict[str, float | str]] = {}
+    for result in results:
+        if result.get("error") is not None:
+            failed += 1
+            conn.execute(
+                "update backfill_jobs set status = 'failed', completed_at = ?, result_ref = ? where id = ?",
+                (now, str(result["error"])[:500], result["job_id"]),
+            )
+            conn.commit()
+            continue
+        try:
+            package = result["package"]
+            canonical_entity = result["canonical_entity"]
+            package_url = result["package_url"]
+            daily_downloads = result["daily_downloads"]
+            weekly_downloads = result["weekly_downloads"]
+            repository_url = result["repository_url"]
+            github_key = result["github_key"]
 
             insert_npm_evidence(
                 conn,
-                entity_id=str(entity_id),
+                entity_id=result["entity_id"],
                 canonical_entity=canonical_entity,
                 package=package,
                 metric_name="daily_downloads",
@@ -270,7 +323,7 @@ def run_npm_backfill(
             if weekly_downloads is not None:
                 insert_npm_evidence(
                     conn,
-                    entity_id=str(entity_id),
+                    entity_id=result["entity_id"],
                     canonical_entity=canonical_entity,
                     package=package,
                     metric_name="downloads_7d",
@@ -285,7 +338,7 @@ def run_npm_backfill(
             if github_key:
                 insert_npm_evidence(
                     conn,
-                    entity_id=str(entity_id),
+                    entity_id=result["entity_id"],
                     canonical_entity=canonical_entity,
                     package=package,
                     metric_name="npm_repository_link",
@@ -298,7 +351,7 @@ def run_npm_backfill(
                 )
                 insert_repository_alias(
                     conn,
-                    entity_id=str(entity_id),
+                    entity_id=result["entity_id"],
                     package=package,
                     github_key=github_key,
                     now=now,
@@ -307,16 +360,16 @@ def run_npm_backfill(
 
             conn.execute(
                 "update backfill_jobs set status = 'completed', completed_at = ?, result_ref = ? where id = ?",
-                (now, package_url, job_id),
+                (now, package_url, result["job_id"]),
             )
-            signals[str(entity_id)] = entity_signals
+            signals[result["entity_id"]] = entity_signals
             completed += 1
             conn.commit()
         except Exception as exc:
             failed += 1
             conn.execute(
                 "update backfill_jobs set status = 'failed', completed_at = ?, result_ref = ? where id = ?",
-                (now, str(exc)[:500], job_id),
+                (now, str(exc)[:500], result["job_id"]),
             )
             conn.commit()
 

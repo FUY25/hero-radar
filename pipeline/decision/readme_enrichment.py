@@ -9,6 +9,8 @@ import urllib.request
 from typing import Any
 
 from pipeline.decision.cache import api_cache_key, get_api_cache, put_api_cache, stable_hash
+from pipeline.decision.bounded_parallel import bounded_parallel_map
+from pipeline.decision.rate_limit import RateLimitedClient
 
 
 README_SOURCE = "github_readme"
@@ -155,23 +157,58 @@ def enrich_candidate_readmes(
     run_id: str,
     client: Any,
     limit: int,
+    concurrency: int = 1,
+    rate_limit_per_second: float = 0,
 ) -> dict[str, int]:
+    if concurrency <= 0:
+        raise ValueError("concurrency must be positive")
     max_items = max(0, int(limit or 0))
     summary = {"fetched": 0, "cached": 0, "skipped": 0}
     if max_items <= 0:
         return summary
 
+    missing: list[str] = []
+    limited_client = RateLimitedClient(client, starts_per_second=rate_limit_per_second)
     for repo_key in _candidate_repo_keys(conn, run_id):
-        if summary["fetched"] + summary["cached"] >= max_items:
+        if summary["cached"] + len(missing) >= max_items:
             summary["skipped"] += 1
             continue
         if read_cached_readme_excerpt(conn, repo_key=repo_key):
             summary["cached"] += 1
             continue
+        missing.append(repo_key)
+
+    def collect(repo_key: str) -> dict[str, Any]:
         try:
-            fetch_and_cache_readme_excerpt(conn, client=client, repo_key=repo_key)
-        except Exception:
+            text = limited_client.get_readme_text(repo_key)
+            excerpt = str(text or "")[:MAX_README_CHARS]
+            return {
+                "repo_key": repo_key,
+                "response": {
+                    "repo_key": repo_key,
+                    "excerpt": excerpt,
+                    "preview": excerpt[:MAX_README_PREVIEW_CHARS],
+                    "chars": len(excerpt),
+                },
+                "error": None,
+            }
+        except Exception as exc:
+            return {"repo_key": repo_key, "response": None, "error": exc}
+
+    for result in bounded_parallel_map(missing, collect, concurrency=concurrency):
+        if result["error"] is not None:
             summary["skipped"] += 1
             continue
+        repo_key = result["repo_key"]
+        put_api_cache(
+            conn,
+            cache_key=_readme_cache_key(repo_key),
+            source=README_SOURCE,
+            external_id=repo_key,
+            window=README_WINDOW,
+            input_hash=_readme_input_hash(repo_key),
+            response=result["response"],
+            status="ok",
+        )
         summary["fetched"] += 1
     return summary

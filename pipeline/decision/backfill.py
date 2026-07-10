@@ -18,6 +18,8 @@ from pipeline.decision.cache import (
     put_api_cache,
     stable_hash,
 )
+from pipeline.decision.bounded_parallel import bounded_parallel_map
+from pipeline.decision.rate_limit import RateLimitedClient
 from pipeline.decision.rules import iso_time, parse_time
 from pipeline.decision.schema import utc_now
 
@@ -32,7 +34,6 @@ class GitHubClient:
     def __init__(self, *, token: str | None = None, timeout: int = 20) -> None:
         self.token = token
         self.timeout = timeout
-        self.last_lower_bound = False
 
     def request_json(self, url: str, *, accept: str = "application/vnd.github+json") -> Any:
         headers = {
@@ -54,7 +55,6 @@ class GitHubClient:
         total = int(metadata.get("stargazers_count") or 0)
         per_page = 100
         last_page = max(1, math.ceil(total / per_page))
-        self.last_lower_bound = last_page > GITHUB_PAGE_LIMIT
         start_page = min(last_page, GITHUB_PAGE_LIMIT)
         stop_page = max(1, start_page - MAX_STARGAZER_PAGES + 1)
         since_dt = parse_time(since_iso)
@@ -140,7 +140,11 @@ def run_backfill_jobs(
     run_id: str,
     github_client: Any,
     now: str,
+    concurrency: int = 1,
+    rate_limit_per_second: float = 0,
 ) -> dict[str, Any]:
+    if concurrency <= 0:
+        raise ValueError("concurrency must be positive")
     now_dt = parse_time(now) or dt.datetime.now(dt.timezone.utc)
     since_7d = iso_time(now_dt - dt.timedelta(days=7))
     since_24h = now_dt - dt.timedelta(hours=24)
@@ -154,49 +158,84 @@ def run_backfill_jobs(
         """,
         (run_id,),
     ).fetchall()
-    completed = 0
-    failed = 0
-    signals: dict[str, dict[str, float]] = {}
-
+    work: list[dict[str, Any]] = []
+    limited_client = RateLimitedClient(
+        github_client,
+        starts_per_second=rate_limit_per_second,
+    )
     for job_id, entity_id, canonical_entity, canonical_key, source, reason in jobs:
         if source != "github_stargazers":
             continue
         full_name = repo_from_canonical_key(canonical_key)
         if not full_name:
             continue
+        input_hash = stable_hash(
+            {
+                "full_name": full_name,
+                "since": since_7d,
+                "reason": reason,
+            }
+        )
+        cache_key = api_cache_key(
+            source="github_stargazers",
+            external_id=full_name,
+            window="7d",
+            input_hash=input_hash,
+        )
+        work.append(
+            {
+                "job_id": job_id,
+                "entity_id": entity_id,
+                "canonical_entity": canonical_entity,
+                "full_name": full_name,
+                "input_hash": input_hash,
+                "cache_key": cache_key,
+                "cached": get_api_cache(conn, cache_key),
+            }
+        )
+
+    def collect(job: dict[str, Any]) -> dict[str, Any]:
         try:
-            input_hash = stable_hash(
-                {
-                    "full_name": full_name,
-                    "since": since_7d,
-                    "reason": reason,
-                }
-            )
-            cache_key = api_cache_key(
-                source="github_stargazers",
-                external_id=full_name,
-                window="7d",
-                input_hash=input_hash,
-            )
-            cached = get_api_cache(conn, cache_key)
+            cached = job["cached"]
             if cached is None:
-                metadata = github_client.repo_metadata(full_name)
-                stargazers = github_client.stargazers_since(full_name, since_7d)
+                metadata = limited_client.repo_metadata(job["full_name"])
+                stargazers = limited_client.stargazers_since(job["full_name"], since_7d)
+                total = int(metadata.get("stargazers_count") or 0)
                 cached = {
                     "metadata": metadata,
                     "stargazers": stargazers,
-                    "lower_bound": bool(getattr(github_client, "last_lower_bound", False)),
+                    "lower_bound": math.ceil(total / 100) > GITHUB_PAGE_LIMIT,
                 }
+            return {**job, "response": cached, "error": None}
+        except Exception as exc:
+            return {**job, "response": None, "error": exc}
+
+    results = bounded_parallel_map(work, collect, concurrency=concurrency)
+    completed = 0
+    failed = 0
+    signals: dict[str, dict[str, float]] = {}
+    for result in results:
+        error = result["error"]
+        if error is not None:
+            failed += 1
+            conn.execute(
+                "update backfill_jobs set status = 'failed', completed_at = ?, result_ref = ? where id = ?",
+                (now, str(error)[:500], result["job_id"]),
+            )
+            conn.commit()
+            continue
+        try:
+            cached = result["response"] or {}
+            if result["cached"] is None:
                 put_api_cache(
                     conn,
-                    cache_key=cache_key,
+                    cache_key=result["cache_key"],
                     source="github_stargazers",
-                    external_id=full_name,
+                    external_id=result["full_name"],
                     window="7d",
-                    input_hash=input_hash,
+                    input_hash=result["input_hash"],
                     response=cached,
                 )
-
             stargazers = cached.get("stargazers") or []
             metadata = cached.get("metadata") or {}
             stars_24h = count_stars_between(stargazers, since_24h, now_dt)
@@ -205,45 +244,45 @@ def run_backfill_jobs(
             bound_note = "lower_bound_due_to_page_cap" if cached.get("lower_bound") else "complete_recent_pages"
             insert_backfill_evidence(
                 conn,
-                entity_id=entity_id,
-                canonical_entity=canonical_entity,
+                entity_id=result["entity_id"],
+                canonical_entity=result["canonical_entity"],
                 metric_name="github_stars_24h",
                 metric_value=stars_24h,
                 historical_safety="as_of_safe",
                 note=bound_note,
                 run_id=run_id,
                 now=now,
-                raw_url_or_ref=cache_key,
+                raw_url_or_ref=result["cache_key"],
             )
             insert_backfill_evidence(
                 conn,
-                entity_id=entity_id,
-                canonical_entity=canonical_entity,
+                entity_id=result["entity_id"],
+                canonical_entity=result["canonical_entity"],
                 metric_name="github_stars_7d",
                 metric_value=stars_7d,
                 historical_safety="as_of_safe",
                 note=bound_note,
                 run_id=run_id,
                 now=now,
-                raw_url_or_ref=cache_key,
+                raw_url_or_ref=result["cache_key"],
             )
             insert_backfill_evidence(
                 conn,
-                entity_id=entity_id,
-                canonical_entity=canonical_entity,
+                entity_id=result["entity_id"],
+                canonical_entity=result["canonical_entity"],
                 metric_name="github_forks_total",
                 metric_value=forks_total,
                 historical_safety="partial_as_of",
                 note="repo metadata snapshot",
                 run_id=run_id,
                 now=now,
-                raw_url_or_ref=cache_key,
+                raw_url_or_ref=result["cache_key"],
             )
             conn.execute(
                 "update backfill_jobs set status = 'completed', completed_at = ?, result_ref = ? where id = ?",
-                (now, cache_key, job_id),
+                (now, result["cache_key"], result["job_id"]),
             )
-            signals[entity_id] = {
+            signals[result["entity_id"]] = {
                 "stars_24h": float(stars_24h),
                 "stars_7d": float(stars_7d),
             }
@@ -253,7 +292,7 @@ def run_backfill_jobs(
             failed += 1
             conn.execute(
                 "update backfill_jobs set status = 'failed', completed_at = ?, result_ref = ? where id = ?",
-                (now, str(exc)[:500], job_id),
+                (now, str(exc)[:500], result["job_id"]),
             )
             conn.commit()
 

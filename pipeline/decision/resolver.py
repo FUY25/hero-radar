@@ -6,6 +6,8 @@ import urllib.parse
 from typing import Any
 
 from pipeline.decision.cache import api_cache_key, get_api_cache, put_api_cache, stable_hash
+from pipeline.decision.bounded_parallel import bounded_parallel_map
+from pipeline.decision.rate_limit import RateLimitedClient
 from pipeline.decision.entity_resolution import (
     entity_id_for_key,
     extract_domain_keys,
@@ -478,46 +480,113 @@ def enrich_classifier_candidates(
     research_provider: Any | None = None,
     max_research_rounds: int = 0,
     now: str,
-) -> dict[str, int]:
+    concurrency: int = 1,
+    rate_limit_per_second: float = 0,
+) -> dict[str, Any]:
+    if concurrency <= 0:
+        raise ValueError("concurrency must be positive")
     enriched = 0
     aliases = 0
     proposals = 0
     researched = 0
-    for candidate in _accepted_classifier_candidates(conn, run_id):
+    errors: list[dict[str, str]] = []
+    candidates = _accepted_classifier_candidates(conn, run_id)
+    limited_search_client = (
+        RateLimitedClient(search_client, starts_per_second=rate_limit_per_second)
+        if search_client is not None
+        else None
+    )
+    database_row = conn.execute("pragma database_list").fetchone()
+    database_path = str(database_row[2] or "") if database_row else ""
+    work: list[dict[str, Any]] = []
+    for candidate in candidates:
+        worker_conn: sqlite3.Connection | None = None
+        if not database_path:
+            worker_conn = sqlite3.connect(":memory:", check_same_thread=False)
+            conn.backup(worker_conn)
+        work.append({"candidate": candidate, "conn": worker_conn})
+
+    def collect(job: dict[str, Any]) -> dict[str, Any]:
+        candidate = job["candidate"]
+        worker_conn = job["conn"]
+        try:
+            if worker_conn is None:
+                worker_conn = sqlite3.connect(database_path, timeout=60)
+                worker_conn.execute("pragma busy_timeout = 60000")
+            result = resolve_candidate_links(
+                worker_conn,
+                candidate["entity_key"],
+                search_client=limited_search_client,
+                max_searches=max_searches_per_candidate,
+                research_provider=research_provider,
+                research_context={"entity_key": candidate["entity_key"], "run_id": run_id},
+                max_research_rounds=max_research_rounds,
+            )
+            return {"candidate": candidate, "result": result, "error": None}
+        except Exception as exc:
+            return {"candidate": candidate, "result": None, "error": exc}
+        finally:
+            if worker_conn is not None:
+                worker_conn.close()
+
+    outcomes = bounded_parallel_map(work, collect, concurrency=concurrency)
+    for outcome in outcomes:
+        candidate = outcome["candidate"]
         entity_id = candidate["entity_id"]
         entity_key = candidate["entity_key"]
-        _ensure_entity(conn, entity_id=entity_id, entity_key=entity_key, now=now)
-        result = resolve_candidate_links(
-            conn,
-            entity_key,
-            search_client=search_client,
-            max_searches=max_searches_per_candidate,
-            research_provider=research_provider,
-            research_context={"entity_key": entity_key, "run_id": run_id},
-            max_research_rounds=max_research_rounds,
-        )
-        links = list(result.get("resolved_links") or [])
-        if not links:
-            if max_searches_per_candidate > 0 or research_provider is not None:
-                _clear_resolver_aliases(conn, entity_id=entity_id, entity_key=entity_key)
+        if outcome["error"] is not None:
+            exc = outcome["error"]
+            errors.append(
+                {
+                    "entity_id": str(entity_id),
+                    "entity_key": str(entity_key),
+                    "error_type": type(exc).__name__,
+                    "error": str(exc)[:500],
+                }
+            )
             continue
-        if result.get("source") == "agentic_link_research":
-            researched += 1
-        written_aliases, written_proposals = _write_resolved_links(
-            conn,
-            run_id=run_id,
-            entity_id=entity_id,
-            entity_key=entity_key,
-            links=links,
-            now=now,
-        )
-        aliases += written_aliases
-        proposals += written_proposals
-        enriched += 1
-    conn.commit()
+        try:
+            result = outcome["result"] or {}
+            links = list(result.get("resolved_links") or [])
+            with conn:
+                _ensure_entity(conn, entity_id=entity_id, entity_key=entity_key, now=now)
+                if not links:
+                    if max_searches_per_candidate > 0 or research_provider is not None:
+                        _clear_resolver_aliases(
+                            conn,
+                            entity_id=entity_id,
+                            entity_key=entity_key,
+                        )
+                    continue
+                written_aliases, written_proposals = _write_resolved_links(
+                    conn,
+                    run_id=run_id,
+                    entity_id=entity_id,
+                    entity_key=entity_key,
+                    links=links,
+                    now=now,
+                )
+            if result.get("source") == "agentic_link_research":
+                researched += 1
+            aliases += written_aliases
+            proposals += written_proposals
+            enriched += 1
+        except Exception as exc:
+            conn.rollback()
+            errors.append(
+                {
+                    "entity_id": str(entity_id),
+                    "entity_key": str(entity_key),
+                    "error_type": type(exc).__name__,
+                    "error": str(exc)[:500],
+                }
+            )
+            continue
     return {
         "enriched": enriched,
         "aliases": aliases,
         "proposals": proposals,
         "researched": researched,
+        "failed": len(errors),
+        "errors": errors,
     }

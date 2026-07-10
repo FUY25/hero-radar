@@ -6,6 +6,8 @@ import re
 import sqlite3
 from typing import Any
 
+from pipeline.decision.bounded_parallel import bounded_parallel_map
+
 from pipeline.decision.entity_resolution import entity_id_for_key as stage_a_entity_id_for_key
 from pipeline.decision.entity_resolution import normalize_github_repo
 from pipeline.decision.entity_resolution import normalize_name_key
@@ -491,6 +493,84 @@ def _complete_with_cache(
     return response
 
 
+def _complete_many_with_cache(
+    conn: sqlite3.Connection,
+    *,
+    provider: Any,
+    task: str,
+    prompt_version: str,
+    input_payloads: list[dict[str, Any]],
+    system_prompt: str,
+    concurrency: int,
+) -> list[dict[str, Any]]:
+    if concurrency <= 0:
+        raise ValueError("llm_concurrency must be positive")
+    provider_name = _provider_name(provider)
+    model = _provider_model(provider)
+    outputs: list[dict[str, Any] | None] = [None] * len(input_payloads)
+    jobs: list[dict[str, Any]] = []
+    for index, input_payload in enumerate(input_payloads):
+        cache_key = cache_key_for(
+            provider=provider_name,
+            model=model,
+            prompt_version=prompt_version,
+            task=task,
+            input_payload=input_payload,
+        )
+        cached = get_cached_response(conn, cache_key)
+        if cached and cached["status"] == "ok":
+            response = dict(cached["response_json"])
+            if task == X_STAGE1_TASK:
+                validate_x_stage1_output(response)
+            else:
+                validate_x_stage2_output(response)
+            outputs[index] = response
+        else:
+            jobs.append({"index": index, "input_payload": input_payload})
+
+    def complete(job: dict[str, Any]) -> dict[str, Any]:
+        try:
+            response = provider.complete_json(
+                task=task,
+                prompt_version=prompt_version,
+                input_payload=job["input_payload"],
+                system_prompt=system_prompt,
+            )
+            if task == X_STAGE1_TASK:
+                validate_x_stage1_output(response)
+            else:
+                validate_x_stage2_output(response)
+            return {**job, "response": response, "error": None}
+        except Exception as exc:
+            return {**job, "response": {"error": str(exc)}, "error": exc}
+
+    first_error: Exception | None = None
+    for result in bounded_parallel_map(jobs, complete, concurrency=concurrency):
+        error = result["error"]
+        store_cached_response(
+            conn,
+            provider=provider_name,
+            model=model,
+            prompt_version=prompt_version,
+            task=task,
+            input_payload=result["input_payload"],
+            request_payload={
+                "system_prompt": system_prompt,
+                "input_payload": result["input_payload"],
+            },
+            response_payload=result["response"],
+            status="error" if error else "ok",
+            error=str(error) if error else None,
+        )
+        if error is not None:
+            first_error = first_error or error
+        else:
+            outputs[result["index"]] = result["response"]
+    if first_error is not None:
+        raise first_error
+    return [dict(output or {}) for output in outputs]
+
+
 def _tweet_stage1_cache_payload(tweet: dict[str, Any]) -> dict[str, Any]:
     return {
         "tweet_id": tweet["tweet_id"],
@@ -607,6 +687,7 @@ def run_x_stage1(
     now: str,
     limit: int,
     batch_size: int,
+    llm_concurrency: int = 1,
 ) -> dict[str, Any]:
     tweets = candidate_tweets(conn, now=now, limit=limit)
     tweet_by_id = {tweet["tweet_id"]: tweet for tweet in tweets}
@@ -630,16 +711,17 @@ def run_x_stage1(
         cache_hits += 1
         stage1_items.append(cached_item)
 
-    for batch in _chunks(uncached_tweets, batch_size):
-        input_payload = build_x_stage1_prompt_payload(batch)
-        output = _complete_with_cache(
-            conn,
-            provider=provider,
-            task=X_STAGE1_TASK,
-            prompt_version=X_STAGE1_PROMPT_VERSION,
-            input_payload=input_payload,
-            system_prompt=system_prompt,
-        )
+    batches = _chunks(uncached_tweets, batch_size)
+    batch_outputs = _complete_many_with_cache(
+        conn,
+        provider=provider,
+        task=X_STAGE1_TASK,
+        prompt_version=X_STAGE1_PROMPT_VERSION,
+        input_payloads=[build_x_stage1_prompt_payload(batch) for batch in batches],
+        system_prompt=system_prompt,
+        concurrency=llm_concurrency,
+    )
+    for batch, output in zip(batches, batch_outputs, strict=True):
         for item in output["triage"]:
             tweet = tweet_by_id.get(item["tweet_id"])
             if tweet is not None:
@@ -958,25 +1040,29 @@ def run_x_stage2(
     provider: Any,
     now: str,
     limit: int,
+    llm_concurrency: int = 1,
 ) -> dict[str, Any]:
     system_prompt = (
         "You are a bounded X source tier classifier. Return only JSON. "
         "Potential requires citations and a linked or exact entity. Fuzzy "
         "name-only outputs cannot be sole Potential evidence."
     )
-    tiered = 0
+    work: list[tuple[dict[str, Any], dict[str, Any]]] = []
     for aggregate in candidate_entity_mentions(conn, run_id=run_id, limit=limit):
         tweets = _tweet_rows_for_refs(conn, aggregate["source_refs"])
         input_payload = build_x_stage2_prompt_payload(aggregate, tweets)
-        output = _complete_with_cache(
-            conn,
-            provider=provider,
-            task=X_STAGE2_TASK,
-            prompt_version=X_STAGE2_PROMPT_VERSION,
-            input_payload=input_payload,
-            system_prompt=system_prompt,
-        )
-        validate_x_stage2_output(output)
+        work.append((aggregate, input_payload))
+    outputs = _complete_many_with_cache(
+        conn,
+        provider=provider,
+        task=X_STAGE2_TASK,
+        prompt_version=X_STAGE2_PROMPT_VERSION,
+        input_payloads=[payload for _, payload in work],
+        system_prompt=system_prompt,
+        concurrency=llm_concurrency,
+    )
+    tiered = 0
+    for (aggregate, _), output in zip(work, outputs, strict=True):
         _insert_x_evidence(
             conn,
             run_id=run_id,
