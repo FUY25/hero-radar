@@ -13,6 +13,13 @@ ToolAvailability = Callable[["ToolCandidateContext"], bool]
 ResultProjector = Callable[
     [dict[str, Any], str, dict[str, Any]], dict[str, Any]
 ]
+ToolArgumentAuthorizer = Callable[["ToolCandidateContext", dict[str, Any]], bool]
+
+
+def _allow_candidate_arguments(
+    _candidate: "ToolCandidateContext", _arguments: dict[str, Any]
+) -> bool:
+    return True
 
 
 @dataclass(frozen=True)
@@ -60,6 +67,7 @@ class ToolSpec:
     max_in_flight: int
     starts_per_second: float
     result_projector: ResultProjector
+    argument_authorizer: ToolArgumentAuthorizer = _allow_candidate_arguments
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "input_schema", freeze_json(self.input_schema))
@@ -75,6 +83,8 @@ class ToolSpec:
             raise ValueError(f"tool {self.name} requires executor and availability")
         if not callable(self.result_projector):
             raise ValueError(f"tool {self.name} requires a result projector")
+        if not callable(self.argument_authorizer):
+            raise ValueError(f"tool {self.name} requires an argument authorizer")
 
     def is_available(self, candidate: ToolCandidateContext) -> bool:
         return bool(self.availability(candidate))
@@ -96,6 +106,13 @@ class ToolSpec:
         except ValueError as exc:
             return {"status": "rejected", "error": str(exc)}
         return self.executor(dict(arguments))
+
+    def arguments_allowed(
+        self,
+        candidate: ToolCandidateContext,
+        arguments: dict[str, Any],
+    ) -> bool:
+        return bool(self.argument_authorizer(candidate, dict(arguments)))
 
     def project_result(
         self,

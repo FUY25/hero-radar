@@ -249,6 +249,35 @@ class InvestigatorToolsTest(unittest.TestCase):
         )
         self.assertEqual(set(tools.available_specs(unresolved)), {"web_search"})
         self.assertNotIn("mode", repository.__dict__)
+        repository_specs = tools.available_specs(repository)
+        self.assertTrue(
+            repository_specs["fetch_github_readme"].arguments_allowed(
+                repository, {"repo_key": "owner/repo"}
+            )
+        )
+        self.assertFalse(
+            repository_specs["fetch_github_readme"].arguments_allowed(
+                repository, {"repo_key": "other/project"}
+            )
+        )
+        self.assertFalse(
+            repository_specs["read_evidence_rows"].arguments_allowed(
+                repository, {"entity_id": "entity:other"}
+            )
+        )
+        homepage_spec = tools.available_specs(homepage_only)[
+            "fetch_homepage_or_docs"
+        ]
+        self.assertTrue(
+            homepage_spec.arguments_allowed(
+                homepage_only, {"url": "https://example.com/guide"}
+            )
+        )
+        self.assertFalse(
+            homepage_spec.arguments_allowed(
+                homepage_only, {"url": "https://attacker.example/guide"}
+            )
+        )
 
     def test_tool_observation_marks_external_results_untrusted_with_provenance(self) -> None:
         from pipeline.decision.layer2_investigator_tools import (

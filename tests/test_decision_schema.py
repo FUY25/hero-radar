@@ -173,7 +173,11 @@ class DecisionSchemaTest(unittest.TestCase):
             ).fetchall()
         }
         self.assertTrue(
-            {"observation_trace_json", "context_manifests_json"}
+            {
+                "observation_trace_json",
+                "context_manifests_json",
+                "raw_tool_results_json",
+            }
             <= investigation_columns
         )
         model_call_columns = {

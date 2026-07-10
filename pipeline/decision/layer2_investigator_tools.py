@@ -242,6 +242,7 @@ class ScoringInvestigatorTools:
                 max_in_flight=4,
                 starts_per_second=20.0,
                 result_projector=_project_evidence_rows,
+                argument_authorizer=_authorize_evidence_entity,
             ),
             ToolSpec(
                 name="fetch_github_readme",
@@ -268,6 +269,7 @@ class ScoringInvestigatorTools:
                 max_in_flight=5,
                 starts_per_second=2.0,
                 result_projector=_project_github_readme,
+                argument_authorizer=_authorize_candidate_repo,
             ),
             ToolSpec(
                 name="fetch_github_file",
@@ -311,6 +313,7 @@ class ScoringInvestigatorTools:
                 max_in_flight=5,
                 starts_per_second=2.0,
                 result_projector=_project_github_file,
+                argument_authorizer=_authorize_candidate_repo,
             ),
             ToolSpec(
                 name="fetch_homepage_or_docs",
@@ -344,6 +347,7 @@ class ScoringInvestigatorTools:
                 max_in_flight=4,
                 starts_per_second=2.0,
                 result_projector=_project_homepage,
+                argument_authorizer=_authorize_candidate_url,
             ),
         ]
         if self.web_search_client is not None:
@@ -800,6 +804,43 @@ def _safe_candidate_url(candidate: ToolCandidateContext) -> bool:
         return False
     ok, _reason = validate_public_http_url(candidate.canonical_url)
     return ok
+
+
+def _authorize_evidence_entity(
+    candidate: ToolCandidateContext, arguments: dict[str, Any]
+) -> bool:
+    return str(arguments.get("entity_id") or "") in set(candidate.entity_ids)
+
+
+def _authorize_candidate_repo(
+    candidate: ToolCandidateContext, arguments: dict[str, Any]
+) -> bool:
+    requested = _repo_key_from_arguments(arguments)
+    expected = str(candidate.repo_key or "")
+    if not requested or not expected:
+        return False
+    return _normalize_repo_key(requested) == _normalize_repo_key(expected)
+
+
+def _normalize_repo_key(value: Any) -> str:
+    return str(value).strip().lower().removesuffix(".git")
+
+
+def _authorize_candidate_url(
+    candidate: ToolCandidateContext, arguments: dict[str, Any]
+) -> bool:
+    requested = str(arguments.get("url") or "").strip()
+    canonical = str(candidate.canonical_url or "").strip()
+    requested_ok, _reason = validate_public_http_url(requested)
+    if not requested_ok or not canonical:
+        return False
+    requested_url = urllib.parse.urlparse(requested)
+    canonical_url = urllib.parse.urlparse(canonical)
+    return (
+        requested_url.scheme.lower() in {"http", "https"}
+        and requested_url.hostname == canonical_url.hostname
+        and requested_url.port == canonical_url.port
+    )
 
 
 def _bounded_excerpt(text: Any, *, max_chars: int) -> tuple[str, bool]:

@@ -221,6 +221,7 @@ create table if not exists l2_scoring_investigations (
     cache_key text not null,
     observation_trace_json text not null default '[]',
     context_manifests_json text not null default '[]',
+    raw_tool_results_json text not null default '[]',
     created_at text not null,
     unique(feed_run_id, group_id)
 );
@@ -375,6 +376,12 @@ def init_decision_db(conn: sqlite3.Connection) -> None:
         conn,
         "l2_scoring_investigations",
         "context_manifests_json",
+        "text not null default '[]'",
+    )
+    _ensure_column(
+        conn,
+        "l2_scoring_investigations",
+        "raw_tool_results_json",
         "text not null default '[]'",
     )
 

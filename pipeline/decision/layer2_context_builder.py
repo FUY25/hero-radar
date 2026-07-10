@@ -102,19 +102,15 @@ class ScoringContextBuilder:
             self._normalize_evidence(row, index=index)
             for index, row in enumerate(ordered_evidence)
         ]
-        top_evidence: list[dict[str, Any]] = []
-        retrievable_evidence_ids: list[str] = []
-        excluded_evidence_ids: list[str] = []
-        evidence_tokens = 0
-        for row in normalized_evidence:
-            row_tokens = self._estimate(row)
-            if evidence_tokens + row_tokens <= active_budget.top_evidence_allocation:
-                top_evidence.append(row)
-                evidence_tokens += row_tokens
-            elif bool(row.get("retrievable", True)):
-                retrievable_evidence_ids.append(row["evidence_id"])
-            else:
-                excluded_evidence_ids.append(row["evidence_id"])
+        (
+            top_evidence,
+            retrievable_evidence_ids,
+            excluded_evidence_ids,
+        ) = self._allocate_rows(
+            normalized_evidence,
+            id_key="evidence_id",
+            max_tokens=active_budget.top_evidence_allocation,
+        )
 
         candidate_packet: dict[str, Any] = {
             "identity": identity,
@@ -130,10 +126,7 @@ class ScoringContextBuilder:
                 "omitted_count": omitted_evidence_count,
                 "retrievable": bool(retrievable_evidence_ids),
             }
-        included_observations: list[dict[str, Any]] = []
-        retrievable_observation_ids: list[str] = []
-        excluded_observation_ids: list[str] = []
-        observation_tokens = 0
+        normalized_observations: list[dict[str, Any]] = []
         for index, raw_observation in enumerate(observations):
             observation = dict(raw_observation)
             observation_id = str(
@@ -142,17 +135,16 @@ class ScoringContextBuilder:
                 or f"observation:{index + 1}"
             )
             observation["observation_id"] = observation_id
-            row_tokens = self._estimate(observation)
-            if (
-                observation_tokens + row_tokens
-                <= active_budget.tool_observation_allocation
-            ):
-                included_observations.append(observation)
-                observation_tokens += row_tokens
-            elif bool(observation.get("retrievable", True)):
-                retrievable_observation_ids.append(observation_id)
-            else:
-                excluded_observation_ids.append(observation_id)
+            normalized_observations.append(observation)
+        (
+            included_observations,
+            retrievable_observation_ids,
+            excluded_observation_ids,
+        ) = self._allocate_rows(
+            normalized_observations,
+            id_key="observation_id",
+            max_tokens=active_budget.tool_observation_allocation,
+        )
         working_state: dict[str, Any] = {
             "verified_observations": included_observations,
         }
@@ -295,3 +287,25 @@ class ScoringContextBuilder:
                 f"allocation={max_tokens}"
             )
         return bounded
+
+    def _allocate_rows(
+        self,
+        rows: Sequence[dict[str, Any]],
+        *,
+        id_key: str,
+        max_tokens: int,
+    ) -> tuple[list[dict[str, Any]], list[str], list[str]]:
+        included: list[dict[str, Any]] = []
+        retrievable_ids: list[str] = []
+        excluded_ids: list[str] = []
+        used_tokens = 0
+        for row in rows:
+            row_tokens = self._estimate(row)
+            if used_tokens + row_tokens <= max_tokens:
+                included.append(row)
+                used_tokens += row_tokens
+            elif bool(row.get("retrievable", True)):
+                retrievable_ids.append(str(row[id_key]))
+            else:
+                excluded_ids.append(str(row[id_key]))
+        return included, retrievable_ids, excluded_ids

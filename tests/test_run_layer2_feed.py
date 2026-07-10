@@ -963,6 +963,37 @@ class Layer2RunnerTest(unittest.TestCase):
             conn = sqlite3.connect(db_path)
             conn.execute(
                 """
+                insert into entities(
+                  entity_id, canonical_entity, canonical_key, key_type,
+                  first_seen, aliases_json, source_item_ids_json
+                ) values (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "entity:alias",
+                    "owner/repo alias",
+                    "github:owner/repo",
+                    "github",
+                    "2026-06-01T00:00:00Z",
+                    "[]",
+                    "[]",
+                ),
+            )
+            conn.execute(
+                """
+                insert into potential_candidates(
+                  entity_id, run_id, level, fired_families_json, first_trigger_at
+                ) values (?, ?, ?, ?, ?)
+                """,
+                (
+                    "entity:alias",
+                    "decision-run",
+                    "potential",
+                    '["github"]',
+                    "2026-06-01T00:00:00Z",
+                ),
+            )
+            conn.execute(
+                """
                 insert into evidence_rows(
                   entity_id, canonical_entity, alias, source, event_at,
                   relative_to_reference, metric_name, metric_value, family,
@@ -1014,7 +1045,7 @@ class Layer2RunnerTest(unittest.TestCase):
                                 },
                                 {
                                     "name": "read_evidence_rows",
-                                    "arguments": {"entity_id": "entity:missing"},
+                                    "arguments": {"entity_id": "entity:alias"},
                                 },
                             ],
                         }
@@ -1408,7 +1439,7 @@ class Layer2RunnerTest(unittest.TestCase):
         self.assertEqual(default_config["brief_writer"]["max_output_tokens"], 1000)
         self.assertEqual(
             default_config["scoring_agent"]["prompt_version"],
-            "layer2-scoring-investigator-v2",
+            "layer2-scoring-investigator-v1",
         )
         self.assertEqual(
             default_config["brief_writer"]["prompt_version"],
