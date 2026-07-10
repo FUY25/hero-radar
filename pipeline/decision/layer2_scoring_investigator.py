@@ -451,7 +451,6 @@ def _score_one_group(
     context_manifests: list[dict[str, Any]] = []
     previous_turn: dict[str, Any] | None = None
     used_tool_signatures: set[str] = set()
-    valid_evidence_refs: set[str] = set()
     tool_counts: dict[str, int] = {}
     total_tool_calls = 0
     final_response: dict[str, Any] | None = None
@@ -485,6 +484,7 @@ def _score_one_group(
         system_prompt=system_prompt,
         output_schema=output_schema,
         budget=context_budget,
+        include_valid_evidence_refs=strict_output,
     )
     preflight = preflight_candidate(
         group,
@@ -554,6 +554,7 @@ def _score_one_group(
                     "turn_index": turn_index,
                     "must_finalize": (
                         preflight.must_finalize
+                        or (strict_output and not model_tools)
                         or turn_index >= max(1, limits.max_investigation_turns)
                     ),
                     "preflight_reason": preflight.reason,
@@ -569,18 +570,11 @@ def _score_one_group(
                 system_prompt=system_prompt,
                 output_schema=output_schema,
                 budget=context_budget,
+                include_valid_evidence_refs=strict_output,
             )
             payload = built_context.payload
             context_manifests.append(
                 {"turn_index": turn_index, **built_context.manifest}
-            )
-            valid_evidence_refs.update(
-                built_context.manifest["included_evidence_ids"]
-            )
-            valid_evidence_refs.update(
-                str(row.get("observation_id"))
-                for row in observations
-                if row.get("observation_id")
             )
             request_contract = LLMRequestContract.for_provider(
                 provider,
@@ -662,9 +656,6 @@ def _score_one_group(
             ]
             tool_trace.extend(turn_tool_trace)
             observations.extend(turn_observations)
-            valid_evidence_refs.update(
-                row["observation_id"] for row in turn_observations
-            )
             state["used_tool_signatures"] = sorted(used_tool_signatures)
             if information_need:
                 state["open_questions"] = [
@@ -705,6 +696,11 @@ def _score_one_group(
                     "Investigation turn budget exhausted without final score."
                 ),
             }
+        valid_evidence_refs = [
+            str(ref)
+            for ref in payload.get("valid_evidence_refs") or []
+            if str(ref)
+        ]
         normalized = _validate_or_repair_final(
             provider,
             prompt_version=prompt_version,
@@ -868,7 +864,7 @@ def _validate_or_repair_final(
     last_payload: dict[str, Any],
     response: dict[str, Any],
     limits: InvestigatorLimits,
-    valid_evidence_refs: set[str],
+    valid_evidence_refs: list[str],
     output_schema: dict[str, Any],
     active_tools: list[dict[str, Any]],
     active_tool_versions: list[str],
@@ -879,16 +875,17 @@ def _validate_or_repair_final(
     system_prompt: str,
     strict_output: bool,
 ) -> dict[str, Any]:
+    allowed_evidence_refs = set(valid_evidence_refs)
     try:
         return _validate_final_response(
             response,
-            valid_evidence_refs=valid_evidence_refs,
+            valid_evidence_refs=allowed_evidence_refs,
             strict_output=strict_output,
         )
     except ValueError as exc:
         if limits.max_scoring_attempts < 2:
             raise
-        repair_payload = {
+        repair_payload: dict[str, Any] = {
             "task": {
                 "decision": "repair_final_score",
                 "must_finalize": True,
@@ -900,6 +897,12 @@ def _validate_or_repair_final(
             "instruction": "Return a complete corrected action=final scoring JSON object.",
             "output_schema": output_schema,
         }
+        if strict_output:
+            repair_payload["valid_evidence_refs"] = list(valid_evidence_refs)
+            repair_payload["instruction"] = (
+                "Return a complete corrected action=final scoring JSON object. "
+                "Every claim must cite only values in valid_evidence_refs."
+            )
         request_contract = LLMRequestContract.for_provider(
             provider,
             task="layer2_scoring_investigator_repair",
@@ -941,7 +944,7 @@ def _validate_or_repair_final(
         )
         return _validate_final_response(
             repaired,
-            valid_evidence_refs=valid_evidence_refs,
+            valid_evidence_refs=allowed_evidence_refs,
             strict_output=strict_output,
         )
 

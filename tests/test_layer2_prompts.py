@@ -146,6 +146,11 @@ class Layer2ScoringPromptTest(unittest.TestCase):
             prompt,
         )
         self.assertIn(
+            "Every supporting or negative claim in a final score must cite one "
+            "or more values listed in valid_evidence_refs.",
+            prompt,
+        )
+        self.assertIn(
             "Finalize when candidate identity is sufficient and every "
             "decision-relevant axis is either supported by attributable evidence "
             "or represented as an explicit gap.",

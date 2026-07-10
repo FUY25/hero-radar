@@ -78,6 +78,7 @@ class ScoringContextBuilder:
         system_prompt: str,
         output_schema: Mapping[str, Any],
         budget: ContextBudget | None = None,
+        include_valid_evidence_refs: bool = True,
     ) -> ContextBuildResult:
         active_budget = budget or ContextBudget()
         identity = dict(candidate.get("identity") or {})
@@ -174,6 +175,17 @@ class ScoringContextBuilder:
                 dict(row) for row in raw_tool_results[-recent_count:]
             ]
 
+        valid_evidence_refs = list(
+            dict.fromkeys(
+                [row["evidence_id"] for row in top_evidence]
+                + [
+                    row["observation_id"]
+                    for row in included_observations
+                    if str(row.get("status") or "") == "ok"
+                ]
+            )
+        )
+
         payload: dict[str, Any] = {
             "task": dict(task),
             "candidate": candidate_packet,
@@ -182,6 +194,8 @@ class ScoringContextBuilder:
             "remaining_budget": dict(remaining_budget),
             "output_schema": dict(output_schema),
         }
+        if include_valid_evidence_refs:
+            payload["valid_evidence_refs"] = valid_evidence_refs
         section_tokens = {
             "system_prompt": self._estimate(system_prompt),
             "tool_schemas": self._estimate(list(active_tools)),
@@ -197,6 +211,10 @@ class ScoringContextBuilder:
             "remaining_budget": self._estimate(payload["remaining_budget"]),
             "output_schema": self._estimate(payload["output_schema"]),
         }
+        if include_valid_evidence_refs:
+            section_tokens["valid_evidence_refs"] = self._estimate(
+                valid_evidence_refs
+            )
         estimated_input_tokens = sum(section_tokens.values())
         maximum_input_tokens = max(
             0,

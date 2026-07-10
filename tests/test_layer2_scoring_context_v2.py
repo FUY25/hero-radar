@@ -155,6 +155,205 @@ class Layer2ScoringContextV2Test(unittest.TestCase):
         self.assertEqual(provider.calls[1]["task"], "layer2_scoring_investigator_repair")
         self.assertEqual(result["supporting_claims"][0]["claim_type"], "observed")
 
+    def test_v2_repair_request_lists_the_allowed_evidence_refs(self):
+        from pipeline.decision.layer2_scoring_investigator import score_with_investigator
+
+        invalid = attributable_final()
+        invalid["score"]["supporting_evidence"][0]["evidence_refs"] = [
+            "entity:not-an-evidence-ref"
+        ]
+        provider = FakeLLMProvider([invalid, attributable_final()])
+        conn = sqlite3.connect(":memory:")
+        self.addCleanup(conn.close)
+        init_decision_db(conn)
+
+        score_with_investigator(
+            conn,
+            feed_run_id="l2-run",
+            groups=[make_group()],
+            provider=provider,
+            tools={},
+            prompt_version="layer2-scoring-investigator-v2",
+        )
+
+        repair_payload = provider.calls[1]["input_payload"]
+        self.assertEqual(
+            repair_payload["valid_evidence_refs"],
+            ["evidence:42"],
+        )
+
+    def test_v2_scoring_turn_lists_the_included_evidence_refs(self):
+        from pipeline.decision.layer2_scoring_investigator import score_with_investigator
+
+        provider = FakeLLMProvider([attributable_final()])
+        conn = sqlite3.connect(":memory:")
+        self.addCleanup(conn.close)
+        init_decision_db(conn)
+
+        score_with_investigator(
+            conn,
+            feed_run_id="l2-run",
+            groups=[make_group()],
+            provider=provider,
+            tools={},
+            prompt_version="layer2-scoring-investigator-v2",
+        )
+
+        self.assertEqual(
+            provider.calls[0]["input_payload"]["valid_evidence_refs"],
+            ["evidence:42"],
+        )
+
+    def test_v2_repair_does_not_allow_an_observation_pruned_from_the_last_turn(self):
+        from pipeline.decision.layer2_context_builder import ContextBudget
+        from pipeline.decision.layer2_scoring_investigator import score_with_investigator
+
+        invalid_final = attributable_final()
+        invalid_final["score"]["supporting_evidence"][0]["evidence_refs"] = [
+            "tool:t1:0"
+        ]
+        provider = FakeLLMProvider(
+            [
+                {
+                    "action": "use_tools",
+                    "information_sufficiency": {
+                        "identity": "strong",
+                        "workflow_shift": "medium",
+                        "technical_substance": "weak",
+                        "product_market_fit": "medium",
+                        "momentum": "medium",
+                    },
+                    "information_need": {
+                        "question": "Fetch technical detail.",
+                        "target_axes": ["technical_substance"],
+                        "expected_decision_impact": "May change the technical score.",
+                    },
+                    "tool_requests": [
+                        {"name": "fetch_docs", "arguments": {"page": "architecture"}}
+                    ],
+                },
+                invalid_final,
+                attributable_final(),
+            ]
+        )
+        conn = sqlite3.connect(":memory:")
+        self.addCleanup(conn.close)
+        init_decision_db(conn)
+
+        score_with_investigator(
+            conn,
+            feed_run_id="l2-run",
+            groups=[make_group()],
+            provider=provider,
+            tools={
+                "fetch_docs": lambda _arguments: {
+                    "status": "ok",
+                    "excerpt": "architecture detail " * 200,
+                }
+            },
+            context_budget=ContextBudget(tool_observation_allocation=0),
+            prompt_version="layer2-scoring-investigator-v2",
+        )
+
+        last_turn_refs = provider.calls[1]["input_payload"]["valid_evidence_refs"]
+        repair_refs = provider.calls[2]["input_payload"]["valid_evidence_refs"]
+        self.assertEqual(repair_refs, last_turn_refs)
+        self.assertNotIn("tool:t1:0", repair_refs)
+
+    def test_v2_failed_tool_observation_cannot_support_a_negative_claim(self):
+        from pipeline.decision.layer2_scoring_investigator import score_with_investigator
+
+        invalid_final = attributable_final()
+        invalid_final["score"]["negative_evidence"] = [
+            {
+                "claim": "The unavailable tool proves the candidate is unreliable.",
+                "evidence_refs": ["tool:t1:0"],
+                "supports_axes": ["risk_penalty"],
+                "claim_type": "observed",
+            }
+        ]
+        provider = FakeLLMProvider(
+            [
+                {
+                    "action": "use_tools",
+                    "information_sufficiency": {
+                        "identity": "strong",
+                        "workflow_shift": "medium",
+                        "technical_substance": "weak",
+                        "product_market_fit": "medium",
+                        "momentum": "medium",
+                    },
+                    "information_need": {
+                        "question": "Fetch technical detail.",
+                        "target_axes": ["technical_substance"],
+                        "expected_decision_impact": "May change the technical score.",
+                    },
+                    "tool_requests": [
+                        {"name": "unavailable_tool", "arguments": {}}
+                    ],
+                },
+                invalid_final,
+                attributable_final(),
+            ]
+        )
+        conn = sqlite3.connect(":memory:")
+        self.addCleanup(conn.close)
+        init_decision_db(conn)
+
+        score_with_investigator(
+            conn,
+            feed_run_id="l2-run",
+            groups=[make_group()],
+            provider=provider,
+            tools={},
+            prompt_version="layer2-scoring-investigator-v2",
+        )
+
+        self.assertEqual(
+            provider.calls[2]["task"],
+            "layer2_scoring_investigator_repair",
+        )
+        self.assertNotIn(
+            "tool:t1:0",
+            provider.calls[2]["input_payload"]["valid_evidence_refs"],
+        )
+
+    def test_v1_rollback_request_and_repair_payloads_remain_unchanged(self):
+        from pipeline.decision.layer2_scoring_investigator import score_with_investigator
+
+        legacy_final = attributable_final()
+        legacy_final["score"]["supporting_evidence"] = [
+            "README documents a validation harness."
+        ]
+        invalid_legacy_final = {
+            **legacy_final,
+            "score": {**legacy_final["score"]},
+        }
+        invalid_legacy_final["score"].pop("axes")
+        provider = FakeLLMProvider([invalid_legacy_final, legacy_final])
+        conn = sqlite3.connect(":memory:")
+        self.addCleanup(conn.close)
+        init_decision_db(conn)
+
+        score_with_investigator(
+            conn,
+            feed_run_id="l2-run",
+            groups=[make_group()],
+            provider=provider,
+            tools={},
+            prompt_version="layer2-scoring-investigator-v1",
+        )
+
+        self.assertNotIn("valid_evidence_refs", provider.calls[0]["input_payload"])
+        self.assertNotIn("valid_evidence_refs", provider.calls[1]["input_payload"])
+        self.assertFalse(
+            provider.calls[0]["input_payload"]["task"]["must_finalize"]
+        )
+        self.assertEqual(
+            provider.calls[1]["input_payload"]["instruction"],
+            "Return a complete corrected action=final scoring JSON object.",
+        )
+
     def test_v2_rejects_empty_tool_request_contract_before_execution(self):
         from pipeline.decision.layer2_scoring_investigator import score_with_investigator
 
@@ -266,6 +465,28 @@ class Layer2ScoringContextV2Test(unittest.TestCase):
         self.assertEqual(payload["task"]["mode"], "score_from_context")
         self.assertTrue(payload["task"]["must_finalize"])
         self.assertEqual(payload["available_tools"], [])
+
+    def test_no_active_tools_sets_must_finalize_on_the_first_turn(self):
+        from pipeline.decision.layer2_scoring_investigator import score_with_investigator
+
+        provider = FakeLLMProvider([attributable_final()])
+        conn = sqlite3.connect(":memory:")
+        self.addCleanup(conn.close)
+        init_decision_db(conn)
+
+        score_with_investigator(
+            conn,
+            feed_run_id="l2-run",
+            groups=[make_group()],
+            provider=provider,
+            tools={},
+            direct_final_enabled=False,
+            prompt_version="layer2-scoring-investigator-v2",
+        )
+
+        task = provider.calls[0]["input_payload"]["task"]
+        self.assertEqual(task["mode"], "investigate")
+        self.assertTrue(task["must_finalize"])
 
     def test_provider_request_and_persistence_use_context_and_claim_contracts_v2(self):
         from pipeline.decision.layer2_scoring_investigator import (
