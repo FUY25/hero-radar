@@ -354,6 +354,29 @@ class Layer2ScoringContextV2Test(unittest.TestCase):
             "Return a complete corrected action=final scoring JSON object.",
         )
 
+    def test_v1_rollback_still_accepts_structured_claims_for_visible_evidence(self):
+        from pipeline.decision.layer2_scoring_investigator import score_with_investigator
+
+        provider = FakeLLMProvider([attributable_final()])
+        conn = sqlite3.connect(":memory:")
+        self.addCleanup(conn.close)
+        init_decision_db(conn)
+
+        result = score_with_investigator(
+            conn,
+            feed_run_id="l2-run",
+            groups=[make_group()],
+            provider=provider,
+            tools={},
+            prompt_version="layer2-scoring-investigator-v1",
+        )[0]
+
+        self.assertNotIn("valid_evidence_refs", provider.calls[0]["input_payload"])
+        self.assertEqual(
+            result["supporting_claims"][0]["evidence_refs"],
+            ["evidence:42"],
+        )
+
     def test_v2_rejects_empty_tool_request_contract_before_execution(self):
         from pipeline.decision.layer2_scoring_investigator import score_with_investigator
 

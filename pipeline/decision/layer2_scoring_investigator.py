@@ -696,11 +696,7 @@ def _score_one_group(
                     "Investigation turn budget exhausted without final score."
                 ),
             }
-        valid_evidence_refs = [
-            str(ref)
-            for ref in payload.get("valid_evidence_refs") or []
-            if str(ref)
-        ]
+        valid_evidence_refs = _visible_evidence_refs(payload)
         normalized = _validate_or_repair_final(
             provider,
             prompt_version=prompt_version,
@@ -1028,6 +1024,34 @@ def _normalize_claim_output(
         # compatibility projection.
         return [], _string_list(value, 8, 240)
     raise ValueError("evidence claims must be uniformly structured claim objects")
+
+
+def _visible_evidence_refs(payload: Mapping[str, Any]) -> list[str]:
+    if "valid_evidence_refs" in payload:
+        values = payload.get("valid_evidence_refs") or []
+    else:
+        candidate = payload.get("candidate")
+        working_state = payload.get("working_state")
+        top_evidence = (
+            candidate.get("top_evidence")
+            if isinstance(candidate, Mapping)
+            else []
+        )
+        observations = (
+            working_state.get("verified_observations")
+            if isinstance(working_state, Mapping)
+            else []
+        )
+        values = [
+            row.get("evidence_id")
+            for row in top_evidence or []
+            if isinstance(row, Mapping)
+        ] + [
+            row.get("observation_id")
+            for row in observations or []
+            if isinstance(row, Mapping)
+        ]
+    return list(dict.fromkeys(str(value) for value in values if str(value or "")))
 
 
 def _run_tool_request(
