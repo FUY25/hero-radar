@@ -9,7 +9,6 @@ is starting to move.
 from __future__ import annotations
 
 import argparse
-import concurrent.futures
 import dataclasses
 import datetime as dt
 import email.utils
@@ -33,6 +32,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from pipeline.run_logging import JsonlRunLogger
+from pipeline.source_concurrency import RateGate, stable_bounded_parallel_map
 
 CONFIG_PATH = ROOT / "pipeline" / "config.json"
 DATA_DIR = ROOT / "data"
@@ -197,16 +197,24 @@ def query_entry(value: str | dict[str, Any]) -> tuple[str, str]:
 
 
 def collect_github_trending(config: dict[str, Any], fetched_at: str) -> tuple[list[SourceItem], str | None]:
-    items: list[SourceItem] = []
     settings = config["github_trending"]
-    for period in settings["periods"]:
-        for language in settings["languages"]:
+    scopes = [(str(period), str(language)) for period in settings["periods"] for language in settings["languages"]]
+    workers = max(1, int(settings.get("scope_workers", min(4, len(scopes) or 1))))
+    gate = RateGate(
+        max_in_flight=workers,
+        min_interval_seconds=max(0.0, float(settings.get("request_interval_seconds", 0.5))),
+    )
+
+    def collect_scope(scope: tuple[str, str]) -> tuple[list[SourceItem], str | None]:
+        period, language = scope
+        try:
             path = f"/{language}" if language else ""
             url = f"https://github.com/trending{path}?since={period}"
-            html_text = request_text(url, headers={"User-Agent": "Mozilla/5.0"})
+            html_text = gate.run(lambda: request_text(url, headers={"User-Agent": "Mozilla/5.0"}))
             raw_file = RAW_DIR / f"github_trending_{language or 'all'}_{period}_{fetched_at.replace(':', '').replace('-', '')}.html"
             raw_file.write_text(html_text)
 
+            scope_items: list[SourceItem] = []
             articles = re.findall(r'<article class="Box-row">(.*?)</article>', html_text, flags=re.S)
             for rank, article in enumerate(articles, start=1):
                 repo_match = re.search(r'<h2 class="h3 lh-condensed".*?<a\b[^>]*href="/([^/]+)/([^"/]+)"', article, flags=re.S)
@@ -231,7 +239,7 @@ def collect_github_trending(config: dict[str, Any], fetched_at: str) -> tuple[li
                 if period_match:
                     period_stars = parse_int(period_match.group(1))
 
-                items.append(
+                scope_items.append(
                     SourceItem(
                         source="github_trending",
                         external_id=f"{period}:{full_name}",
@@ -252,70 +260,96 @@ def collect_github_trending(config: dict[str, Any], fetched_at: str) -> tuple[li
                         raw={"full_name": full_name},
                     )
                 )
-            time.sleep(0.5)
-    return items, None
+            return scope_items, None
+        except Exception as exc:  # noqa: BLE001
+            scope_label = language or "all"
+            return [], f"{period}/{scope_label}: {type(exc).__name__}: {exc}"
+
+    results = stable_bounded_parallel_map(scopes, collect_scope, concurrency=workers)
+    items = [item for scope_items, _error in results for item in scope_items]
+    errors = [error for _scope_items, error in results if error]
+    return items, "; ".join(errors) if errors else None
 
 
 def collect_github_search(config: dict[str, Any], fetched_at: str) -> tuple[list[SourceItem], str | None]:
     settings = config["github_search"]
-    items: list[SourceItem] = []
     per_page = max(1, min(100, int(settings.get("per_page", 10))))
     max_results = max(per_page, int(settings.get("max_results_per_query", per_page)))
     pages = max(1, (max_results + per_page - 1) // per_page)
+    tasks: list[tuple[str, str]] = []
     for query_config in settings["queries"]:
         query_label, query = query_entry(query_config)
         if not query:
             continue
+        tasks.append((query_label, query))
+
+    workers = max(1, int(settings.get("query_workers", min(3, len(tasks) or 1))))
+    default_interval = 1.0 if os.environ.get("GITHUB_TOKEN") else 6.2
+    gate = RateGate(
+        max_in_flight=workers,
+        min_interval_seconds=max(0.0, float(settings.get("request_interval_seconds", default_interval))),
+    )
+
+    def collect_query(task: tuple[str, str]) -> tuple[list[SourceItem], str | None]:
+        query_label, query = task
         rank_offset = 0
-        for page in range(1, pages + 1):
-            params = urllib.parse.urlencode(
-                {
-                    "q": query,
-                    "sort": "stars",
-                    "order": "desc",
-                    "per_page": str(per_page),
-                    "page": str(page),
-                }
-            )
-            url = f"https://api.github.com/search/repositories?{params}"
-            data = request_json(url, headers=github_headers())
-            raw_file = RAW_DIR / f"github_search_{safe_name(query)}_p{page}_{fetched_at.replace(':', '').replace('-', '')}.json"
-            raw_file.write_text(json.dumps(data, ensure_ascii=False, indent=2))
-            repos = data.get("items", [])
-            for repo in repos:
-                rank = rank_offset + 1
-                rank_offset += 1
-                if rank > max_results:
-                    break
-                full_name = repo["full_name"]
-                items.append(
-                    SourceItem(
-                        source="github_search",
-                        external_id=f"{query_label}:{full_name}",
-                        name=full_name,
-                        url=repo["html_url"],
-                        source_rank=rank,
-                        description=repo.get("description") or "",
-                        fetched_at=fetched_at,
-                        metadata={
-                            "query": query,
-                            "query_label": query_label,
-                            "window": "current",
-                            "stars": repo.get("stargazers_count"),
-                            "forks": repo.get("forks_count"),
-                            "created_at": repo.get("created_at"),
-                            "pushed_at": repo.get("pushed_at"),
-                            "language": repo.get("language"),
-                            "topics": repo.get("topics", []),
-                            "search_page": page,
-                        },
-                        raw=repo,
-                    )
+        query_items: list[SourceItem] = []
+        try:
+            for page in range(1, pages + 1):
+                params = urllib.parse.urlencode(
+                    {
+                        "q": query,
+                        "sort": "stars",
+                        "order": "desc",
+                        "per_page": str(per_page),
+                        "page": str(page),
+                    }
                 )
-            if len(repos) < per_page or rank_offset >= max_results:
-                break
-            time.sleep(6.2 if not os.environ.get("GITHUB_TOKEN") else 1.0)
-    return items, None
+                url = f"https://api.github.com/search/repositories?{params}"
+                data = gate.run(lambda: request_json(url, headers=github_headers()))
+                raw_file = RAW_DIR / f"github_search_{safe_name(query)}_p{page}_{fetched_at.replace(':', '').replace('-', '')}.json"
+                raw_file.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+                repos = data.get("items", [])
+                for repo in repos:
+                    rank = rank_offset + 1
+                    rank_offset += 1
+                    if rank > max_results:
+                        break
+                    full_name = repo["full_name"]
+                    query_items.append(
+                        SourceItem(
+                            source="github_search",
+                            external_id=f"{query_label}:{full_name}",
+                            name=full_name,
+                            url=repo["html_url"],
+                            source_rank=rank,
+                            description=repo.get("description") or "",
+                            fetched_at=fetched_at,
+                            metadata={
+                                "query": query,
+                                "query_label": query_label,
+                                "window": "current",
+                                "stars": repo.get("stargazers_count"),
+                                "forks": repo.get("forks_count"),
+                                "created_at": repo.get("created_at"),
+                                "pushed_at": repo.get("pushed_at"),
+                                "language": repo.get("language"),
+                                "topics": repo.get("topics", []),
+                                "search_page": page,
+                            },
+                            raw=repo,
+                        )
+                    )
+                if len(repos) < per_page or rank_offset >= max_results:
+                    break
+            return query_items, None
+        except Exception as exc:  # noqa: BLE001
+            return [], f"{query_label}: {type(exc).__name__}: {exc}"
+
+    results = stable_bounded_parallel_map(tasks, collect_query, concurrency=workers)
+    items = [item for query_items, _error in results for item in query_items]
+    errors = [error for _query_items, error in results if error]
+    return items, "; ".join(errors) if errors else None
 
 
 def collect_github_movers(config: dict[str, Any], fetched_at: str) -> tuple[list[SourceItem], str | None]:
@@ -323,23 +357,26 @@ def collect_github_movers(config: dict[str, Any], fetched_at: str) -> tuple[list
     if not settings.get("enabled", False):
         return [], "disabled"
 
-    items: list[SourceItem] = []
-    errors: list[str] = []
-
+    providers: list[tuple[str, Any, dict[str, Any]]] = []
     trending_settings = settings.get("trending_repos", {})
     if trending_settings.get("enabled", False):
-        try:
-            items.extend(collect_trending_repos_movers(trending_settings, fetched_at))
-        except Exception as exc:  # noqa: BLE001
-            errors.append(f"trending-repos: {type(exc).__name__}: {exc}")
+        providers.append(("trending-repos", collect_trending_repos_movers, trending_settings))
 
     repofomo_settings = settings.get("repofomo", {})
     if repofomo_settings.get("enabled", False):
-        try:
-            items.extend(collect_repofomo_movers(repofomo_settings, fetched_at))
-        except Exception as exc:  # noqa: BLE001
-            errors.append(f"repofomo: {type(exc).__name__}: {exc}")
+        providers.append(("repofomo", collect_repofomo_movers, repofomo_settings))
 
+    def collect_provider(provider: tuple[str, Any, dict[str, Any]]) -> tuple[list[SourceItem], str | None]:
+        provider_name, collector, provider_settings = provider
+        try:
+            return collector(provider_settings, fetched_at), None
+        except Exception as exc:  # noqa: BLE001
+            return [], f"{provider_name}: {type(exc).__name__}: {exc}"
+
+    workers = max(1, int(settings.get("provider_workers", min(2, len(providers) or 1))))
+    results = stable_bounded_parallel_map(providers, collect_provider, concurrency=workers)
+    items = [item for provider_items, _error in results for item in provider_items]
+    errors = [error for _provider_items, error in results if error]
     return items, "; ".join(errors) if errors else None
 
 
@@ -531,16 +568,27 @@ def to_float(value: Any) -> float | None:
 
 
 def collect_hn_algolia(config: dict[str, Any], fetched_at: str) -> tuple[list[SourceItem], str | None]:
-    items: list[SourceItem] = []
     now = utc_now()
     windows = config["hn"].get("algolia_windows") or {"7d": 7}
     hits_per_page = max(1, min(1000, int(config["hn"].get("algolia_hits_per_page", 20))))
+    tasks: list[tuple[str, str, str, int]] = []
     for window, days in windows.items():
         since = int((now - dt.timedelta(days=float(days))).timestamp())
         for query_config in config["hn"]["algolia_queries"]:
             query_label, query = query_entry(query_config)
             if not query:
                 continue
+            tasks.append((str(window), query_label, query, since))
+
+    workers = max(1, int(config["hn"].get("algolia_workers", 3)))
+    gate = RateGate(
+        max_in_flight=workers,
+        min_interval_seconds=max(0.0, float(config["hn"].get("algolia_request_interval_seconds", 0.5))),
+    )
+
+    def collect_query(task: tuple[str, str, str, int]) -> tuple[list[SourceItem], str | None]:
+        window, query_label, query, since = task
+        try:
             params = urllib.parse.urlencode(
                 {
                     "query": query,
@@ -550,16 +598,17 @@ def collect_hn_algolia(config: dict[str, Any], fetched_at: str) -> tuple[list[So
                 }
             )
             url = f"https://hn.algolia.com/api/v1/search_by_date?{params}"
-            data = request_json(url)
+            data = gate.run(lambda: request_json(url))
             raw_file = RAW_DIR / f"hn_algolia_{safe_name(query)}_{window}_{fetched_at.replace(':', '').replace('-', '')}.json"
             raw_file.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+            query_items: list[SourceItem] = []
             for rank, hit in enumerate(data.get("hits", []), start=1):
                 story_id = str(hit.get("objectID") or hit.get("story_id") or "")
                 title = hit.get("title") or hit.get("story_title") or "(untitled)"
                 points = hit.get("points") or 0
                 comments = hit.get("num_comments") or 0
                 item_url = hit.get("url") or f"https://news.ycombinator.com/item?id={story_id}"
-                items.append(
+                query_items.append(
                     SourceItem(
                         source="hn_algolia",
                         external_id=f"{window}:{query_label}:{story_id}",
@@ -581,8 +630,14 @@ def collect_hn_algolia(config: dict[str, Any], fetched_at: str) -> tuple[list[So
                         raw=hit,
                     )
                 )
-            time.sleep(0.5)
-    return items, None
+            return query_items, None
+        except Exception as exc:  # noqa: BLE001
+            return [], f"{window}/{query_label}: {type(exc).__name__}: {exc}"
+
+    results = stable_bounded_parallel_map(tasks, collect_query, concurrency=workers)
+    items = [item for query_items, _error in results for item in query_items]
+    errors = [error for _query_items, error in results if error]
+    return items, "; ".join(errors) if errors else None
 
 
 def collect_hn_firebase(config: dict[str, Any], fetched_at: str) -> tuple[list[SourceItem], str | None]:
@@ -621,15 +676,17 @@ def collect_hn_firebase(config: dict[str, Any], fetched_at: str) -> tuple[list[S
             raw=item,
         )
 
+    work: list[tuple[str, int, Any]] = []
     for list_name in config["hn"]["firebase_lists"]:
         ids = request_json(f"https://hacker-news.firebaseio.com/v0/{list_name}.json", timeout=8)
-        work = [(list_name, rank, item_id) for rank, item_id in enumerate(ids[:limit], start=1)]
-        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = [executor.submit(fetch_item, *args) for args in work]
-            for future in concurrent.futures.as_completed(futures):
-                item = future.result()
-                if item is not None:
-                    items.append(item)
+        work.extend((list_name, rank, item_id) for rank, item_id in enumerate(ids[:limit], start=1))
+
+    fetched_items = stable_bounded_parallel_map(
+        work,
+        lambda args: fetch_item(*args),
+        concurrency=workers,
+    )
+    items.extend(item for item in fetched_items if item is not None)
     return items, None
 
 
@@ -729,7 +786,14 @@ def huggingface_card_readme_url(resource: str, item_id: str) -> str:
     return f"https://huggingface.co/{prefix}{quoted_id}/raw/main/README.md"
 
 
-def enrich_huggingface_card_links(resource: str, resource_items: list[SourceItem], limit: int) -> None:
+def enrich_huggingface_card_links(
+    resource: str,
+    resource_items: list[SourceItem],
+    limit: int,
+    *,
+    request_gate: RateGate | None = None,
+    card_workers: int = 1,
+) -> None:
     if limit <= 0:
         return
     ranked_items = sorted(
@@ -737,58 +801,88 @@ def enrich_huggingface_card_links(resource: str, resource_items: list[SourceItem
         key=lambda item: float(item.raw.get("trendingScore") or 0),
         reverse=True,
     )
-    for item in ranked_items[:limit]:
+    selected_items = ranked_items[:limit]
+
+    def fetch_repository(item: SourceItem) -> str | None:
         try:
-            readme = request_text(huggingface_card_readme_url(resource, item.external_id), timeout=8)
-            github_link = extract_github_repo_from_card(readme)
-            if github_link:
-                item.metadata["repository"] = github_link
+            fetch = lambda: request_text(huggingface_card_readme_url(resource, item.external_id), timeout=8)
+            readme = request_gate.run(fetch) if request_gate else fetch()
+            return extract_github_repo_from_card(readme)
         except Exception:  # noqa: BLE001
-            continue
+            return None
+
+    repository_links = stable_bounded_parallel_map(
+        selected_items,
+        fetch_repository,
+        concurrency=max(1, card_workers),
+    )
+    for item, github_link in zip(selected_items, repository_links, strict=True):
+        if github_link:
+            item.metadata["repository"] = github_link
 
 
 def collect_huggingface(config: dict[str, Any], fetched_at: str) -> tuple[list[SourceItem], str | None]:
-    items: list[SourceItem] = []
     settings = config["huggingface"]
     card_enrich_limit = max(0, int(settings.get("card_enrich_limit", 50)))
-    for resource in settings["resources"]:
-        resource_start = len(items)
-        params = urllib.parse.urlencode(
-            {"sort": "trendingScore", "direction": "-1", "limit": str(settings.get("limit", 20))}
-        )
-        url = f"https://huggingface.co/api/{resource}?{params}"
-        data = request_json(url)
-        raw_file = RAW_DIR / f"huggingface_{resource}_{fetched_at.replace(':', '').replace('-', '')}.json"
-        raw_file.write_text(json.dumps(data, ensure_ascii=False, indent=2))
-        for rank, entry in enumerate(data, start=1):
-            entry_id = entry.get("id") or entry.get("name") or ""
-            likes = entry.get("likes") or 0
-            downloads = entry.get("downloads") or 0
-            items.append(
-                SourceItem(
-                    source=f"huggingface_{resource}",
-                    external_id=entry_id,
-                    name=entry_id,
-                    url=f"https://huggingface.co/{entry_id}",
-                    source_rank=rank,
-                    description=entry.get("description") or "",
-                    fetched_at=fetched_at,
-                    metadata={
-                        "resource": resource,
-                        "window": "current",
-                        "likes": likes,
-                        "downloads": downloads,
-                        "created_at": entry.get("createdAt"),
-                        "last_modified": entry.get("lastModified"),
-                        "pipeline_tag": entry.get("pipeline_tag"),
-                        "tags": entry.get("tags", []),
-                    },
-                    raw=entry,
-                )
+    card_workers = max(1, int(settings.get("card_workers", 6)))
+    resources = [str(resource) for resource in settings["resources"]]
+    workers = max(1, int(settings.get("resource_workers", min(3, len(resources) or 1))))
+    gate = RateGate(
+        max_in_flight=max(workers, card_workers),
+        min_interval_seconds=max(0.0, float(settings.get("request_interval_seconds", 0.5))),
+    )
+
+    def collect_resource(resource: str) -> tuple[list[SourceItem], str | None]:
+        try:
+            params = urllib.parse.urlencode(
+                {"sort": "trendingScore", "direction": "-1", "limit": str(settings.get("limit", 20))}
             )
-        enrich_huggingface_card_links(resource, items[resource_start:], card_enrich_limit)
-        time.sleep(0.5)
-    return items, None
+            url = f"https://huggingface.co/api/{resource}?{params}"
+            data = gate.run(lambda: request_json(url))
+            raw_file = RAW_DIR / f"huggingface_{resource}_{fetched_at.replace(':', '').replace('-', '')}.json"
+            raw_file.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+            resource_items: list[SourceItem] = []
+            for rank, entry in enumerate(data, start=1):
+                entry_id = entry.get("id") or entry.get("name") or ""
+                likes = entry.get("likes") or 0
+                downloads = entry.get("downloads") or 0
+                resource_items.append(
+                    SourceItem(
+                        source=f"huggingface_{resource}",
+                        external_id=entry_id,
+                        name=entry_id,
+                        url=f"https://huggingface.co/{entry_id}",
+                        source_rank=rank,
+                        description=entry.get("description") or "",
+                        fetched_at=fetched_at,
+                        metadata={
+                            "resource": resource,
+                            "window": "current",
+                            "likes": likes,
+                            "downloads": downloads,
+                            "created_at": entry.get("createdAt"),
+                            "last_modified": entry.get("lastModified"),
+                            "pipeline_tag": entry.get("pipeline_tag"),
+                            "tags": entry.get("tags", []),
+                        },
+                        raw=entry,
+                    )
+                )
+            enrich_huggingface_card_links(
+                resource,
+                resource_items,
+                card_enrich_limit,
+                request_gate=gate,
+                card_workers=card_workers,
+            )
+            return resource_items, None
+        except Exception as exc:  # noqa: BLE001
+            return [], f"{resource}: {type(exc).__name__}: {exc}"
+
+    results = stable_bounded_parallel_map(resources, collect_resource, concurrency=workers)
+    items = [item for resource_items, _error in results for item in resource_items]
+    errors = [error for _resource_items, error in results if error]
+    return items, "; ".join(errors) if errors else None
 
 
 def collect_npm_search(config: dict[str, Any], fetched_at: str) -> tuple[list[SourceItem], str | None]:
@@ -796,69 +890,87 @@ def collect_npm_search(config: dict[str, Any], fetched_at: str) -> tuple[list[So
     if not settings.get("enabled", False):
         return [], "disabled"
 
-    items: list[SourceItem] = []
     size = int(settings.get("size", 50))
+    tasks: list[tuple[str, str]] = []
     for query_config in settings.get("queries", []):
         query_label, query = query_entry(query_config)
         if not query:
             continue
-        params = urllib.parse.urlencode({"text": query, "size": str(size)})
-        url = f"https://registry.npmjs.org/-/v1/search?{params}"
-        data = request_json(url, timeout=45)
-        raw_file = RAW_DIR / f"npm_search_{safe_name(query_label)}_{fetched_at.replace(':', '').replace('-', '')}.json"
-        raw_file.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+        tasks.append((query_label, query))
 
-        for rank, obj in enumerate(data.get("objects", []), start=1):
-            if not isinstance(obj, dict):
-                continue
-            package = obj.get("package") if isinstance(obj.get("package"), dict) else {}
-            score = obj.get("score") if isinstance(obj.get("score"), dict) else {}
-            detail = score.get("detail") if isinstance(score.get("detail"), dict) else {}
-            downloads = obj.get("downloads") if isinstance(obj.get("downloads"), dict) else {}
-            links = package.get("links") if isinstance(package.get("links"), dict) else {}
-            name = str(package.get("name") or "")
-            if not name:
-                continue
-            weekly_downloads = to_float(downloads.get("weekly"))
-            final_score = to_float(score.get("final") or obj.get("searchScore"))
-            items.append(
-                SourceItem(
-                    source="npm_search",
-                    external_id=f"{query_label}:{name}",
-                    name=name,
-                    url=str(links.get("npm") or f"https://www.npmjs.com/package/{urllib.parse.quote(name, safe='@/')}"),
-                    source_rank=rank,
-                    description=package.get("description") or "",
-                    fetched_at=fetched_at,
-                    metadata={
-                        "query": query,
-                        "query_label": query_label,
-                        "window": "current",
-                        "version": package.get("version"),
-                        "keywords": package.get("keywords") or [],
-                        "license": package.get("license"),
-                        "publisher": (package.get("publisher") or {}).get("username") if isinstance(package.get("publisher"), dict) else None,
-                        "maintainers_count": len(package.get("maintainers") or []),
-                        "package_date": package.get("date"),
-                        "updated": obj.get("updated"),
-                        "weekly_downloads": weekly_downloads,
-                        "monthly_downloads": to_float(downloads.get("monthly")),
-                        "dependents": to_float(obj.get("dependents")),
-                        "search_score": to_float(obj.get("searchScore")),
-                        "score_final": final_score,
-                        "score_quality": to_float(detail.get("quality")),
-                        "score_popularity": to_float(detail.get("popularity")),
-                        "score_maintenance": to_float(detail.get("maintenance")),
-                        "homepage": links.get("homepage"),
-                        "repository": links.get("repository"),
-                        "bugs": links.get("bugs"),
-                        "raw_file": str(raw_file.relative_to(ROOT)),
-                    },
-                    raw=obj,
+    workers = max(1, int(settings.get("query_workers", 3)))
+    gate = RateGate(
+        max_in_flight=workers,
+        min_interval_seconds=max(0.0, float(settings.get("sleep_seconds", 0.5))),
+    )
+
+    def collect_query(task: tuple[str, str]) -> tuple[list[SourceItem], str | None]:
+        query_label, query = task
+        try:
+            params = urllib.parse.urlencode({"text": query, "size": str(size)})
+            url = f"https://registry.npmjs.org/-/v1/search?{params}"
+            data = gate.run(lambda: request_json(url, timeout=45))
+            raw_file = RAW_DIR / f"npm_search_{safe_name(query_label)}_{fetched_at.replace(':', '').replace('-', '')}.json"
+            raw_file.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+
+            query_items: list[SourceItem] = []
+            for rank, obj in enumerate(data.get("objects", []), start=1):
+                if not isinstance(obj, dict):
+                    continue
+                package = obj.get("package") if isinstance(obj.get("package"), dict) else {}
+                score = obj.get("score") if isinstance(obj.get("score"), dict) else {}
+                detail = score.get("detail") if isinstance(score.get("detail"), dict) else {}
+                downloads = obj.get("downloads") if isinstance(obj.get("downloads"), dict) else {}
+                links = package.get("links") if isinstance(package.get("links"), dict) else {}
+                name = str(package.get("name") or "")
+                if not name:
+                    continue
+                weekly_downloads = to_float(downloads.get("weekly"))
+                final_score = to_float(score.get("final") or obj.get("searchScore"))
+                query_items.append(
+                    SourceItem(
+                        source="npm_search",
+                        external_id=f"{query_label}:{name}",
+                        name=name,
+                        url=str(links.get("npm") or f"https://www.npmjs.com/package/{urllib.parse.quote(name, safe='@/')}"),
+                        source_rank=rank,
+                        description=package.get("description") or "",
+                        fetched_at=fetched_at,
+                        metadata={
+                            "query": query,
+                            "query_label": query_label,
+                            "window": "current",
+                            "version": package.get("version"),
+                            "keywords": package.get("keywords") or [],
+                            "license": package.get("license"),
+                            "publisher": (package.get("publisher") or {}).get("username") if isinstance(package.get("publisher"), dict) else None,
+                            "maintainers_count": len(package.get("maintainers") or []),
+                            "package_date": package.get("date"),
+                            "updated": obj.get("updated"),
+                            "weekly_downloads": weekly_downloads,
+                            "monthly_downloads": to_float(downloads.get("monthly")),
+                            "dependents": to_float(obj.get("dependents")),
+                            "search_score": to_float(obj.get("searchScore")),
+                            "score_final": final_score,
+                            "score_quality": to_float(detail.get("quality")),
+                            "score_popularity": to_float(detail.get("popularity")),
+                            "score_maintenance": to_float(detail.get("maintenance")),
+                            "homepage": links.get("homepage"),
+                            "repository": links.get("repository"),
+                            "bugs": links.get("bugs"),
+                            "raw_file": str(raw_file.relative_to(ROOT)),
+                        },
+                        raw=obj,
+                    )
                 )
-            )
-        time.sleep(float(settings.get("sleep_seconds", 0.5)))
-    return items, None
+            return query_items, None
+        except Exception as exc:  # noqa: BLE001
+            return [], f"{query_label}: {type(exc).__name__}: {exc}"
+
+    results = stable_bounded_parallel_map(tasks, collect_query, concurrency=workers)
+    items = [item for query_items, _error in results for item in query_items]
+    errors = [error for _query_items, error in results if error]
+    return items, "; ".join(errors) if errors else None
 
 
 def collect_pypi_feeds(config: dict[str, Any], fetched_at: str) -> tuple[list[SourceItem], str | None]:
@@ -873,28 +985,31 @@ def collect_pypi_feeds(config: dict[str, Any], fetched_at: str) -> tuple[list[So
     enabled_feeds = settings.get("feeds", ["newest", "updates"])
     limit = int(settings.get("limit_per_feed", 100))
     enrich_limit = int(settings.get("json_enrich_limit_per_feed", 20))
-    items: list[SourceItem] = []
-    errors: list[str] = []
+    enrich_workers = max(1, int(settings.get("json_enrich_workers", 5)))
+    feed_names = [str(feed_name) for feed_name in enabled_feeds]
+    workers = max(1, int(settings.get("feed_workers", min(2, len(feed_names) or 1))))
+    gate = RateGate(
+        max_in_flight=max(workers, enrich_workers),
+        min_interval_seconds=max(0.0, float(settings.get("json_sleep_seconds", 0.2))),
+    )
 
-    for feed_name in enabled_feeds:
-        url = feed_urls.get(str(feed_name))
+    def collect_feed(feed_name: str) -> tuple[list[SourceItem], str | None]:
+        url = feed_urls.get(feed_name)
         if not url:
-            errors.append(f"unknown feed: {feed_name}")
-            continue
+            return [], f"unknown feed: {feed_name}"
         try:
-            xml_text = request_text(url, timeout=30)
+            xml_text = gate.run(lambda: request_text(url, timeout=30))
+            raw_file = RAW_DIR / f"pypi_{feed_name}_{fetched_at.replace(':', '').replace('-', '')}.xml"
+            raw_file.write_text(xml_text)
+            root = ET.fromstring(xml_text)
+            channel = root.find("channel")
+            if channel is None:
+                return [], f"{feed_name}: RSS channel not found"
         except Exception as exc:  # noqa: BLE001
-            errors.append(f"{feed_name}: {type(exc).__name__}: {exc}")
-            continue
+            return [], f"{feed_name}: {type(exc).__name__}: {exc}"
 
-        raw_file = RAW_DIR / f"pypi_{feed_name}_{fetched_at.replace(':', '').replace('-', '')}.xml"
-        raw_file.write_text(xml_text)
-        root = ET.fromstring(xml_text)
-        channel = root.find("channel")
-        if channel is None:
-            errors.append(f"{feed_name}: RSS channel not found")
-            continue
         rss_items = channel.findall("item")[:limit]
+        parsed_rows: list[tuple[int, str, str, str, str, str, str, str | None]] = []
         for rank, node in enumerate(rss_items, start=1):
             title = node.findtext("title") or ""
             link = node.findtext("link") or ""
@@ -902,25 +1017,39 @@ def collect_pypi_feeds(config: dict[str, Any], fetched_at: str) -> tuple[list[So
             pub_date = node.findtext("pubDate") or ""
             author = node.findtext("author") or ""
             package_name, version = parse_pypi_feed_title(str(feed_name), title, link)
+            parsed_rows.append(
+                (rank, title, link, description, pub_date, author, package_name, version)
+            )
 
-            project_json: dict[str, Any] = {}
-            if package_name and rank <= enrich_limit:
-                try:
-                    project_json = request_json(
-                        f"https://pypi.org/pypi/{urllib.parse.quote(package_name)}/json",
-                        timeout=20,
-                    )
-                    time.sleep(float(settings.get("json_sleep_seconds", 0.2)))
-                except Exception:
-                    project_json = {}
+        enrichment_rows = [row for row in parsed_rows if row[6] and row[0] <= enrich_limit]
 
+        def enrich_package(row: tuple[int, str, str, str, str, str, str, str | None]) -> dict[str, Any]:
+            package_name = row[6]
+            try:
+                project_url = f"https://pypi.org/pypi/{urllib.parse.quote(package_name)}/json"
+                return gate.run(lambda: request_json(project_url, timeout=20))
+            except Exception:  # noqa: BLE001
+                return {}
+
+        enrichment_results = stable_bounded_parallel_map(
+            enrichment_rows,
+            enrich_package,
+            concurrency=enrich_workers,
+        )
+        project_json_by_rank = {
+            row[0]: project_json
+            for row, project_json in zip(enrichment_rows, enrichment_results, strict=True)
+        }
+
+        feed_items: list[SourceItem] = []
+        for rank, title, link, description, pub_date, author, package_name, version in parsed_rows:
+            project_json = project_json_by_rank.get(rank, {})
             info = project_json.get("info") if isinstance(project_json.get("info"), dict) else {}
             urls = project_json.get("urls") if isinstance(project_json.get("urls"), list) else []
             latest_upload = latest_pypi_upload_time(urls)
             classifiers = info.get("classifiers") if isinstance(info.get("classifiers"), list) else []
             project_urls = info.get("project_urls") if isinstance(info.get("project_urls"), dict) else {}
-            parsed_pub = parse_email_datetime(pub_date)
-            items.append(
+            feed_items.append(
                 SourceItem(
                     source=f"pypi_{feed_name}",
                     external_id=f"{feed_name}:{package_name or title}:{version or ''}",
@@ -962,6 +1091,11 @@ def collect_pypi_feeds(config: dict[str, Any], fetched_at: str) -> tuple[list[So
                     },
                 )
             )
+        return feed_items, None
+
+    results = stable_bounded_parallel_map(feed_names, collect_feed, concurrency=workers)
+    items = [item for feed_items, _error in results for item in feed_items]
+    errors = [error for _feed_items, error in results if error]
     return items, "; ".join(errors) if errors else None
 
 
@@ -4980,6 +5114,54 @@ def pipeline_adapters() -> list[tuple[str, Any]]:
     ]
 
 
+@dataclasses.dataclass(frozen=True)
+class SourceCollectionResult:
+    adapter_index: int
+    source_name: str
+    items: list[SourceItem]
+    error: str | None
+    duration_seconds: float
+
+
+def collect_source_adapters(
+    adapters: list[tuple[str, Any]],
+    *,
+    config: dict[str, Any],
+    fetched_at: str,
+    max_workers: int,
+) -> list[SourceCollectionResult]:
+    """Collect adapters concurrently and return results in declaration order.
+
+    No snapshot writes happen in this phase. In particular, the X adapter may
+    update its local tweet store using its own connection without overlapping
+    the single snapshot writer that consumes these buffered results later.
+    """
+
+    indexed_adapters = list(enumerate(adapters))
+
+    def collect_one(indexed_adapter: tuple[int, tuple[str, Any]]) -> SourceCollectionResult:
+        adapter_index, (source_name, adapter) = indexed_adapter
+        started = time.monotonic()
+        try:
+            items, error = adapter(config, fetched_at)
+        except Exception as exc:  # noqa: BLE001
+            items = []
+            error = f"{type(exc).__name__}: {exc}"
+        return SourceCollectionResult(
+            adapter_index=adapter_index,
+            source_name=source_name,
+            items=items,
+            error=error,
+            duration_seconds=round(time.monotonic() - started, 3),
+        )
+
+    return stable_bounded_parallel_map(
+        indexed_adapters,
+        collect_one,
+        concurrency=max(1, max_workers),
+    )
+
+
 def run_pipeline(
     only_sources: set[str] | None = None,
     *,
@@ -5006,6 +5188,7 @@ def run_pipeline(
         print(f"Exported {len(scored)} scored rows from latest snapshots.", file=sys.stderr)
         print(EXPORT_DIR / "latest_scores.md")
         logger.event("sources_run_completed", export_only=True, inserted=0, exported=len(scored))
+        conn.close()
         return 0
 
     adapters = pipeline_adapters()
@@ -5016,30 +5199,46 @@ def run_pipeline(
             print(f"Unknown source(s): {', '.join(unknown)}", file=sys.stderr)
             print(f"Known sources: {', '.join(sorted(known))}", file=sys.stderr)
             logger.event("sources_run_failed", error="unknown_sources", unknown_sources=unknown)
+            conn.close()
             return 2
         adapters = [(name, adapter) for name, adapter in adapters if name in only_sources]
 
+    source_workers = max(1, int(config.get("source_collection", {}).get("max_workers", 6)))
+    for source_name, _adapter in adapters:
+        print(f"[{source_name}] collecting...", file=sys.stderr)
+        logger.event("source_started", source=source_name)
+
+    collection_results = collect_source_adapters(
+        adapters,
+        config=config,
+        fetched_at=fetched_at,
+        max_workers=source_workers,
+    )
+
     source_errors: dict[str, str | None] = {}
     total_inserted = 0
-    for source_name, adapter in adapters:
-        print(f"[{source_name}] collecting...", file=sys.stderr)
-        started = time.monotonic()
-        logger.event("source_started", source=source_name)
-        try:
-            items, error = adapter(config, fetched_at)
-        except Exception as exc:  # noqa: BLE001
-            items = []
-            error = f"{type(exc).__name__}: {exc}"
-        source_errors[source_name] = error
-        ids = insert_source_items(conn, run_id=run_id, source=source_name, fetched_at=fetched_at, items=items, error=error)
+    for result in collection_results:
+        source_name = result.source_name
+        source_errors[source_name] = result.error
+        ids = insert_source_items(
+            conn,
+            run_id=run_id,
+            source=source_name,
+            fetched_at=fetched_at,
+            items=result.items,
+            error=result.error,
+        )
         total_inserted += len(ids)
-        print(f"[{source_name}] inserted {len(ids)} items" + (f" ({error})" if error else ""), file=sys.stderr)
+        print(
+            f"[{source_name}] inserted {len(ids)} items" + (f" ({result.error})" if result.error else ""),
+            file=sys.stderr,
+        )
         logger.event(
             "source_completed",
             source=source_name,
             items=len(ids),
-            error=error,
-            duration_seconds=round(time.monotonic() - started, 3),
+            error=result.error,
+            duration_seconds=result.duration_seconds,
         )
 
     if only_sources:
@@ -5052,6 +5251,7 @@ def run_pipeline(
     print(f"Inserted {total_inserted} items. Exported {len(scored)} scored rows.", file=sys.stderr)
     print(EXPORT_DIR / "latest_scores.md")
     logger.event("sources_run_completed", inserted=total_inserted, exported=len(scored))
+    conn.close()
     return 0
 
 
