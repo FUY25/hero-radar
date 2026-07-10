@@ -637,6 +637,58 @@ class DecisionParallelismTest(unittest.TestCase):
             ).fetchone()[0]
             self.assertEqual(status, "ok")
 
+    def test_preflight_work_with_zero_classifier_output_marks_run_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "hero.sqlite"
+            export_path = Path(tmpdir) / "candidates.json"
+            conn = sqlite3.connect(db_path)
+            conn.executescript(
+                """
+                create table snapshots (
+                    id integer primary key autoincrement, run_id text, source text,
+                    fetched_at text, status text, item_count integer, error text
+                );
+                create table items (
+                    id integer primary key autoincrement, run_id text, snapshot_id integer,
+                    source text, external_id text, name text, url text, fetched_at text,
+                    heat real, velocity real, acceleration real, source_rank integer,
+                    description text, metadata_json text, raw_json text
+                );
+                """
+            )
+            init_decision_db(conn)
+            conn.close()
+
+            with (
+                patch(
+                    "pipeline.decision.classifier_preflight.classifier_preflight_summary",
+                    return_value={
+                        "hn_classifier_will_process": 1,
+                        "x_classifier_will_process": 0,
+                    },
+                ),
+                patch(
+                    "pipeline.decision.hn_classifier.run_hn_classifier",
+                    return_value={"classified": 0},
+                ),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "no usable candidates"):
+                    run_decision(
+                        db_path=db_path,
+                        run_id="run",
+                        export_json_path=export_path,
+                        now=NOW,
+                        hn_llm_provider=object(),
+                        hn_classifier_limit=1,
+                    )
+
+            conn = sqlite3.connect(db_path)
+            self.addCleanup(conn.close)
+            status = conn.execute(
+                "select status from decision_runs where run_id='run'"
+            ).fetchone()[0]
+            self.assertEqual(status, "failed")
+
 
 if __name__ == "__main__":
     unittest.main()

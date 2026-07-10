@@ -994,6 +994,8 @@ def run_decision(
                 len(pass1.potential_candidates),
                 len(pass1.edge_watch_candidates),
                 len(pass1.backfill_jobs),
+                int(preflight_summary.get("hn_classifier_will_process") or 0),
+                int(preflight_summary.get("x_classifier_will_process") or 0),
                 int(hn_summary.get("classified") or 0),
                 int(x_stage1_summary.get("triaged") or 0),
                 int(x_stage2_summary.get("tiered") or 0),
