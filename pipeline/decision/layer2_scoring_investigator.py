@@ -22,13 +22,16 @@ from pipeline.decision.layer2_contracts import (
 )
 from pipeline.decision.layer2_harness import ModelCallTelemetryContext, sanitize_text
 from pipeline.decision.layer2_models import LEVEL_RANK, CandidateGroup
-from pipeline.decision.layer2_prompts import scoring_prompt_for_version
+from pipeline.decision.layer2_prompts import (
+    SCORING_PROMPT_VERSION_V2,
+    scoring_prompt_for_version,
+)
 from pipeline.decision.layer2_tool_registry import ToolCandidateContext, ToolSpec
 from pipeline.decision.request_contract import LLMRequestContract
 from pipeline.decision.schema import to_json, utc_now
 
 
-DEFAULT_INVESTIGATOR_PROMPT_VERSION = "layer2-scoring-investigator-v2"
+DEFAULT_INVESTIGATOR_PROMPT_VERSION = SCORING_PROMPT_VERSION_V2
 DEFAULT_BRIEF_PROMPT_VERSION = "layer2-scoring-investigator-brief-v2"
 SCORING_OUTPUT_SCHEMA_VERSION = "layer2-scoring-output-v2"
 SCORING_CONTEXT_POLICY_VERSION = "layer2-scoring-context-v1"
@@ -173,12 +176,10 @@ def score_with_investigator(
     prompt_version: str = DEFAULT_INVESTIGATOR_PROMPT_VERSION,
     output_schema_version: str = SCORING_OUTPUT_SCHEMA_VERSION,
     tool_registry_version: str = TOOL_REGISTRY_VERSION,
-    system_prompt: str | None = None,
 ) -> list[dict[str, Any]]:
     active_limits = limits or InvestigatorLimits()
     active_context_builder = context_builder or ScoringContextBuilder()
-    versioned_system_prompt = scoring_prompt_for_version(prompt_version)
-    active_system_prompt = system_prompt or versioned_system_prompt
+    active_system_prompt = scoring_prompt_for_version(prompt_version)
     results: list[dict[str, Any]] = []
     for group in groups:
         result = _score_one_group(
@@ -455,7 +456,7 @@ def _score_one_group(
     total_tool_calls = 0
     final_response: dict[str, Any] | None = None
     output_schema = scoring_turn_output_schema_v2()
-    strict_output = str(prompt_version).endswith("-v2")
+    strict_output = prompt_version == SCORING_PROMPT_VERSION_V2
     evidence_rows = _context_evidence_rows(group)
     candidate_packet = _scoring_candidate_packet(group)
     preliminary_context = context_builder.build(

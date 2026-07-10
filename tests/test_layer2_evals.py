@@ -4,6 +4,60 @@ import unittest
 from unittest import mock
 
 
+def scoring_v2_eval_response(
+    *,
+    axes: dict,
+    should_print: bool,
+    object_type: str,
+    is_product_or_repo: bool = True,
+) -> dict:
+    def level(axis: str) -> str:
+        value = float(axes[axis])
+        if value >= 70:
+            return "strong"
+        if value >= 40:
+            return "medium"
+        return "weak"
+
+    return {
+        "action": "final",
+        "information_sufficiency": {
+            "identity": "strong",
+            "workflow_shift": level("workflow_shift"),
+            "technical_substance": level("technical_substance"),
+            "product_market_fit": level("product_market_fit"),
+            "momentum": level("momentum"),
+        },
+        "score": {
+            "object_type": object_type,
+            "is_product_or_repo": is_product_or_repo,
+            "axes": axes,
+            "supporting_evidence": [
+                {
+                    "claim": f"Eval evidence {index + 1}",
+                    "evidence_refs": ["eval:candidate"],
+                    "supports_axes": [axis],
+                    "claim_type": "observed",
+                }
+                for index, axis in enumerate(
+                    [
+                        "workflow_shift",
+                        "technical_substance",
+                        "product_market_fit",
+                    ]
+                )
+            ],
+            "negative_evidence": [],
+            "known_gaps": [],
+            "primary_reason": "Eval",
+            "rationale_short": "Eval rationale",
+            "topic_tags": ["eval"],
+            "caveats": [],
+            "should_print": should_print,
+        },
+    }
+
+
 class Layer2EvalTest(unittest.TestCase):
     def test_eval_fixture_scores_project_above_news(self) -> None:
         from pipeline.decision.run_layer2_evals import rank_eval_cases
@@ -243,6 +297,16 @@ class Layer2EvalTest(unittest.TestCase):
         self.assertGreaterEqual(result["metrics"]["high_expected"], 3)
         self.assertGreaterEqual(result["metrics"]["low_expected"], 5)
 
+    def test_static_scoring_cases_use_the_production_v2_output_contract(self) -> None:
+        from pipeline.decision.layer2_contracts import validate_scoring_turn_v2
+        from pipeline.decision.run_layer2_evals import (
+            default_scoring_investigator_eval_cases,
+        )
+
+        for case in default_scoring_investigator_eval_cases():
+            with self.subTest(case=case["name"]):
+                validate_scoring_turn_v2(case["response"])
+
     def test_scoring_eval_corpus_covers_context_tool_and_failure_scenarios(
         self,
     ) -> None:
@@ -351,6 +415,14 @@ class Layer2EvalTest(unittest.TestCase):
         self.assertEqual(metrics["tool_failure_coverage"]["403"], 1)
         self.assertEqual(metrics["tool_failure_coverage"]["rate_limited"], 1)
         self.assertEqual(metrics["expectation_contract_coverage"], metrics["total"])
+        for row in result["cases"]:
+            with self.subTest(case=row["name"]):
+                self.assertGreaterEqual(
+                    row["attributable_claim_count"],
+                    row["evidence_expectations"][
+                        "minimum_attributable_claims"
+                    ],
+                )
 
     def test_openclaw_scoring_eval_context_has_alias_and_cross_source_evidence(
         self,
@@ -460,22 +532,11 @@ class Layer2EvalTest(unittest.TestCase):
                         "derivative_news_penalty": 8,
                     }
                     should_print = False
-                return {
-                    "action": "final",
-                    "score": {
-                        "object_type": "repo" if should_print else "product",
-                        "is_product_or_repo": True,
-                        "axes": axes,
-                        "supporting_evidence": ["Eval evidence"],
-                        "negative_evidence": [],
-                        "known_gaps": [],
-                        "primary_reason": "Eval",
-                        "rationale_short": "Eval rationale",
-                        "topic_tags": ["eval"],
-                        "caveats": [],
-                        "should_print": should_print,
-                    },
-                }
+                return scoring_v2_eval_response(
+                    axes=axes,
+                    should_print=should_print,
+                    object_type="repo" if should_print else "product",
+                )
 
         cases = [
             {
@@ -524,6 +585,13 @@ class Layer2EvalTest(unittest.TestCase):
         )
         self.assertNotIn("expected_band_for_eval", provider.calls[0]["input_payload"])
         provider_payload = provider.calls[0]["input_payload"]
+        from pipeline.decision.layer2_contracts import scoring_turn_output_schema_v2
+
+        self.assertEqual(provider_payload["schema"], scoring_turn_output_schema_v2())
+        self.assertEqual(
+            provider_payload["candidate"]["evidence_ref"],
+            "eval:candidate",
+        )
         self.assertNotIn("expected_band", provider_payload)
         self.assertNotIn("expected_route", provider_payload)
         self.assertNotIn("expected_tool_need", provider_payload)
@@ -541,6 +609,81 @@ class Layer2EvalTest(unittest.TestCase):
             "derivative_news_penalty only",
             provider.calls[0]["input_payload"]["instruction"],
         )
+
+    def test_run_scoring_investigator_kimi_eval_rejects_legacy_response_shape(
+        self,
+    ) -> None:
+        from pipeline.decision.run_layer2_evals import (
+            default_scoring_investigator_eval_cases,
+            run_scoring_investigator_kimi_eval,
+        )
+
+        case = default_scoring_investigator_eval_cases()[0]
+        legacy_response = {
+            "action": "final",
+            "score": {
+                **case["response"]["score"],
+                "supporting_evidence": ["legacy un-attributed evidence"],
+            },
+        }
+
+        class Provider:
+            provider_name = "kimi"
+            model = "kimi-k2.5"
+            api_key = "configured"
+
+            def complete_json(self, **kwargs):
+                return legacy_response
+
+        result = run_scoring_investigator_kimi_eval(
+            provider=Provider(),
+            cases=[case],
+            limit=1,
+            prompt_version="layer2-scoring-investigator-v2",
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["cases"][0]["actual_band"], "invalid")
+        self.assertEqual(result["cases"][0]["error"], "ValueError")
+        self.assertIn("information_sufficiency", result["cases"][0]["reason"])
+
+    def test_run_scoring_investigator_kimi_eval_rejects_unknown_evidence_ref(
+        self,
+    ) -> None:
+        from pipeline.decision.run_layer2_evals import (
+            default_scoring_investigator_eval_cases,
+            run_scoring_investigator_kimi_eval,
+        )
+
+        case = default_scoring_investigator_eval_cases()[0]
+        supporting_claim = case["response"]["score"]["supporting_evidence"][0]
+        response = {
+            **case["response"],
+            "score": {
+                **case["response"]["score"],
+                "supporting_evidence": [
+                    {**supporting_claim, "evidence_refs": ["unknown:claim"]}
+                ],
+            },
+        }
+
+        class Provider:
+            provider_name = "kimi"
+            model = "kimi-k2.5"
+            api_key = "configured"
+
+            def complete_json(self, **kwargs):
+                return response
+
+        result = run_scoring_investigator_kimi_eval(
+            provider=Provider(),
+            cases=[case],
+            limit=1,
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["cases"][0]["error"], "EvidenceReferenceError")
+        self.assertIn("unknown evidence_ref", result["cases"][0]["reason"])
 
     def test_run_scoring_investigator_kimi_eval_skips_without_key(self) -> None:
         from pipeline.decision.run_layer2_evals import run_scoring_investigator_kimi_eval
@@ -571,36 +714,26 @@ class Layer2EvalTest(unittest.TestCase):
                 self.names.append(name)
                 is_high = name in {"OpenClaw", "Hermes Agent", "HeyClicky"}
                 is_medium = name == "Screen-aware spreadsheet operator"
-                return {
-                    "action": "final",
-                    "score": {
-                        "object_type": (
-                            "repo"
-                            if name in {"OpenClaw", "Hermes Agent"}
-                            else "product"
-                            if name != "Standalone model release"
-                            else "model_release"
-                        ),
-                        "is_product_or_repo": name != "Standalone model release",
-                        "axes": {
-                            "workflow_shift": 88 if is_high else 84 if is_medium else 30,
-                            "technical_substance": 86 if is_high else 65 if is_medium else 25,
-                            "product_market_fit": 82 if is_high else 78 if is_medium else 40,
-                            "momentum": 72 if is_high else 60 if is_medium else 35,
-                            "confidence": 82 if is_high else 80 if is_medium else 74,
-                            "risk_penalty": 4 if is_high else 5 if is_medium else 2,
-                            "derivative_news_penalty": 0 if is_high or is_medium else 8,
-                        },
-                        "supporting_evidence": ["Eval evidence"],
-                        "negative_evidence": [],
-                        "known_gaps": [],
-                        "primary_reason": "Eval",
-                        "rationale_short": "Eval rationale",
-                        "topic_tags": ["eval"],
-                        "caveats": [],
-                        "should_print": is_high or is_medium,
+                return scoring_v2_eval_response(
+                    axes={
+                        "workflow_shift": 88 if is_high else 84 if is_medium else 30,
+                        "technical_substance": 86 if is_high else 65 if is_medium else 25,
+                        "product_market_fit": 82 if is_high else 78 if is_medium else 40,
+                        "momentum": 72 if is_high else 60 if is_medium else 35,
+                        "confidence": 82 if is_high else 80 if is_medium else 74,
+                        "risk_penalty": 4 if is_high else 5 if is_medium else 2,
+                        "derivative_news_penalty": 0 if is_high or is_medium else 8,
                     },
-                }
+                    should_print=is_high or is_medium,
+                    object_type=(
+                        "repo"
+                        if name in {"OpenClaw", "Hermes Agent"}
+                        else "product"
+                        if name != "Standalone model release"
+                        else "model_release"
+                    ),
+                    is_product_or_repo=name != "Standalone model release",
+                )
 
         provider = Provider()
 

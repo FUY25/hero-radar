@@ -7,23 +7,9 @@ import time
 import unittest
 
 from pipeline.decision.layer2_models import CandidateGroup
+from pipeline.decision.layer2_scoring_investigator import score_with_investigator
 from pipeline.decision.llm_provider import FakeLLMProvider
 from pipeline.decision.schema import init_decision_db
-
-
-LEGACY_PROMPT_VERSION = "layer2-scoring-investigator-v1"
-
-
-def run_v1_scoring(*args, **kwargs):
-    from pipeline.decision.layer2_scoring_investigator import (
-        score_with_investigator,
-    )
-
-    return score_with_investigator(
-        *args,
-        prompt_version=LEGACY_PROMPT_VERSION,
-        **kwargs,
-    )
 
 
 class CountingTool:
@@ -72,11 +58,25 @@ def final_response(**axis_overrides):
     axes.update(axis_overrides)
     return {
         "action": "final",
+        "information_sufficiency": {
+            "identity": "strong",
+            "workflow_shift": "strong",
+            "technical_substance": "strong",
+            "product_market_fit": "strong",
+            "momentum": "strong",
+        },
         "score": {
             "object_type": "repo",
             "is_product_or_repo": True,
             "axes": axes,
-            "supporting_evidence": ["README shows a validation harness."],
+            "supporting_evidence": [
+                {
+                    "claim": "README shows a validation harness.",
+                    "evidence_refs": ["evidence:member:0:0"],
+                    "supports_axes": ["workflow_shift", "technical_substance"],
+                    "claim_type": "observed",
+                }
+            ],
             "negative_evidence": [],
             "known_gaps": [],
             "primary_reason": "Validation harness",
@@ -85,10 +85,27 @@ def final_response(**axis_overrides):
             "caveats": [],
             "should_print": True,
         },
-        "brief": {
-            "should_print": True,
-            "headline": "值得看",
+    }
+
+
+def tool_turn(information_need: str, tool_requests: list[dict]) -> dict:
+    return {
+        "action": "use_tools",
+        "information_sufficiency": {
+            "identity": "strong",
+            "workflow_shift": "medium",
+            "technical_substance": "weak",
+            "product_market_fit": "medium",
+            "momentum": "medium",
         },
+        "information_need": {
+            "question": information_need,
+            "target_axes": ["technical_substance", "confidence"],
+            "expected_decision_impact": (
+                "The evidence can change the technical score or confidence."
+            ),
+        },
+        "tool_requests": tool_requests,
     }
 
 
@@ -138,22 +155,21 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
         conn = self.make_conn()
         provider = FakeLLMProvider(
             [
-                {
-                    "action": "use_tools",
-                    "information_need": "Need README evidence.",
-                    "tool_requests": [
+                tool_turn(
+                    "Need README evidence.",
+                    [
                         {
                             "name": "fetch_github_readme",
                             "arguments": {"repo_key": "owner/repo"},
                         }
                     ],
-                },
+                ),
                 final_response(),
             ]
         )
         readme_tool = CountingTool({"status": "ok", "excerpt": "README evidence"})
 
-        results = run_v1_scoring(
+        results = score_with_investigator(
             conn,
             feed_run_id="l2-run",
             groups=[make_group()],
@@ -175,7 +191,7 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
             "select l2_score, primary_reason, prompt_version from l2_scores"
         ).fetchone()
         self.assertEqual(score_row[1], "Validation harness")
-        self.assertEqual(score_row[2], "layer2-scoring-investigator-v1")
+        self.assertEqual(score_row[2], "layer2-scoring-investigator-v2")
         trace_row = conn.execute(
             "select status, trace_json, tool_trace_json from l2_scoring_investigations"
         ).fetchone()
@@ -191,20 +207,19 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
         conn = self.make_conn()
         provider = FakeLLMProvider(
             [
-                {
-                    "action": "use_tools",
-                    "information_need": "Need web evidence.",
-                    "tool_requests": [
+                tool_turn(
+                    "Need web evidence.",
+                    [
                         {"name": "web_search", "arguments": {"query": "one"}},
                         {"name": "web_search", "arguments": {"query": "two"}},
                     ],
-                },
+                ),
                 final_response(),
             ]
         )
         web_tool = CountingTool({"status": "ok", "results": []})
 
-        run_v1_scoring(
+        score_with_investigator(
             conn,
             feed_run_id="l2-run",
             groups=[make_group()],
@@ -223,22 +238,21 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
 
     def test_repeated_normalized_tool_signature_is_rejected_without_spending_budget(self):
         conn = self.make_conn()
-        repeated_request = {
-            "action": "use_tools",
-            "information_need": "Need README evidence.",
-            "tool_requests": [
+        repeated_request = tool_turn(
+            "Need README evidence.",
+            [
                 {
                     "name": "fetch_github_readme",
                     "arguments": {"repo_key": "owner/repo"},
                 }
             ],
-        }
+        )
         provider = FakeLLMProvider(
             [repeated_request, repeated_request, final_response()]
         )
         readme_tool = CountingTool({"status": "ok", "excerpt": "README"})
 
-        result = run_v1_scoring(
+        result = score_with_investigator(
             conn,
             feed_run_id="l2-run",
             groups=[make_group()],
@@ -266,15 +280,14 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
         conn = self.make_conn()
         provider = FakeLLMProvider(
             [
-                {
-                    "action": "use_tools",
-                    "information_need": "Need independent evidence.",
-                    "tool_requests": [
+                tool_turn(
+                    "Need independent evidence.",
+                    [
                         {"name": "slow", "arguments": {"value": "first"}},
                         {"name": "fast", "arguments": {"value": "second"}},
                         {"name": "middle", "arguments": {"value": "third"}},
                     ],
-                },
+                ),
                 final_response(),
             ]
         )
@@ -296,7 +309,7 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
                 active -= 1
             return {"status": "ok", "value": arguments["value"]}
 
-        results = run_v1_scoring(
+        results = score_with_investigator(
             conn,
             feed_run_id="l2-run",
             groups=[make_group()],
@@ -327,10 +340,9 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
         conn = self.make_conn()
         provider = FakeLLMProvider(
             [
-                {
-                    "action": "use_tools",
-                    "information_need": "Need bounded evidence.",
-                    "tool_requests": [
+                tool_turn(
+                    "Need bounded evidence.",
+                    [
                         {"name": "web_search", "arguments": {"query": "one"}},
                         {"name": "web_search", "arguments": {"query": "two"}},
                         {
@@ -339,7 +351,7 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
                         },
                         {"name": "read_evidence_rows", "arguments": {"entity_id": "entity:repo"}},
                     ],
-                },
+                ),
                 final_response(),
             ]
         )
@@ -354,7 +366,7 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
 
             return run
 
-        results = run_v1_scoring(
+        results = score_with_investigator(
             conn,
             feed_run_id="l2-run",
             groups=[make_group()],
@@ -389,7 +401,7 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
             ]
         )
 
-        results = run_v1_scoring(
+        results = score_with_investigator(
             conn,
             feed_run_id="l2-run",
             groups=[make_group()],
@@ -414,21 +426,20 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
         conn = self.make_conn()
         provider = FakeLLMProvider(
             [
-                {
-                    "action": "use_tools",
-                    "information_need": "Need README but out of turns.",
-                    "tool_requests": [
+                tool_turn(
+                    "Need README but out of turns.",
+                    [
                         {
                             "name": "fetch_github_readme",
                             "arguments": {"repo_key": "owner/repo"},
                         }
                     ],
-                },
+                ),
                 final_response(confidence=55),
             ]
         )
 
-        results = run_v1_scoring(
+        results = score_with_investigator(
             conn,
             feed_run_id="l2-run",
             groups=[make_group()],
@@ -454,21 +465,20 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
         conn = self.make_conn()
         provider = FakeLLMProvider(
             [
-                {
-                    "action": "use_tools",
-                    "information_need": "Need README but cannot finalize.",
-                    "tool_requests": [
+                tool_turn(
+                    "Need README but cannot finalize.",
+                    [
                         {
                             "name": "fetch_github_readme",
                             "arguments": {"repo_key": "owner/repo"},
                         }
                     ],
-                }
+                )
             ]
         )
 
         with self.assertRaises(RuntimeError):
-            run_v1_scoring(
+            score_with_investigator(
                 conn,
                 feed_run_id="l2-run",
                 groups=[make_group()],
@@ -729,7 +739,7 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
         provider = FakeLLMProvider([final_response()])
         unused_tool = CountingTool({"status": "ok"})
 
-        results = run_v1_scoring(
+        results = score_with_investigator(
             conn,
             feed_run_id="l2-run",
             groups=[make_group()],
@@ -744,16 +754,15 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
         conn = self.make_conn()
         provider = FakeLLMProvider(
             [
-                {
-                    "action": "use_tools",
-                    "information_need": "Need README.",
-                    "tool_requests": [
+                tool_turn(
+                    "Need README.",
+                    [
                         {
                             "name": "fetch_github_readme",
                             "arguments": {"repo_key": "owner/repo"},
                         }
                     ],
-                },
+                ),
                 final_response(),
             ]
         )
@@ -761,7 +770,7 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
             {"status": "ok", "excerpt": "README says browser control and memory."}
         )
 
-        run_v1_scoring(
+        score_with_investigator(
             conn,
             feed_run_id="l2-run",
             groups=[make_group()],
@@ -787,16 +796,15 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
         conn = self.make_conn()
         provider = FakeLLMProvider(
             [
-                {
-                    "action": "use_tools",
-                    "information_need": "Need docs page.",
-                    "tool_requests": [
+                tool_turn(
+                    "Need docs page.",
+                    [
                         {
                             "name": "fetch_homepage_or_docs",
                             "arguments": {"url": "https://example.com/docs"},
                         }
                     ],
-                },
+                ),
                 final_response(confidence=62),
             ]
         )
@@ -804,7 +812,7 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
         def broken_tool(arguments):
             raise TimeoutError("homepage timed out")
 
-        results = run_v1_scoring(
+        results = score_with_investigator(
             conn,
             feed_run_id="l2-run",
             groups=[make_group()],
@@ -820,10 +828,9 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
         conn = self.make_conn()
         provider = FakeLLMProvider(
             [
-                {
-                    "action": "use_tools",
-                    "information_need": "Need narrow missing context.",
-                    "tool_requests": [
+                tool_turn(
+                    "Need narrow missing context.",
+                    [
                         {
                             "name": "read_evidence_rows",
                             "arguments": {"entity_id": "entity:repo"},
@@ -844,7 +851,7 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
                             "arguments": {"query": "owner repo memory agent"},
                         },
                     ],
-                },
+                ),
                 final_response(confidence=77),
             ]
         )
@@ -863,7 +870,7 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
             ),
         }
 
-        run_v1_scoring(
+        score_with_investigator(
             conn,
             feed_run_id="l2-run",
             groups=[make_group()],
@@ -894,10 +901,9 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
         conn = self.make_conn()
         provider = FakeLLMProvider(
             [
-                {
-                    "action": "use_tools",
-                    "information_need": "Need package metadata.",
-                    "tool_requests": [
+                tool_turn(
+                    "Need package metadata.",
+                    [
                         {
                             "name": "fetch_github_file",
                             "arguments": {
@@ -906,12 +912,12 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
                             },
                         }
                     ],
-                },
+                ),
                 final_response(confidence=60),
             ]
         )
 
-        results = run_v1_scoring(
+        results = score_with_investigator(
             conn,
             feed_run_id="l2-run",
             groups=[make_group()],
@@ -931,10 +937,9 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
         conn = self.make_conn()
         provider = FakeLLMProvider(
             [
-                {
-                    "action": "use_tools",
-                    "information_need": "Need docs page.",
-                    "tool_requests": [
+                tool_turn(
+                    "Need docs page.",
+                    [
                         {
                             "name": "fetch_homepage_or_docs",
                             "arguments": {
@@ -942,7 +947,7 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
                             },
                         }
                     ],
-                },
+                ),
                 final_response(confidence=58),
             ]
         )
@@ -953,7 +958,7 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
             }
         )
 
-        run_v1_scoring(
+        score_with_investigator(
             conn,
             feed_run_id="l2-run",
             groups=[make_group()],

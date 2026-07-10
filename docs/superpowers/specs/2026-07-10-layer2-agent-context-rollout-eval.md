@@ -17,7 +17,9 @@ remains the explicit rollback option. Direct-final mode and Edge Scout remain di
 
 The repository evaluation corpus contains 20 normalized candidate cases covering high,
 medium, and low expected outcomes, mixed evidence quality, missing fields, tool-use
-decisions, and attribution requirements. The static contract evaluation passed 20/20.
+decisions, and attribution requirements. All 20 deterministic fixtures now use the
+production `layer2-scoring-output-v2` schema, attributable claim objects, and the same
+host validator as the runtime; the static contract evaluation passed 20/20.
 
 The versioned cases and labels are embedded in the deterministic evaluation
 runner and exercised by its test module:
@@ -25,20 +27,23 @@ runner and exercised by its test module:
 - `pipeline/decision/run_layer2_evals.py`
 - `tests/test_layer2_evals.py`
 
-## Small Real-API Check
+## Historical Real-API Smoke
 
 Three fixed candidates were selected before execution to cover the main score bands:
 
-| Candidate | Expected band | v1 result | v2 result at 3,000 output tokens | Contract result |
+| Candidate | Expected band | v1 result | v2 result at 3,000 output tokens | Validation used |
 |---|---:|---:|---:|---|
-| OpenClaw | High | 76.50 | 79.25 | Pass |
-| Generic AI chatbot | Low | 0.00 | 0.00 | Pass |
-| Screen-aware spreadsheet assistant | Medium/gray-zone | 73.50 | 71.95 | Pass |
+| OpenClaw | High | 76.50 | 79.25 | Legacy simplified eval shape |
+| Generic AI chatbot | Low | 0.00 | 0.00 | Legacy simplified eval shape |
+| Screen-aware spreadsheet assistant | Medium/gray-zone | 73.50 | 71.95 | Legacy simplified eval shape |
 
 Labels were not included in model requests. At 1,800 output tokens, the v2 responses
 were empty or truncated before producing valid JSON. Re-running the same three cases
-with a 3,000-token output cap produced complete responses that passed the expected
-band/contract checks. The scorer cap and output reserve are therefore set to 3,000;
+with a 3,000-token output cap produced complete responses that matched the expected
+score bands. Those historical calls predated production-schema validation and do not
+count as production contract passes. The real-provider eval now sends the production
+schema, requires attributable claims against the supplied candidate evidence reference,
+and runs the production host validator. The scorer cap and output reserve remain 3,000;
 the independent Chinese Brief cap remains 1,000.
 
 This remains a smoke test rather than a substitute for complete corpus and human
@@ -58,7 +63,7 @@ With `prompt_version` on `v2`, run and persist all of the following:
 5. A rollback drill proving that configuration can return the default to v1 without a
    schema or persistence migration.
 
-## Current Safe Rollout State
+## Current Rollout State
 
 - Default scoring prompt: `v2`
 - Explicit rollback prompt: `v1`

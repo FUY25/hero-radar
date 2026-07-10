@@ -22,6 +22,10 @@ class Layer2RunnerTest(unittest.TestCase):
         edge_scout: dict | None = None,
         legacy_deepdive: dict | None = None,
     ) -> dict:
+        # These routing fixtures deliberately exercise the explicit v1 rollback
+        # normalizer with synthetic candidates that have no attributable evidence
+        # rows. Production-v2 contract behavior is covered in the scoring context
+        # and investigator suites.
         return {
             "routing": routing or {},
             "scoring_agent": {

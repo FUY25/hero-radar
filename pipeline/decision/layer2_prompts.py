@@ -163,9 +163,13 @@ def assemble_scoring_investigator_prompt_v2() -> str:
 SCORING_INVESTIGATOR_SYSTEM_PROMPT_V2 = assemble_scoring_investigator_prompt_v2()
 
 
+SCORING_PROMPT_VERSION_V1 = "layer2-scoring-investigator-v1"
+SCORING_PROMPT_VERSION_V2 = "layer2-scoring-investigator-v2"
+
+
 SCORING_PROMPT_REGISTRY = {
-    "layer2-scoring-investigator-v1": SCORING_INVESTIGATOR_SYSTEM_PROMPT_V1,
-    "layer2-scoring-investigator-v2": SCORING_INVESTIGATOR_SYSTEM_PROMPT_V2,
+    SCORING_PROMPT_VERSION_V1: SCORING_INVESTIGATOR_SYSTEM_PROMPT_V1,
+    SCORING_PROMPT_VERSION_V2: SCORING_INVESTIGATOR_SYSTEM_PROMPT_V2,
 }
 
 

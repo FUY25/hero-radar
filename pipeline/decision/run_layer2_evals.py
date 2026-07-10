@@ -6,6 +6,11 @@ from statistics import mean
 from typing import Any
 
 from pipeline.decision.kimi_provider import KimiProvider
+from pipeline.decision.layer2_claims import normalize_attributable_claims
+from pipeline.decision.layer2_contracts import (
+    scoring_turn_output_schema_v2,
+    validate_scoring_turn_v2,
+)
 from pipeline.decision.layer2_scoring_investigator import (
     DEFAULT_INVESTIGATOR_PROMPT_VERSION,
     aggregate_investigator_score,
@@ -17,6 +22,9 @@ from pipeline.decision.layer2_scout import (
     normalize_scout_decision,
     normalize_wide_scout_promotion,
 )
+
+
+SCORING_EVAL_CANDIDATE_EVIDENCE_REF = "eval:candidate"
 
 
 def default_eval_cases() -> list[dict[str, Any]]:
@@ -1434,13 +1442,16 @@ def run_scoring_investigator_kimi_eval(
         "For this eval smoke, no tools are available. Return action=final only."
     )
     for case in active_cases[:active_limit]:
+        raw_candidate = case.get("candidate")
+        candidate = dict(raw_candidate) if isinstance(raw_candidate, dict) else {}
+        candidate["evidence_ref"] = SCORING_EVAL_CANDIDATE_EVIDENCE_REF
         try:
             response = active_provider.complete_json(
                 task="layer2_scoring_investigator_eval",
                 prompt_version=prompt_version,
                 system_prompt=system_prompt,
                 input_payload={
-                    "candidate": case.get("candidate") or {},
+                    "candidate": candidate,
                     "instruction": (
                         "Score from supplied eval context only. Return action=final; "
                         "do not call tools. Use 0-100 numeric axis values, not a "
@@ -1464,8 +1475,10 @@ def run_scoring_investigator_kimi_eval(
                         "pure news, tutorials/resource lists, standalone model "
                         "releases, generic wrappers, or ordinary tools without an "
                         "explicit workflow unlock."
+                        " Every supporting or negative claim must cite the "
+                        "candidate evidence_ref supplied in this request."
                     ),
-                    "schema": _scoring_eval_schema(),
+                    "schema": scoring_turn_output_schema_v2(),
                     "rubric": {
                         "high": (
                             "Real workflow unlock, technical substance or product "
@@ -1530,21 +1543,75 @@ def _scoring_eval_case(
         "candidate": candidate,
         "response": {
             "action": "final",
+            "information_sufficiency": _scoring_eval_information_sufficiency(
+                axes,
+                object_type=object_type,
+            ),
             "score": {
-                "object_type": object_type,
+                "object_type": (
+                    "article" if object_type == "tutorial" else object_type
+                ),
                 "is_product_or_repo": is_product_or_repo,
                 "axes": axes,
-                "supporting_evidence": [str(candidate.get("summary") or "")],
+                "supporting_evidence": _scoring_eval_claims(
+                    str(candidate.get("summary") or primary_reason),
+                    minimum=int(
+                        evidence_expectations.get("minimum_attributable_claims")
+                        or 0
+                    ),
+                ),
                 "negative_evidence": [],
-                "known_gaps": [],
-                "primary_reason": primary_reason,
-                "rationale_short": str(candidate.get("summary") or ""),
+                "known_gaps": (
+                    ["Candidate identity remains unresolved."]
+                    if object_type == "unknown"
+                    else []
+                ),
+                "primary_reason": primary_reason[:80],
+                "rationale_short": str(
+                    candidate.get("summary") or primary_reason
+                )[:1_000],
                 "topic_tags": [],
                 "caveats": [],
                 "should_print": should_print,
             },
         },
     }
+
+
+def _scoring_eval_information_sufficiency(
+    axes: dict[str, Any],
+    *,
+    object_type: str,
+) -> dict[str, str]:
+    def level(axis: str) -> str:
+        value = float(axes.get(axis) or 0)
+        if value >= 70:
+            return "strong"
+        if value >= 40:
+            return "medium"
+        return "weak"
+
+    return {
+        "identity": "weak" if object_type == "unknown" else "strong",
+        "workflow_shift": level("workflow_shift"),
+        "technical_substance": level("technical_substance"),
+        "product_market_fit": level("product_market_fit"),
+        "momentum": level("momentum"),
+    }
+
+
+def _scoring_eval_claims(text: str, *, minimum: int) -> list[dict[str, Any]]:
+    axes = ["workflow_shift", "technical_substance", "product_market_fit"]
+    bounded_text = str(text or "Candidate evidence").strip()[:900]
+    return [
+        {
+            "claim": f"{bounded_text} [{axes[index % len(axes)]}]",
+            "evidence_refs": [SCORING_EVAL_CANDIDATE_EVIDENCE_REF],
+            "supports_axes": [axes[index % len(axes)]],
+            "claim_type": "observed",
+        }
+        for index in range(max(0, int(minimum)))
+    ]
 
 
 def _evaluate_scoring_case(
@@ -1558,10 +1625,19 @@ def _evaluate_scoring_case(
         l2_score = normalized["l2_score"]
         should_print = normalized["should_print"]
         actual_band = _score_band(l2_score)
-        matches_expected = _scoring_expectation_matches(
+        matches_score_expectation = _scoring_expectation_matches(
             expected_band=expected_band,
             l2_score=l2_score,
             should_print=should_print,
+        )
+        minimum_claims = int(
+            expectation_metadata["evidence_expectations"].get(
+                "minimum_attributable_claims", 0
+            )
+            or 0
+        )
+        meets_attribution_expectation = (
+            normalized["attributable_claim_count"] >= minimum_claims
         )
         return {
             "name": name,
@@ -1574,7 +1650,13 @@ def _evaluate_scoring_case(
             "object_type": normalized["object_type"],
             "is_product_or_repo": normalized["is_product_or_repo"],
             "primary_reason": normalized["primary_reason"],
-            "matches_expected": matches_expected,
+            "attributable_claim_count": normalized[
+                "attributable_claim_count"
+            ],
+            "meets_attribution_expectation": meets_attribution_expectation,
+            "matches_expected": (
+                matches_score_expectation and meets_attribution_expectation
+            ),
         }
     except Exception as exc:
         return {
@@ -1588,6 +1670,8 @@ def _evaluate_scoring_case(
             "object_type": "invalid",
             "is_product_or_repo": False,
             "primary_reason": "",
+            "attributable_claim_count": 0,
+            "meets_attribution_expectation": False,
             "matches_expected": False,
             "error": type(exc).__name__,
             "reason": str(exc)[:300],
@@ -1595,6 +1679,7 @@ def _evaluate_scoring_case(
 
 
 def _normalize_scoring_eval_response(response: Any) -> dict[str, Any]:
+    validate_scoring_turn_v2(response)
     if not isinstance(response, dict):
         raise ValueError("scoring eval response must be an object")
     if str(response.get("action") or "") != "final":
@@ -1605,6 +1690,14 @@ def _normalize_scoring_eval_response(response: Any) -> dict[str, Any]:
     axes = score.get("axes")
     if not isinstance(axes, dict):
         raise ValueError("scoring eval response missing axes")
+    supporting_claims, _supporting_text = normalize_attributable_claims(
+        score.get("supporting_evidence"),
+        valid_evidence_refs={SCORING_EVAL_CANDIDATE_EVIDENCE_REF},
+    )
+    negative_claims, _negative_text = normalize_attributable_claims(
+        score.get("negative_evidence"),
+        valid_evidence_refs={SCORING_EVAL_CANDIDATE_EVIDENCE_REF},
+    )
     object_type = str(score.get("object_type") or "unknown")[:40]
     is_product_or_repo = bool(score.get("is_product_or_repo", False))
     l2_score = aggregate_investigator_score(
@@ -1619,6 +1712,7 @@ def _normalize_scoring_eval_response(response: Any) -> dict[str, Any]:
         "l2_score": l2_score,
         "should_print": bool(score.get("should_print", False)),
         "primary_reason": str(score.get("primary_reason") or "")[:120],
+        "attributable_claim_count": len(supporting_claims) + len(negative_claims),
     }
 
 
@@ -1751,33 +1845,6 @@ def _scoring_case_expectation_metadata(case: dict[str, Any]) -> dict[str, Any]:
             and required_evidence_keys.issubset(evidence_expectations)
             and isinstance(raw_tags, list)
         ),
-    }
-
-
-def _scoring_eval_schema() -> dict[str, Any]:
-    return {
-        "action": "final",
-        "score": {
-            "object_type": "product|repo|model_release|tutorial|news|unknown",
-            "is_product_or_repo": "boolean",
-            "axes": {
-                "workflow_shift": "0..100",
-                "technical_substance": "0..100",
-                "product_market_fit": "0..100",
-                "momentum": "0..100",
-                "confidence": "0..100",
-                "risk_penalty": "0..25",
-                "derivative_news_penalty": "0..25",
-            },
-            "supporting_evidence": ["string"],
-            "negative_evidence": ["string"],
-            "known_gaps": ["string"],
-            "primary_reason": "string",
-            "rationale_short": "string",
-            "topic_tags": ["string"],
-            "caveats": ["string"],
-            "should_print": "boolean",
-        },
     }
 
 
