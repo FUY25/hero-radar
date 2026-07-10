@@ -312,7 +312,7 @@ def run_layer2_feed(
                 component="brief_writer",
                 default_model=DEFAULT_KIMI_SCORING_MODEL,
                 default_timeout=90,
-                default_max_output_tokens=1000,
+                default_max_output_tokens=3000,
             )
         brief_profile_provider = None
         if brief_provider_factory is not None and bool(brief_cfg.get("enabled", True)):
@@ -1432,7 +1432,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--brief-timeout-seconds", type=int, default=90)
     parser.add_argument("--deepdive-timeout-seconds", type=int, default=90)
     parser.add_argument("--scoring-max-output-tokens", type=int, default=3000)
-    parser.add_argument("--brief-max-output-tokens", type=int, default=1000)
+    parser.add_argument("--brief-max-output-tokens", type=int, default=3000)
     parser.add_argument("--web-search-timeout-seconds", type=int, default=None)
     parser.add_argument("--finalize-stale-running-before", default=None)
     parser.add_argument("--max-investigation-turns", type=int, default=3)

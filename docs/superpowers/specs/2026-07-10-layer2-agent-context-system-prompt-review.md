@@ -867,7 +867,7 @@ The following is the recommended canonical shape. Numeric token budgets are init
       "prompt_version": "v3",
       "output_schema_version": "v2",
       "timeout_seconds": 60,
-      "max_output_tokens": 1000,
+      "max_output_tokens": 3000,
       "concurrency": 4
     },
 

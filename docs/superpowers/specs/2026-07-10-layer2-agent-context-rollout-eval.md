@@ -44,7 +44,7 @@ score bands. Those historical calls predated production-schema validation and do
 count as production contract passes. The real-provider eval now sends the production
 schema, requires attributable claims against the supplied candidate evidence reference,
 and runs the production host validator. The scorer cap and output reserve remain 3,000;
-the independent Chinese Brief cap remains 1,000.
+the independent Chinese Brief cap is 3,000.
 
 This remains a smoke test rather than a substitute for complete corpus and human
 comparison. The default changed to `v2` after its tool-failure evidence policy,
@@ -68,7 +68,7 @@ With `prompt_version` on `v2`, run and persist all of the following:
 - Default scoring prompt: `v2`
 - Explicit rollback prompt: `v1`
 - Scorer output cap/reserve: 3,000 tokens
-- Brief output cap: 1,000 tokens
+- Brief output cap: 3,000 tokens
 - Direct-final mode: disabled
 - Edge Scout: disabled
 - Legacy path: disabled

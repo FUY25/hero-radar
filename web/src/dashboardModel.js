@@ -1091,7 +1091,7 @@ export function layer2RunOptionsFromConfig(config = {}) {
       ? null
       : numericConfigValue(config, 'layer2.tool_runtime.web_search_timeout_seconds', 90),
     layer2_scoring_max_output_tokens: numericConfigValue(config, 'layer2.scoring_agent.max_output_tokens', 3000),
-    layer2_brief_max_output_tokens: numericConfigValue(config, 'layer2.brief_writer.max_output_tokens', 1000),
+    layer2_brief_max_output_tokens: numericConfigValue(config, 'layer2.brief_writer.max_output_tokens', 3000),
     layer2_max_investigation_turns: numericConfigValue(config, 'layer2.scoring_agent.max_investigation_turns', 3),
     layer2_max_scoring_attempts: numericConfigValue(config, 'layer2.scoring_agent.max_scoring_attempts', 3),
     layer2_tool_registry_version: String(toolRuntime.registry_version || 'layer2-tools-v1'),

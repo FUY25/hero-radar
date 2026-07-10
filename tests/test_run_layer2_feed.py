@@ -1443,7 +1443,7 @@ class Layer2RunnerTest(unittest.TestCase):
             1.0,
         )
         self.assertEqual(default_config["scoring_agent"]["max_output_tokens"], 3000)
-        self.assertEqual(default_config["brief_writer"]["max_output_tokens"], 1000)
+        self.assertEqual(default_config["brief_writer"]["max_output_tokens"], 3000)
         self.assertEqual(
             default_config["scoring_agent"]["prompt_version"],
             "layer2-scoring-investigator-v2",

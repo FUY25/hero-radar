@@ -306,7 +306,7 @@
       "output_schema_version": "layer2-brief-output-v1",
       "context_policy_version": "layer2-brief-packet-v1",
       "timeout_seconds": 90,
-      "max_output_tokens": 1000,
+      "max_output_tokens": 3000,
       "concurrency": 4
     },
     "tool_runtime": {
