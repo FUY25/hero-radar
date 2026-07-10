@@ -334,7 +334,7 @@ class DailyPipelineTest(unittest.TestCase):
                     "source-run",
                     "2026-05-31T12:00:00Z",
                     "2026-05-31T12:01:00Z",
-                    "ok",
+                    "ok_with_errors",
                     "config",
                     "rules",
                     "",
@@ -457,6 +457,61 @@ class DailyPipelineTest(unittest.TestCase):
         self.assertEqual(layer2_cmd[layer2_cmd.index("--scoring-limit") + 1], "0")
         self.assertIn("--max-tool-calls-per-candidate", layer2_cmd)
         self.assertEqual(layer2_cmd[layer2_cmd.index("--max-tool-calls-per-candidate") + 1], "8")
+
+    def test_daily_pipeline_passes_configured_parallelism_and_rate_limits(self):
+        from pipeline.run_daily import run_daily
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = root / "pipeline" / "config.json"
+            config_path.parent.mkdir(parents=True)
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "decision": {
+                            "io_concurrency": 7,
+                            "io_rate_limit_per_second": 1.5,
+                        },
+                        "layer2": {
+                            "enabled": True,
+                            "scoring_concurrency": 6,
+                            "brief_concurrency": 4,
+                            "max_parallel_tool_calls_per_turn": 3,
+                            "github_tool_concurrency": 5,
+                            "homepage_tool_concurrency": 4,
+                            "web_search_tool_concurrency": 2,
+                        },
+                    }
+                )
+            )
+            runner = FakeRunner()
+
+            summary = run_daily(
+                root=root,
+                python="py",
+                run_id="decision_daily_parallel_config",
+                now="2026-07-10T12:00:00Z",
+                runner=runner,
+            )
+
+        self.assertTrue(summary["ok"])
+        decision_cmd = runner.calls[1]["cmd"]
+        self.assertEqual(decision_cmd[decision_cmd.index("--io-concurrency") + 1], "7")
+        self.assertEqual(
+            decision_cmd[decision_cmd.index("--io-rate-limit-per-second") + 1],
+            "1.5",
+        )
+        layer2_cmd = runner.calls[2]["cmd"]
+        expected = {
+            "--scoring-concurrency": "6",
+            "--brief-concurrency": "4",
+            "--max-parallel-tool-calls-per-turn": "3",
+            "--github-tool-concurrency": "5",
+            "--homepage-tool-concurrency": "4",
+            "--web-search-tool-concurrency": "2",
+        }
+        for flag, value in expected.items():
+            self.assertEqual(layer2_cmd[layer2_cmd.index(flag) + 1], value)
 
     def test_explicit_no_layer2_overrides_enabled_config(self):
         from pipeline.run_daily import run_daily

@@ -333,6 +333,14 @@ class DashboardDataApiTest(unittest.TestCase):
                         "layer2_deepdive_min_l2_score": 71,
                         "layer2_enable_kimi_web_search": True,
                         "layer2_max_web_search_calls": 3,
+                        "decision_io_concurrency": 7,
+                        "decision_io_rate_limit_per_second": 1.5,
+                        "layer2_scoring_concurrency": 6,
+                        "layer2_brief_concurrency": 4,
+                        "layer2_max_parallel_tool_calls": 3,
+                        "layer2_github_tool_concurrency": 5,
+                        "layer2_homepage_tool_concurrency": 4,
+                        "layer2_web_search_tool_concurrency": 2,
                     }
                 )
 
@@ -348,6 +356,21 @@ class DashboardDataApiTest(unittest.TestCase):
         self.assertIn("--layer2-enable-kimi-web-search", command)
         self.assertIn("--layer2-max-web-search-calls", command)
         self.assertIn("3", command)
+        self.assertEqual(command[command.index("--decision-io-concurrency") + 1], "7")
+        self.assertEqual(
+            command[command.index("--decision-io-rate-limit-per-second") + 1],
+            "1.5",
+        )
+        expected = {
+            "--layer2-scoring-concurrency": "6",
+            "--layer2-brief-concurrency": "4",
+            "--layer2-max-parallel-tool-calls": "3",
+            "--layer2-github-tool-concurrency": "5",
+            "--layer2-homepage-tool-concurrency": "4",
+            "--layer2-web-search-tool-concurrency": "2",
+        }
+        for flag, value in expected.items():
+            self.assertEqual(command[command.index(flag) + 1], value)
 
 
 if __name__ == "__main__":

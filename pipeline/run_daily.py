@@ -53,6 +53,11 @@ def _layer2_config(config: dict[str, Any]) -> dict[str, Any]:
     return layer2 if isinstance(layer2, dict) else {}
 
 
+def _decision_config(config: dict[str, Any]) -> dict[str, Any]:
+    decision = config.get("decision", {})
+    return decision if isinstance(decision, dict) else {}
+
+
 def _configured_bool(
     explicit: bool | None,
     cfg: dict[str, Any],
@@ -150,7 +155,7 @@ def decision_run_is_complete(root: Path, run_id: str) -> bool:
             conn.close()
         except Exception:
             pass
-    return bool(row and row[0] == "ok")
+    return bool(row and row[0] in {"ok", "ok_with_errors"})
 
 
 def layer2_run_is_complete(root: Path, decision_run_id: str) -> bool:
@@ -220,6 +225,8 @@ def decision_command(
     classify_hn_limit: int,
     classify_x_limit: int,
     llm_concurrency: int,
+    io_concurrency: int | None = None,
+    io_rate_limit_per_second: float | None = None,
     resolver_search_limit: int,
     resolver_research_limit: int,
     resolver_research_rounds: int,
@@ -243,6 +250,15 @@ def decision_command(
     if classify_x_limit > 0:
         cmd.extend(["--classify-x-limit", str(classify_x_limit)])
     cmd.extend(["--llm-concurrency", str(max(1, llm_concurrency))])
+    if io_concurrency is not None:
+        cmd.extend(["--io-concurrency", str(max(1, io_concurrency))])
+    if io_rate_limit_per_second is not None:
+        cmd.extend(
+            [
+                "--io-rate-limit-per-second",
+                str(max(0.0, io_rate_limit_per_second)),
+            ]
+        )
     if resolver_search_limit > 0:
         cmd.extend(["--resolver-search-limit", str(resolver_search_limit)])
     if resolver_research_limit > 0:
@@ -276,6 +292,12 @@ def layer2_command(
     max_pages: int | None = None,
     max_hn_thread_fetches: int | None = None,
     max_x_context_fetches: int | None = None,
+    scoring_concurrency: int | None = None,
+    brief_concurrency: int | None = None,
+    max_parallel_tool_calls: int | None = None,
+    github_tool_concurrency: int | None = None,
+    homepage_tool_concurrency: int | None = None,
+    web_search_tool_concurrency: int | None = None,
     finalize_stale_running_before: str | None = None,
 ) -> list[str]:
     cmd = [
@@ -315,6 +337,17 @@ def layer2_command(
         cmd.extend(["--max-hn-thread-fetches-per-candidate", str(max_hn_thread_fetches)])
     if max_x_context_fetches is not None:
         cmd.extend(["--max-x-context-fetches-per-candidate", str(max_x_context_fetches)])
+    concurrency_options = (
+        ("--scoring-concurrency", scoring_concurrency),
+        ("--brief-concurrency", brief_concurrency),
+        ("--max-parallel-tool-calls-per-turn", max_parallel_tool_calls),
+        ("--github-tool-concurrency", github_tool_concurrency),
+        ("--homepage-tool-concurrency", homepage_tool_concurrency),
+        ("--web-search-tool-concurrency", web_search_tool_concurrency),
+    )
+    for flag, value in concurrency_options:
+        if value is not None:
+            cmd.extend([flag, str(max(1, value))])
     if finalize_stale_running_before:
         cmd.extend(["--finalize-stale-running-before", finalize_stale_running_before])
     return cmd
@@ -388,6 +421,8 @@ def run_daily(
     classify_hn_limit: int = 200,
     classify_x_limit: int = 300,
     llm_concurrency: int = 4,
+    decision_io_concurrency: int | None = None,
+    decision_io_rate_limit_per_second: float | None = None,
     resolver_search_limit: int = 100,
     resolver_research_limit: int = 50,
     resolver_research_rounds: int = 3,
@@ -408,6 +443,12 @@ def run_daily(
     layer2_max_pages: int | None = None,
     layer2_max_hn_thread_fetches: int | None = None,
     layer2_max_x_context_fetches: int | None = None,
+    layer2_scoring_concurrency: int | None = None,
+    layer2_brief_concurrency: int | None = None,
+    layer2_max_parallel_tool_calls: int | None = None,
+    layer2_github_tool_concurrency: int | None = None,
+    layer2_homepage_tool_concurrency: int | None = None,
+    layer2_web_search_tool_concurrency: int | None = None,
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
     resume: bool = False,
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
@@ -416,7 +457,16 @@ def run_daily(
     active_now = now or utc_now()
     active_run_id = run_id or default_run_id(active_now)
     config = read_pipeline_config(active_root)
+    decision_cfg = _decision_config(config)
     layer2_cfg = _layer2_config(config)
+    active_decision_io_concurrency = _configured_optional_int(
+        decision_io_concurrency, decision_cfg, "io_concurrency"
+    )
+    active_decision_io_rate_limit_per_second = _configured_optional_float(
+        decision_io_rate_limit_per_second,
+        decision_cfg,
+        "io_rate_limit_per_second",
+    )
     active_run_layer2 = _configured_bool(run_layer2, layer2_cfg, "enabled", False)
     active_layer2_scout_limit = _configured_int(
         layer2_scout_limit, layer2_cfg, "max_edge_watch_scout", 50
@@ -468,6 +518,26 @@ def run_daily(
         layer2_max_x_context_fetches,
         layer2_cfg,
         "max_x_context_fetches_per_candidate",
+    )
+    active_layer2_scoring_concurrency = _configured_optional_int(
+        layer2_scoring_concurrency, layer2_cfg, "scoring_concurrency"
+    )
+    active_layer2_brief_concurrency = _configured_optional_int(
+        layer2_brief_concurrency, layer2_cfg, "brief_concurrency"
+    )
+    active_layer2_max_parallel_tool_calls = _configured_optional_int(
+        layer2_max_parallel_tool_calls,
+        layer2_cfg,
+        "max_parallel_tool_calls_per_turn",
+    )
+    active_layer2_github_tool_concurrency = _configured_optional_int(
+        layer2_github_tool_concurrency, layer2_cfg, "github_tool_concurrency"
+    )
+    active_layer2_homepage_tool_concurrency = _configured_optional_int(
+        layer2_homepage_tool_concurrency, layer2_cfg, "homepage_tool_concurrency"
+    )
+    active_layer2_web_search_tool_concurrency = _configured_optional_int(
+        layer2_web_search_tool_concurrency, layer2_cfg, "web_search_tool_concurrency"
     )
     lock_path = active_root / "data" / "run_daily.lock"
     log_path = active_root / "data" / "logs" / "run_daily" / f"{active_run_id}.jsonl"
@@ -551,6 +621,8 @@ def run_daily(
                         classify_hn_limit=classify_hn_limit,
                         classify_x_limit=classify_x_limit,
                         llm_concurrency=llm_concurrency,
+                        io_concurrency=active_decision_io_concurrency,
+                        io_rate_limit_per_second=active_decision_io_rate_limit_per_second,
                         resolver_search_limit=resolver_search_limit,
                         resolver_research_limit=resolver_research_limit,
                         resolver_research_rounds=resolver_research_rounds,
@@ -599,6 +671,12 @@ def run_daily(
                         max_pages=active_layer2_max_pages,
                         max_hn_thread_fetches=active_layer2_max_hn_thread_fetches,
                         max_x_context_fetches=active_layer2_max_x_context_fetches,
+                        scoring_concurrency=active_layer2_scoring_concurrency,
+                        brief_concurrency=active_layer2_brief_concurrency,
+                        max_parallel_tool_calls=active_layer2_max_parallel_tool_calls,
+                        github_tool_concurrency=active_layer2_github_tool_concurrency,
+                        homepage_tool_concurrency=active_layer2_homepage_tool_concurrency,
+                        web_search_tool_concurrency=active_layer2_web_search_tool_concurrency,
                         finalize_stale_running_before=active_now,
                     ),
                     cwd=active_root,
@@ -654,6 +732,8 @@ def main() -> int:
     parser.add_argument("--classify-hn-limit", type=int, default=200)
     parser.add_argument("--classify-x-limit", type=int, default=300)
     parser.add_argument("--llm-concurrency", type=int, default=4)
+    parser.add_argument("--decision-io-concurrency", type=int, default=None)
+    parser.add_argument("--decision-io-rate-limit-per-second", type=float, default=None)
     parser.add_argument("--resolver-search-limit", type=int, default=100)
     parser.add_argument("--resolver-research-limit", type=int, default=50)
     parser.add_argument("--resolver-research-rounds", type=int, default=3)
@@ -685,6 +765,12 @@ def main() -> int:
     parser.add_argument("--layer2-max-pages", type=int, default=None)
     parser.add_argument("--layer2-max-hn-thread-fetches", type=int, default=None)
     parser.add_argument("--layer2-max-x-context-fetches", type=int, default=None)
+    parser.add_argument("--layer2-scoring-concurrency", type=int, default=None)
+    parser.add_argument("--layer2-brief-concurrency", type=int, default=None)
+    parser.add_argument("--layer2-max-parallel-tool-calls", type=int, default=None)
+    parser.add_argument("--layer2-github-tool-concurrency", type=int, default=None)
+    parser.add_argument("--layer2-homepage-tool-concurrency", type=int, default=None)
+    parser.add_argument("--layer2-web-search-tool-concurrency", type=int, default=None)
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_SECONDS)
     args = parser.parse_args()
 
@@ -698,6 +784,8 @@ def main() -> int:
         classify_hn_limit=args.classify_hn_limit,
         classify_x_limit=args.classify_x_limit,
         llm_concurrency=args.llm_concurrency,
+        decision_io_concurrency=args.decision_io_concurrency,
+        decision_io_rate_limit_per_second=args.decision_io_rate_limit_per_second,
         resolver_search_limit=args.resolver_search_limit,
         resolver_research_limit=args.resolver_research_limit,
         resolver_research_rounds=args.resolver_research_rounds,
@@ -718,6 +806,12 @@ def main() -> int:
         layer2_max_pages=args.layer2_max_pages,
         layer2_max_hn_thread_fetches=args.layer2_max_hn_thread_fetches,
         layer2_max_x_context_fetches=args.layer2_max_x_context_fetches,
+        layer2_scoring_concurrency=args.layer2_scoring_concurrency,
+        layer2_brief_concurrency=args.layer2_brief_concurrency,
+        layer2_max_parallel_tool_calls=args.layer2_max_parallel_tool_calls,
+        layer2_github_tool_concurrency=args.layer2_github_tool_concurrency,
+        layer2_homepage_tool_concurrency=args.layer2_homepage_tool_concurrency,
+        layer2_web_search_tool_concurrency=args.layer2_web_search_tool_concurrency,
         timeout=args.timeout,
         resume=args.resume,
     )

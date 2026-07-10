@@ -8,6 +8,34 @@ from pipeline.decision.schema import init_decision_db
 
 
 class CandidateApiShapeTest(unittest.TestCase):
+    def test_latest_decision_run_accepts_ok_with_errors(self):
+        from pipeline.server import query_latest_decision_run
+
+        conn = sqlite3.connect(":memory:")
+        self.addCleanup(conn.close)
+        init_decision_db(conn)
+        conn.execute(
+            """
+            insert into decision_runs(
+                run_id, source_snapshot_run_id, started_at, completed_at,
+                status, config_hash, rule_version, note
+            )
+            values (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "decision-partial",
+                "source-run",
+                "2026-07-10T00:00:00Z",
+                "2026-07-10T00:01:00Z",
+                "ok_with_errors",
+                "config",
+                "rules",
+                "resolver candidate failed",
+            ),
+        )
+
+        self.assertEqual(query_latest_decision_run(conn), "decision-partial")
+
     def test_candidate_query_shape_from_db(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "hero.sqlite"

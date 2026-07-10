@@ -136,7 +136,7 @@ def query_latest_decision_run(conn: sqlite3.Connection) -> str | None:
         """
         select run_id
         from decision_runs
-        where status = 'ok'
+        where status in ('ok', 'ok_with_errors')
         order by coalesce(completed_at, started_at) desc, started_at desc
         limit 1
         """
@@ -464,6 +464,7 @@ def build_run_command(payload: Any) -> list[str]:
         "classify_hn_limit": "--classify-hn-limit",
         "classify_x_limit": "--classify-x-limit",
         "llm_concurrency": "--llm-concurrency",
+        "decision_io_concurrency": "--decision-io-concurrency",
         "x_stage1_batch_size": "--x-stage1-batch-size",
         "resolver_search_limit": "--resolver-search-limit",
         "resolver_research_limit": "--resolver-research-limit",
@@ -478,6 +479,12 @@ def build_run_command(payload: Any) -> list[str]:
         "layer2_max_pages": "--layer2-max-pages",
         "layer2_max_hn_thread_fetches": "--layer2-max-hn-thread-fetches",
         "layer2_max_x_context_fetches": "--layer2-max-x-context-fetches",
+        "layer2_scoring_concurrency": "--layer2-scoring-concurrency",
+        "layer2_brief_concurrency": "--layer2-brief-concurrency",
+        "layer2_max_parallel_tool_calls": "--layer2-max-parallel-tool-calls",
+        "layer2_github_tool_concurrency": "--layer2-github-tool-concurrency",
+        "layer2_homepage_tool_concurrency": "--layer2-homepage-tool-concurrency",
+        "layer2_web_search_tool_concurrency": "--layer2-web-search-tool-concurrency",
     }
     for key, flag in integer_options.items():
         value = options.get(key)
@@ -487,6 +494,7 @@ def build_run_command(payload: Any) -> list[str]:
             cmd.extend([flag, str(value)])
     float_options = {
         "layer2_deepdive_min_l2_score": "--layer2-deepdive-min-l2-score",
+        "decision_io_rate_limit_per_second": "--decision-io-rate-limit-per-second",
     }
     for key, flag in float_options.items():
         value = options.get(key)

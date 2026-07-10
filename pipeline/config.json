@@ -5,7 +5,12 @@
     "7d",
     "30d"
   ],
+  "source_collection": {
+    "max_workers": 6
+  },
   "github_trending": {
+    "scope_workers": 4,
+    "request_interval_seconds": 0.5,
     "periods": [
       "daily",
       "weekly",
@@ -21,6 +26,7 @@
     ]
   },
   "github_search": {
+    "query_workers": 3,
     "per_page": 100,
     "max_results_per_query": 500,
     "queries": [
@@ -36,6 +42,7 @@
   },
   "github_movers": {
     "enabled": true,
+    "provider_workers": 2,
     "trending_repos": {
       "enabled": true,
       "url": "https://trending-repos.com/",
@@ -53,6 +60,8 @@
     }
   },
   "hn": {
+    "algolia_workers": 3,
+    "algolia_request_interval_seconds": 0.5,
     "algolia_queries": [
       {
         "label": "agent",
@@ -78,6 +87,9 @@
     "first": 100
   },
   "huggingface": {
+    "resource_workers": 3,
+    "card_workers": 6,
+    "request_interval_seconds": 0.5,
     "resources": [
       "models",
       "datasets",
@@ -87,6 +99,7 @@
   },
   "npm": {
     "enabled": true,
+    "query_workers": 3,
     "size": 100,
     "sleep_seconds": 0.5,
     "queries": [
@@ -114,6 +127,8 @@
   },
   "pypi": {
     "enabled": true,
+    "feed_workers": 2,
+    "json_enrich_workers": 5,
     "feeds": [
       "newest",
       "updates"
@@ -230,8 +245,13 @@
       "\"MCP\" \"agent\""
     ]
   },
+  "decision": {
+    "io_concurrency": 5,
+    "io_rate_limit_per_second": 2.0
+  },
   "layer2": {
     "enabled": true,
+    "enable_edge_scout": false,
     "edge_scout_model": "kimi-k2.5",
     "scoring_model": "kimi-k2.5",
     "deepdive_model": "kimi-k2.6",
@@ -246,6 +266,12 @@
     "max_pages_per_candidate": 1,
     "max_hn_thread_fetches_per_candidate": 3,
     "max_x_context_fetches_per_candidate": 5,
-    "llm_concurrency": 4
+    "llm_concurrency": 4,
+    "scoring_concurrency": 5,
+    "brief_concurrency": 4,
+    "max_parallel_tool_calls_per_turn": 4,
+    "github_tool_concurrency": 5,
+    "homepage_tool_concurrency": 4,
+    "web_search_tool_concurrency": 2
   }
 }
