@@ -1057,7 +1057,7 @@ export function layer2RunOptionsFromConfig(config = {}) {
     layer2_scoring_provider: String(scoring.provider || 'kimi'),
     layer2_scoring_model: String(scoring.model || 'kimi-k2.5'),
     layer2_scoring_prompt_id: String(scoring.prompt_id || 'layer2_scoring_investigator'),
-    layer2_scoring_prompt_version: String(scoring.prompt_version || 'layer2-scoring-investigator-v1'),
+    layer2_scoring_prompt_version: String(scoring.prompt_version || 'layer2-scoring-investigator-v2'),
     layer2_scoring_output_schema_version: String(scoring.output_schema_version || 'layer2-scoring-schema-v1'),
     layer2_scoring_context_policy_version: String(scoring.context_policy_version || 'legacy-full-context-v1'),
     layer2_brief_provider: String(brief.provider || 'kimi'),

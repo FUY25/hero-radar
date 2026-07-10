@@ -4,14 +4,14 @@ Date: 2026-07-10
 
 ## Decision
 
-Keep the production/default Layer 2 scoring prompt on `v1`. Both prompt
+Use `v2` as the production/default Layer 2 scoring prompt. Both prompt
 candidates use the same `layer2-scoring-output-v2` contract so comparison does
 not conflate prompt quality with output-shape changes.
 
 The `v2` prompt, strict response contract, context builder, tool registry, rate policies,
-observation projection, and claim attribution are implemented and selectable, but `v2`
-must not become the default until the complete fixed evaluation corpus and human review
-gate pass. Direct-final mode and Edge Scout remain disabled.
+observation projection, and claim attribution are implemented and enabled by default.
+The version registry selects `v1` or `v2` exactly and rejects unknown versions; `v1`
+remains the explicit rollback option. Direct-final mode and Edge Scout remain disabled.
 
 ## Fixed Corpus
 
@@ -41,11 +41,13 @@ with a 3,000-token output cap produced complete responses that passed the expect
 band/contract checks. The scorer cap and output reserve are therefore set to 3,000;
 the independent Chinese Brief cap remains 1,000.
 
-This is a smoke test, not sufficient evidence to enable v2 by default.
+This remains a smoke test rather than a substitute for complete corpus and human
+comparison. The default changed to `v2` after its tool-failure evidence policy,
+stopping policy, output wording, and fail-closed version selection were tightened.
 
-## Enablement Gate
+## Ongoing Validation and Rollback Gate
 
-Before changing `prompt_version` to `v2`, run and persist all of the following:
+With `prompt_version` on `v2`, run and persist all of the following:
 
 1. The complete fixed corpus through both v1 and v2 using the same normalized inputs.
 2. Human comparison of score quality, evidence attribution, uncertainty handling, and
@@ -58,8 +60,8 @@ Before changing `prompt_version` to `v2`, run and persist all of the following:
 
 ## Current Safe Rollout State
 
-- Default scoring prompt: `v1`
-- Selectable scoring prompt: `v2`
+- Default scoring prompt: `v2`
+- Explicit rollback prompt: `v1`
 - Scorer output cap/reserve: 3,000 tokens
 - Brief output cap: 1,000 tokens
 - Direct-final mode: disabled

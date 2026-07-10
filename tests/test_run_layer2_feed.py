@@ -24,7 +24,10 @@ class Layer2RunnerTest(unittest.TestCase):
     ) -> dict:
         return {
             "routing": routing or {},
-            "scoring_agent": scoring_agent or {},
+            "scoring_agent": {
+                "prompt_version": "layer2-scoring-investigator-v1",
+                **(scoring_agent or {}),
+            },
             "brief_writer": brief_writer or {},
             "tool_runtime": tool_runtime or {},
             "edge_scout": edge_scout or {},
@@ -1439,7 +1442,7 @@ class Layer2RunnerTest(unittest.TestCase):
         self.assertEqual(default_config["brief_writer"]["max_output_tokens"], 1000)
         self.assertEqual(
             default_config["scoring_agent"]["prompt_version"],
-            "layer2-scoring-investigator-v1",
+            "layer2-scoring-investigator-v2",
         )
         self.assertEqual(
             default_config["brief_writer"]["prompt_version"],

@@ -8,10 +8,9 @@ from typing import Any
 from pipeline.decision.kimi_provider import KimiProvider
 from pipeline.decision.layer2_scoring_investigator import (
     DEFAULT_INVESTIGATOR_PROMPT_VERSION,
-    SCORING_INVESTIGATOR_SYSTEM_PROMPT,
-    SCORING_INVESTIGATOR_SYSTEM_PROMPT_V1,
     aggregate_investigator_score,
 )
+from pipeline.decision.layer2_prompts import scoring_prompt_for_version
 from pipeline.decision.layer2_scout import (
     DEFAULT_SCOUT_PROMPT_VERSION,
     SCOUT_SYSTEM_PROMPT,
@@ -1422,17 +1421,14 @@ def run_scoring_investigator_kimi_eval(
     system_prompt_override: str | None = None,
 ) -> dict[str, Any]:
     active_provider = provider or KimiProvider(model=model, timeout=90, max_retries=0)
+    versioned_system_prompt = scoring_prompt_for_version(prompt_version)
     if not getattr(active_provider, "api_key", ""):
         return {"ok": False, "skipped": True, "reason": "Kimi key not configured"}
     active_cases = cases if cases is not None else _default_scoring_investigator_smoke_cases()
     active_limit = max(1, int(limit or 1))
     evaluated: list[dict[str, Any]] = []
     mismatches: list[dict[str, Any]] = []
-    active_system_prompt = system_prompt_override or (
-        SCORING_INVESTIGATOR_SYSTEM_PROMPT_V1
-        if str(prompt_version).endswith("-v1")
-        else SCORING_INVESTIGATOR_SYSTEM_PROMPT
-    )
+    active_system_prompt = system_prompt_override or versioned_system_prompt
     system_prompt = (
         f"{active_system_prompt}\n\n"
         "For this eval smoke, no tools are available. Return action=final only."

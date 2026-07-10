@@ -269,7 +269,7 @@
       "provider": "kimi",
       "model": "kimi-k2.5",
       "prompt_id": "layer2_scoring_investigator",
-      "prompt_version": "layer2-scoring-investigator-v1",
+      "prompt_version": "layer2-scoring-investigator-v2",
       "output_schema_version": "layer2-scoring-output-v2",
       "context_policy_version": "layer2-scoring-context-v1",
       "timeout_seconds": 90,

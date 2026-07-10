@@ -11,6 +11,21 @@ from pipeline.decision.llm_provider import FakeLLMProvider
 from pipeline.decision.schema import init_decision_db
 
 
+LEGACY_PROMPT_VERSION = "layer2-scoring-investigator-v1"
+
+
+def run_v1_scoring(*args, **kwargs):
+    from pipeline.decision.layer2_scoring_investigator import (
+        score_with_investigator,
+    )
+
+    return score_with_investigator(
+        *args,
+        prompt_version=LEGACY_PROMPT_VERSION,
+        **kwargs,
+    )
+
+
 class CountingTool:
     def __init__(self, response: dict):
         self.response = response
@@ -120,10 +135,6 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
         return conn
 
     def test_investigator_uses_tool_then_persists_score_and_trace(self):
-        from pipeline.decision.layer2_scoring_investigator import (
-            score_with_investigator,
-        )
-
         conn = self.make_conn()
         provider = FakeLLMProvider(
             [
@@ -142,7 +153,7 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
         )
         readme_tool = CountingTool({"status": "ok", "excerpt": "README evidence"})
 
-        results = score_with_investigator(
+        results = run_v1_scoring(
             conn,
             feed_run_id="l2-run",
             groups=[make_group()],
@@ -175,7 +186,6 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
     def test_investigator_enforces_web_search_budget(self):
         from pipeline.decision.layer2_scoring_investigator import (
             InvestigatorLimits,
-            score_with_investigator,
         )
 
         conn = self.make_conn()
@@ -194,7 +204,7 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
         )
         web_tool = CountingTool({"status": "ok", "results": []})
 
-        score_with_investigator(
+        run_v1_scoring(
             conn,
             feed_run_id="l2-run",
             groups=[make_group()],
@@ -212,8 +222,6 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
         self.assertEqual(tool_trace[1]["status"], "budget_exceeded")
 
     def test_repeated_normalized_tool_signature_is_rejected_without_spending_budget(self):
-        from pipeline.decision.layer2_scoring_investigator import score_with_investigator
-
         conn = self.make_conn()
         repeated_request = {
             "action": "use_tools",
@@ -230,7 +238,7 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
         )
         readme_tool = CountingTool({"status": "ok", "excerpt": "README"})
 
-        result = score_with_investigator(
+        result = run_v1_scoring(
             conn,
             feed_run_id="l2-run",
             groups=[make_group()],
@@ -253,7 +261,6 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
     def test_same_turn_tools_run_concurrently_and_trace_keeps_request_order(self):
         from pipeline.decision.layer2_scoring_investigator import (
             InvestigatorLimits,
-            score_with_investigator,
         )
 
         conn = self.make_conn()
@@ -289,7 +296,7 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
                 active -= 1
             return {"status": "ok", "value": arguments["value"]}
 
-        results = score_with_investigator(
+        results = run_v1_scoring(
             conn,
             feed_run_id="l2-run",
             groups=[make_group()],
@@ -315,7 +322,6 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
     def test_parallel_tool_reservation_enforces_total_and_family_budgets_in_order(self):
         from pipeline.decision.layer2_scoring_investigator import (
             InvestigatorLimits,
-            score_with_investigator,
         )
 
         conn = self.make_conn()
@@ -348,7 +354,7 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
 
             return run
 
-        results = score_with_investigator(
+        results = run_v1_scoring(
             conn,
             feed_run_id="l2-run",
             groups=[make_group()],
@@ -375,10 +381,6 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
         )
 
     def test_investigator_repairs_invalid_final_score_once(self):
-        from pipeline.decision.layer2_scoring_investigator import (
-            score_with_investigator,
-        )
-
         conn = self.make_conn()
         provider = FakeLLMProvider(
             [
@@ -387,7 +389,7 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
             ]
         )
 
-        results = score_with_investigator(
+        results = run_v1_scoring(
             conn,
             feed_run_id="l2-run",
             groups=[make_group()],
@@ -407,7 +409,6 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
     def test_last_tool_turn_repairs_to_final_score(self):
         from pipeline.decision.layer2_scoring_investigator import (
             InvestigatorLimits,
-            score_with_investigator,
         )
 
         conn = self.make_conn()
@@ -427,7 +428,7 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
             ]
         )
 
-        results = score_with_investigator(
+        results = run_v1_scoring(
             conn,
             feed_run_id="l2-run",
             groups=[make_group()],
@@ -448,7 +449,6 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
     def test_failed_investigation_persists_error_trace(self):
         from pipeline.decision.layer2_scoring_investigator import (
             InvestigatorLimits,
-            score_with_investigator,
         )
 
         conn = self.make_conn()
@@ -468,7 +468,7 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
         )
 
         with self.assertRaises(RuntimeError):
-            score_with_investigator(
+            run_v1_scoring(
                 conn,
                 feed_run_id="l2-run",
                 groups=[make_group()],
@@ -707,15 +707,15 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
         )
         self.assertNotIn("investigation trace", BRIEF_SYSTEM_PROMPT)
 
-    def test_default_v1_prompt_uses_the_shared_v2_output_contract(self):
+    def test_v1_prompt_uses_the_shared_v2_output_contract(self):
         from pipeline.decision.layer2_contracts import scoring_turn_output_schema_v2
         from pipeline.decision.layer2_scoring_investigator import (
-            DEFAULT_INVESTIGATOR_PROMPT_VERSION,
-            SCORING_INVESTIGATOR_SYSTEM_PROMPT_V1,
             SCORING_OUTPUT_SCHEMA_VERSION,
         )
+        from pipeline.decision.layer2_prompts import (
+            SCORING_INVESTIGATOR_SYSTEM_PROMPT_V1,
+        )
 
-        self.assertTrue(DEFAULT_INVESTIGATOR_PROMPT_VERSION.endswith("-v1"))
         self.assertEqual(SCORING_OUTPUT_SCHEMA_VERSION, "layer2-scoring-output-v2")
         self.assertEqual(
             scoring_turn_output_schema_v2()["$id"], SCORING_OUTPUT_SCHEMA_VERSION
@@ -725,15 +725,11 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
         self.assertNotIn('"information_need":"..."', SCORING_INVESTIGATOR_SYSTEM_PROMPT_V1)
 
     def test_enough_context_final_scores_without_tool_calls(self):
-        from pipeline.decision.layer2_scoring_investigator import (
-            score_with_investigator,
-        )
-
         conn = self.make_conn()
         provider = FakeLLMProvider([final_response()])
         unused_tool = CountingTool({"status": "ok"})
 
-        results = score_with_investigator(
+        results = run_v1_scoring(
             conn,
             feed_run_id="l2-run",
             groups=[make_group()],
@@ -745,10 +741,6 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
         self.assertEqual(unused_tool.calls, [])
 
     def test_observation_and_recent_raw_result_are_passed_while_full_trace_is_persisted(self):
-        from pipeline.decision.layer2_scoring_investigator import (
-            score_with_investigator,
-        )
-
         conn = self.make_conn()
         provider = FakeLLMProvider(
             [
@@ -769,7 +761,7 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
             {"status": "ok", "excerpt": "README says browser control and memory."}
         )
 
-        score_with_investigator(
+        run_v1_scoring(
             conn,
             feed_run_id="l2-run",
             groups=[make_group()],
@@ -792,10 +784,6 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
         self.assertIn("browser control", persisted)
 
     def test_tool_exception_records_trace_and_allows_fallback_final(self):
-        from pipeline.decision.layer2_scoring_investigator import (
-            score_with_investigator,
-        )
-
         conn = self.make_conn()
         provider = FakeLLMProvider(
             [
@@ -816,7 +804,7 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
         def broken_tool(arguments):
             raise TimeoutError("homepage timed out")
 
-        results = score_with_investigator(
+        results = run_v1_scoring(
             conn,
             feed_run_id="l2-run",
             groups=[make_group()],
@@ -829,10 +817,6 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
         self.assertGreater(results[0]["l2_score"], 0)
 
     def test_all_primitive_observations_and_one_recent_raw_result_flow_to_next_turn(self):
-        from pipeline.decision.layer2_scoring_investigator import (
-            score_with_investigator,
-        )
-
         conn = self.make_conn()
         provider = FakeLLMProvider(
             [
@@ -879,7 +863,7 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
             ),
         }
 
-        score_with_investigator(
+        run_v1_scoring(
             conn,
             feed_run_id="l2-run",
             groups=[make_group()],
@@ -907,10 +891,6 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
         self.assertEqual(recent_raw[0]["tool"], "web_search")
 
     def test_unavailable_tool_records_trace_and_allows_fallback_final(self):
-        from pipeline.decision.layer2_scoring_investigator import (
-            score_with_investigator,
-        )
-
         conn = self.make_conn()
         provider = FakeLLMProvider(
             [
@@ -931,7 +911,7 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
             ]
         )
 
-        results = score_with_investigator(
+        results = run_v1_scoring(
             conn,
             feed_run_id="l2-run",
             groups=[make_group()],
@@ -948,10 +928,6 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
         )
 
     def test_tool_trace_redacts_secret_like_values(self):
-        from pipeline.decision.layer2_scoring_investigator import (
-            score_with_investigator,
-        )
-
         conn = self.make_conn()
         provider = FakeLLMProvider(
             [
@@ -977,7 +953,7 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
             }
         )
 
-        score_with_investigator(
+        run_v1_scoring(
             conn,
             feed_run_id="l2-run",
             groups=[make_group()],

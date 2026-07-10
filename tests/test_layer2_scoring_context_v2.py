@@ -289,7 +289,7 @@ class Layer2ScoringContextV2Test(unittest.TestCase):
 
         call = provider.calls[0]
         payload = call["input_payload"]
-        self.assertEqual(DEFAULT_INVESTIGATOR_PROMPT_VERSION, "layer2-scoring-investigator-v1")
+        self.assertEqual(DEFAULT_INVESTIGATOR_PROMPT_VERSION, "layer2-scoring-investigator-v2")
         self.assertEqual(call["prompt_version"], "layer2-scoring-investigator-v2")
         self.assertEqual(payload["candidate"]["identity"]["group_id"], "group:repo")
         self.assertNotIn("candidate_identity", payload)
