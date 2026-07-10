@@ -918,6 +918,10 @@ button:disabled {
   gap: 16px;
 }
 
+.feed-brief-preview .feed-brief-grid {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .feed-brief-column {
   display: grid;
   align-content: start;
