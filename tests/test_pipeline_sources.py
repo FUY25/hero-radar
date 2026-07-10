@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import threading
+import time
 import unittest
 import urllib.parse
 from pathlib import Path
@@ -10,6 +11,162 @@ from unittest.mock import patch
 
 
 class PipelineSourcesTest(unittest.TestCase):
+    def test_github_adapters_share_one_run_scoped_host_policy_and_merge_stably(self) -> None:
+        import pipeline.run_pipeline as run_pipeline
+        from pipeline.source_concurrency import RequestPolicyRegistry
+
+        policy_ids: list[int] = []
+        all_started = threading.Barrier(3, timeout=3)
+        request_starts: list[float] = []
+        request_lock = threading.Lock()
+        shared_policy = RequestPolicyRegistry()
+        shared_policy.register_url(
+            "https://api.github.com/search/repositories",
+            max_in_flight=1,
+            min_interval_seconds=0.02,
+        )
+
+        def collector(name, *, fail=False):
+            def collect(config, fetched_at):
+                policy = run_pipeline.source_request_policies(config)
+                policy_ids.append(id(policy))
+                all_started.wait()
+                if fail:
+                    raise RuntimeError("blocked")
+
+                def request():
+                    with request_lock:
+                        request_starts.append(time.monotonic())
+                    return name
+
+                value = policy.run_url(
+                    "https://api.github.com/search/repositories",
+                    request,
+                    max_in_flight=1,
+                    min_interval_seconds=0.02,
+                )
+                return [value], None
+
+            return collect
+
+        adapters = [
+            ("github_trending", collector("trending")),
+            ("github_movers", collector("movers", fail=True)),
+            ("github_search", collector("search")),
+        ]
+        with patch.object(run_pipeline, "build_source_request_policies", return_value=shared_policy):
+            results = run_pipeline.collect_source_adapters(
+                adapters,
+                config={},
+                fetched_at="2026-07-10T00:00:00Z",
+                max_workers=3,
+            )
+
+        self.assertEqual(policy_ids, [id(shared_policy)] * 3)
+        self.assertEqual([result.source_name for result in results], [name for name, _ in adapters])
+        self.assertEqual([result.items for result in results], [["trending"], [], ["search"]])
+        self.assertEqual(results[1].error, "RuntimeError: blocked")
+        self.assertEqual(len(request_starts), 2)
+        self.assertGreaterEqual(request_starts[1] - request_starts[0], 0.015)
+
+    def test_unauthenticated_github_search_policy_is_about_ten_requests_per_minute(self) -> None:
+        import pipeline.run_pipeline as run_pipeline
+
+        config = {
+            "github_trending": {"scope_workers": 4},
+            "github_search": {"query_workers": 3},
+            "github_movers": {},
+        }
+        with patch.dict("os.environ", {}, clear=True):
+            policies = run_pipeline.build_source_request_policies(config)
+
+        self.assertEqual(
+            policies.spec_for_url("https://api.github.com/search/repositories"),
+            (3, 6.2),
+        )
+
+    def test_github_mover_network_providers_run_through_host_policy(self) -> None:
+        import pipeline.run_pipeline as run_pipeline
+
+        gated_urls: list[str] = []
+
+        class RecordingPolicy:
+            def run_url(self, url, function, **kwargs):
+                gated_urls.append(url)
+                return function()
+
+        config = {
+            run_pipeline.SOURCE_REQUEST_POLICIES_KEY: RecordingPolicy(),
+            "github_movers": {
+                "enabled": True,
+                "provider_workers": 2,
+                "request_interval_seconds": 0,
+                "trending_repos": {"enabled": True, "url": "https://trending-repos.com/"},
+                "repofomo": {"enabled": True, "data_url": "https://repofomo.com/data.js"},
+            },
+        }
+        with (
+            patch.object(run_pipeline, "collect_trending_repos_movers", return_value=[]),
+            patch.object(run_pipeline, "collect_repofomo_movers", return_value=[]),
+        ):
+            items, error = run_pipeline.collect_github_movers(config, "2026-07-10T00:00:00Z")
+
+        self.assertEqual(items, [])
+        self.assertIsNone(error)
+        self.assertCountEqual(
+            gated_urls,
+            ["https://trending-repos.com/", "https://repofomo.com/data.js"],
+        )
+
+    def test_run_pipeline_closes_database_when_persist_raises(self) -> None:
+        import pipeline.run_pipeline as run_pipeline
+
+        class TrackingConnection:
+            closed = False
+
+            def close(self):
+                self.closed = True
+
+        conn = TrackingConnection()
+        with (
+            patch.object(run_pipeline.sqlite3, "connect", return_value=conn),
+            patch.object(run_pipeline, "load_dotenv"),
+            patch.object(run_pipeline, "ensure_dirs"),
+            patch.object(run_pipeline, "read_config", return_value={}),
+            patch.object(run_pipeline, "pipeline_adapters", return_value=[("source", lambda *_: ([object()], None))]),
+            patch.object(run_pipeline, "init_db"),
+            patch.object(run_pipeline, "insert_source_items", side_effect=RuntimeError("persist failed")),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "persist failed"):
+                run_pipeline.run_pipeline()
+
+        self.assertTrue(conn.closed)
+
+    def test_run_pipeline_closes_database_when_export_raises(self) -> None:
+        import pipeline.run_pipeline as run_pipeline
+
+        class TrackingConnection:
+            closed = False
+
+            def close(self):
+                self.closed = True
+
+        conn = TrackingConnection()
+        with (
+            patch.object(run_pipeline.sqlite3, "connect", return_value=conn),
+            patch.object(run_pipeline, "load_dotenv"),
+            patch.object(run_pipeline, "ensure_dirs"),
+            patch.object(run_pipeline, "read_config", return_value={}),
+            patch.object(run_pipeline, "init_db"),
+            patch.object(run_pipeline, "rank_latest_by_item_source", return_value=[]),
+            patch.object(run_pipeline, "latest_source_errors", return_value={}),
+            patch.object(run_pipeline, "export_latest", side_effect=RuntimeError("export failed")),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "export failed"):
+                run_pipeline.run_pipeline(export_only=True)
+
+        self.assertTrue(conn.closed)
+
     def test_pipeline_sources_do_not_include_ossinsight(self) -> None:
         import pipeline.run_pipeline as run_pipeline
 

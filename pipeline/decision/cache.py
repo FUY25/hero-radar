@@ -38,6 +38,7 @@ def put_api_cache(
     response: dict[str, Any],
     status: str = "ok",
     error: str | None = None,
+    commit: bool = True,
 ) -> None:
     conn.execute(
         """
@@ -61,4 +62,5 @@ def put_api_cache(
             error,
         ),
     )
-    conn.commit()
+    if commit:
+        conn.commit()

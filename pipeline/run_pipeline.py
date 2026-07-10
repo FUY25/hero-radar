@@ -32,7 +32,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from pipeline.run_logging import JsonlRunLogger
-from pipeline.source_concurrency import RateGate, stable_bounded_parallel_map
+from pipeline.source_concurrency import RateGate, RequestPolicyRegistry, stable_bounded_parallel_map
 
 CONFIG_PATH = ROOT / "pipeline" / "config.json"
 DATA_DIR = ROOT / "data"
@@ -67,6 +67,7 @@ SETTINGS_CHANNEL_ORDER = ["settings_source_health", "settings_search_terms", "x_
 SETTINGS_CHANNELS = set(SETTINGS_CHANNEL_ORDER)
 RETIRED_SOURCES = {"ossinsight_trending", "ossinsight_trending_optional"}
 EXCLUDED_ITEM_SOURCES = {"x_project_mentions", *RETIRED_SOURCES}
+SOURCE_REQUEST_POLICIES_KEY = "_source_request_policies"
 
 
 @dataclasses.dataclass
@@ -196,21 +197,89 @@ def query_entry(value: str | dict[str, Any]) -> tuple[str, str]:
     return query, query
 
 
+def build_source_request_policies(config: dict[str, Any]) -> RequestPolicyRegistry:
+    """Build one host-keyed request policy registry for a source run.
+
+    GitHub HTML and GitHub API traffic intentionally use distinct buckets
+    because ``github.com`` and ``api.github.com`` are different hosts with
+    different provider limits. Every request to the same hostname shares its
+    gate, including custom mover provider URLs that resolve to the same host.
+    """
+
+    policies = RequestPolicyRegistry()
+
+    trending = config.get("github_trending", {})
+    trending_workers = max(1, int(trending.get("scope_workers", 4)))
+    policies.register_url(
+        "https://github.com/trending",
+        max_in_flight=trending_workers,
+        min_interval_seconds=max(0.0, float(trending.get("request_interval_seconds", 0.5))),
+    )
+
+    search = config.get("github_search", {})
+    search_workers = max(1, int(search.get("query_workers", 3)))
+    # 6.2 seconds is intentionally just below ten unauthenticated Search API
+    # starts per minute; authenticated runs may use the configured faster gate.
+    default_search_interval = 1.0 if os.environ.get("GITHUB_TOKEN") else 6.2
+    policies.register_url(
+        "https://api.github.com/search/repositories",
+        max_in_flight=search_workers,
+        min_interval_seconds=max(
+            0.0,
+            float(search.get("request_interval_seconds", default_search_interval)),
+        ),
+    )
+
+    movers = config.get("github_movers", {})
+    mover_interval = max(0.0, float(movers.get("request_interval_seconds", 0.5)))
+    trending_repos = movers.get("trending_repos", {})
+    if trending_repos.get("enabled", False):
+        policies.register_url(
+            str(trending_repos.get("url") or "https://trending-repos.com/"),
+            max_in_flight=1,
+            min_interval_seconds=max(
+                0.0,
+                float(trending_repos.get("request_interval_seconds", mover_interval)),
+            ),
+        )
+    repofomo = movers.get("repofomo", {})
+    if repofomo.get("enabled", False):
+        policies.register_url(
+            str(repofomo.get("data_url") or "https://repofomo.com/data.js"),
+            max_in_flight=1,
+            min_interval_seconds=max(
+                0.0,
+                float(repofomo.get("request_interval_seconds", mover_interval)),
+            ),
+        )
+    return policies
+
+
+def source_request_policies(config: dict[str, Any]) -> RequestPolicyRegistry:
+    policies = config.get(SOURCE_REQUEST_POLICIES_KEY)
+    if policies is not None:
+        return policies
+    return build_source_request_policies(config)
+
+
 def collect_github_trending(config: dict[str, Any], fetched_at: str) -> tuple[list[SourceItem], str | None]:
     settings = config["github_trending"]
     scopes = [(str(period), str(language)) for period in settings["periods"] for language in settings["languages"]]
     workers = max(1, int(settings.get("scope_workers", min(4, len(scopes) or 1))))
-    gate = RateGate(
-        max_in_flight=workers,
-        min_interval_seconds=max(0.0, float(settings.get("request_interval_seconds", 0.5))),
-    )
+    policies = source_request_policies(config)
+    request_interval = max(0.0, float(settings.get("request_interval_seconds", 0.5)))
 
     def collect_scope(scope: tuple[str, str]) -> tuple[list[SourceItem], str | None]:
         period, language = scope
         try:
             path = f"/{language}" if language else ""
             url = f"https://github.com/trending{path}?since={period}"
-            html_text = gate.run(lambda: request_text(url, headers={"User-Agent": "Mozilla/5.0"}))
+            html_text = policies.run_url(
+                url,
+                lambda: request_text(url, headers={"User-Agent": "Mozilla/5.0"}),
+                max_in_flight=workers,
+                min_interval_seconds=request_interval,
+            )
             raw_file = RAW_DIR / f"github_trending_{language or 'all'}_{period}_{fetched_at.replace(':', '').replace('-', '')}.html"
             raw_file.write_text(html_text)
 
@@ -285,10 +354,8 @@ def collect_github_search(config: dict[str, Any], fetched_at: str) -> tuple[list
 
     workers = max(1, int(settings.get("query_workers", min(3, len(tasks) or 1))))
     default_interval = 1.0 if os.environ.get("GITHUB_TOKEN") else 6.2
-    gate = RateGate(
-        max_in_flight=workers,
-        min_interval_seconds=max(0.0, float(settings.get("request_interval_seconds", default_interval))),
-    )
+    policies = source_request_policies(config)
+    request_interval = max(0.0, float(settings.get("request_interval_seconds", default_interval)))
 
     def collect_query(task: tuple[str, str]) -> tuple[list[SourceItem], str | None]:
         query_label, query = task
@@ -306,7 +373,12 @@ def collect_github_search(config: dict[str, Any], fetched_at: str) -> tuple[list
                     }
                 )
                 url = f"https://api.github.com/search/repositories?{params}"
-                data = gate.run(lambda: request_json(url, headers=github_headers()))
+                data = policies.run_url(
+                    url,
+                    lambda: request_json(url, headers=github_headers()),
+                    max_in_flight=workers,
+                    min_interval_seconds=request_interval,
+                )
                 raw_file = RAW_DIR / f"github_search_{safe_name(query)}_p{page}_{fetched_at.replace(':', '').replace('-', '')}.json"
                 raw_file.write_text(json.dumps(data, ensure_ascii=False, indent=2))
                 repos = data.get("items", [])
@@ -357,19 +429,44 @@ def collect_github_movers(config: dict[str, Any], fetched_at: str) -> tuple[list
     if not settings.get("enabled", False):
         return [], "disabled"
 
-    providers: list[tuple[str, Any, dict[str, Any]]] = []
+    policies = source_request_policies(config)
+    default_interval = max(0.0, float(settings.get("request_interval_seconds", 0.5)))
+    providers: list[tuple[str, Any, dict[str, Any], str]] = []
     trending_settings = settings.get("trending_repos", {})
     if trending_settings.get("enabled", False):
-        providers.append(("trending-repos", collect_trending_repos_movers, trending_settings))
+        providers.append(
+            (
+                "trending-repos",
+                collect_trending_repos_movers,
+                trending_settings,
+                str(trending_settings.get("url") or "https://trending-repos.com/"),
+            )
+        )
 
     repofomo_settings = settings.get("repofomo", {})
     if repofomo_settings.get("enabled", False):
-        providers.append(("repofomo", collect_repofomo_movers, repofomo_settings))
+        providers.append(
+            (
+                "repofomo",
+                collect_repofomo_movers,
+                repofomo_settings,
+                str(repofomo_settings.get("data_url") or "https://repofomo.com/data.js"),
+            )
+        )
 
-    def collect_provider(provider: tuple[str, Any, dict[str, Any]]) -> tuple[list[SourceItem], str | None]:
-        provider_name, collector, provider_settings = provider
+    def collect_provider(provider: tuple[str, Any, dict[str, Any], str]) -> tuple[list[SourceItem], str | None]:
+        provider_name, collector, provider_settings, url = provider
         try:
-            return collector(provider_settings, fetched_at), None
+            interval = max(
+                0.0,
+                float(provider_settings.get("request_interval_seconds", default_interval)),
+            )
+            return policies.run_url(
+                url,
+                lambda: collector(provider_settings, fetched_at),
+                max_in_flight=1,
+                min_interval_seconds=interval,
+            ), None
         except Exception as exc:  # noqa: BLE001
             return [], f"{provider_name}: {type(exc).__name__}: {exc}"
 
@@ -5138,12 +5235,15 @@ def collect_source_adapters(
     """
 
     indexed_adapters = list(enumerate(adapters))
+    run_config = dict(config)
+    if SOURCE_REQUEST_POLICIES_KEY not in run_config:
+        run_config[SOURCE_REQUEST_POLICIES_KEY] = build_source_request_policies(config)
 
     def collect_one(indexed_adapter: tuple[int, tuple[str, Any]]) -> SourceCollectionResult:
         adapter_index, (source_name, adapter) = indexed_adapter
         started = time.monotonic()
         try:
-            items, error = adapter(config, fetched_at)
+            items, error = adapter(run_config, fetched_at)
         except Exception as exc:  # noqa: BLE001
             items = []
             error = f"{type(exc).__name__}: {exc}"
@@ -5180,79 +5280,79 @@ def run_pipeline(
         only_sources=sorted(only_sources or []),
     )
     conn = sqlite3.connect(DB_PATH)
-    init_db(conn)
+    try:
+        init_db(conn)
 
-    if export_only:
-        scored = rank_latest_by_item_source(conn, run_id)
-        export_latest(scored, run_id, fetched_at, latest_source_errors(conn))
-        print(f"Exported {len(scored)} scored rows from latest snapshots.", file=sys.stderr)
-        print(EXPORT_DIR / "latest_scores.md")
-        logger.event("sources_run_completed", export_only=True, inserted=0, exported=len(scored))
-        conn.close()
-        return 0
+        if export_only:
+            scored = rank_latest_by_item_source(conn, run_id)
+            export_latest(scored, run_id, fetched_at, latest_source_errors(conn))
+            print(f"Exported {len(scored)} scored rows from latest snapshots.", file=sys.stderr)
+            print(EXPORT_DIR / "latest_scores.md")
+            logger.event("sources_run_completed", export_only=True, inserted=0, exported=len(scored))
+            return 0
 
-    adapters = pipeline_adapters()
-    if only_sources:
-        known = {name for name, _ in adapters}
-        unknown = sorted(only_sources - known)
-        if unknown:
-            print(f"Unknown source(s): {', '.join(unknown)}", file=sys.stderr)
-            print(f"Known sources: {', '.join(sorted(known))}", file=sys.stderr)
-            logger.event("sources_run_failed", error="unknown_sources", unknown_sources=unknown)
-            conn.close()
-            return 2
-        adapters = [(name, adapter) for name, adapter in adapters if name in only_sources]
+        adapters = pipeline_adapters()
+        if only_sources:
+            known = {name for name, _ in adapters}
+            unknown = sorted(only_sources - known)
+            if unknown:
+                print(f"Unknown source(s): {', '.join(unknown)}", file=sys.stderr)
+                print(f"Known sources: {', '.join(sorted(known))}", file=sys.stderr)
+                logger.event("sources_run_failed", error="unknown_sources", unknown_sources=unknown)
+                return 2
+            adapters = [(name, adapter) for name, adapter in adapters if name in only_sources]
 
-    source_workers = max(1, int(config.get("source_collection", {}).get("max_workers", 6)))
-    for source_name, _adapter in adapters:
-        print(f"[{source_name}] collecting...", file=sys.stderr)
-        logger.event("source_started", source=source_name)
+        source_workers = max(1, int(config.get("source_collection", {}).get("max_workers", 6)))
+        for source_name, _adapter in adapters:
+            print(f"[{source_name}] collecting...", file=sys.stderr)
+            logger.event("source_started", source=source_name)
 
-    collection_results = collect_source_adapters(
-        adapters,
-        config=config,
-        fetched_at=fetched_at,
-        max_workers=source_workers,
-    )
-
-    source_errors: dict[str, str | None] = {}
-    total_inserted = 0
-    for result in collection_results:
-        source_name = result.source_name
-        source_errors[source_name] = result.error
-        ids = insert_source_items(
-            conn,
-            run_id=run_id,
-            source=source_name,
+        collection_results = collect_source_adapters(
+            adapters,
+            config=config,
             fetched_at=fetched_at,
-            items=result.items,
-            error=result.error,
-        )
-        total_inserted += len(ids)
-        print(
-            f"[{source_name}] inserted {len(ids)} items" + (f" ({result.error})" if result.error else ""),
-            file=sys.stderr,
-        )
-        logger.event(
-            "source_completed",
-            source=source_name,
-            items=len(ids),
-            error=result.error,
-            duration_seconds=result.duration_seconds,
+            max_workers=source_workers,
         )
 
-    if only_sources:
-        scored = rank_latest_by_item_source(conn, run_id)
-        export_errors = latest_source_errors(conn)
-    else:
-        scored = rank_score(conn, run_id)
-        export_errors = source_errors
-    export_latest(scored, run_id, fetched_at, export_errors)
-    print(f"Inserted {total_inserted} items. Exported {len(scored)} scored rows.", file=sys.stderr)
-    print(EXPORT_DIR / "latest_scores.md")
-    logger.event("sources_run_completed", inserted=total_inserted, exported=len(scored))
-    conn.close()
-    return 0
+        source_errors: dict[str, str | None] = {}
+        total_inserted = 0
+        for result in collection_results:
+            source_name = result.source_name
+            source_errors[source_name] = result.error
+            ids = insert_source_items(
+                conn,
+                run_id=run_id,
+                source=source_name,
+                fetched_at=fetched_at,
+                items=result.items,
+                error=result.error,
+            )
+            total_inserted += len(ids)
+            print(
+                f"[{source_name}] inserted {len(ids)} items" + (f" ({result.error})" if result.error else ""),
+                file=sys.stderr,
+            )
+            logger.event(
+                "source_completed",
+                source=source_name,
+                items=len(ids),
+                error=result.error,
+                duration_seconds=result.duration_seconds,
+            )
+
+        if only_sources:
+            scored = rank_latest_by_item_source(conn, run_id)
+            export_errors = latest_source_errors(conn)
+        else:
+            scored = rank_score(conn, run_id)
+            export_errors = source_errors
+        export_latest(scored, run_id, fetched_at, export_errors)
+        print(f"Inserted {total_inserted} items. Exported {len(scored)} scored rows.", file=sys.stderr)
+        print(EXPORT_DIR / "latest_scores.md")
+        logger.event("sources_run_completed", inserted=total_inserted, exported=len(scored))
+        return 0
+    finally:
+        conn.close()
 
 
 def main() -> int:

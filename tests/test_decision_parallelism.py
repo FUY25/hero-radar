@@ -11,7 +11,7 @@ from unittest.mock import patch
 from pipeline.decision.backfill import run_backfill_jobs
 from pipeline.decision.npm_backfill import run_npm_backfill
 from pipeline.decision.readme_enrichment import enrich_candidate_readmes
-from pipeline.decision.rate_limit import StartRateLimiter
+from pipeline.decision.rate_limit import CallRateLimiter, StartRateLimiter
 from pipeline.decision.resolver import enrich_classifier_candidates
 from pipeline.decision.run_decision import run_decision
 from pipeline.decision.schema import init_decision_db
@@ -51,6 +51,58 @@ def _insert_entity(conn: sqlite3.Connection, entity_id: str, key: str) -> None:
 
 
 class DecisionParallelismTest(unittest.TestCase):
+    def test_call_rate_limiter_uses_injected_clock_and_sleeper(self) -> None:
+        current = [0.0]
+        sleeps = []
+
+        def sleep(delay):
+            sleeps.append(delay)
+            current[0] += delay
+
+        limiter = CallRateLimiter(
+            max_in_flight=2,
+            starts_per_second=2,
+            clock=lambda: current[0],
+            sleeper=sleep,
+        )
+
+        with limiter:
+            pass
+        with limiter:
+            pass
+
+        self.assertEqual(sleeps, [0.5])
+
+    def test_call_rate_limiter_bounds_in_flight_calls(self) -> None:
+        limiter = CallRateLimiter(max_in_flight=1)
+        first_entered = threading.Event()
+        release_first = threading.Event()
+        second_entered = threading.Event()
+
+        def first_call():
+            with limiter:
+                first_entered.set()
+                release_first.wait(timeout=2)
+
+        def second_call():
+            first_entered.wait(timeout=2)
+            with limiter:
+                second_entered.set()
+
+        first = threading.Thread(target=first_call)
+        second = threading.Thread(target=second_call)
+        first.start()
+        second.start()
+        self.assertTrue(first_entered.wait(timeout=2))
+        self.assertFalse(second_entered.wait(timeout=0.05))
+        release_first.set()
+        first.join(timeout=2)
+        second.join(timeout=2)
+
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertTrue(second_entered.is_set())
+
     def test_rate_limiter_spaces_concurrent_pool_starts(self) -> None:
         limiter = StartRateLimiter(2)
         with (
@@ -218,6 +270,7 @@ class DecisionParallelismTest(unittest.TestCase):
         )
 
         self.assertEqual(summary["enriched"], 1)
+        self.assertEqual(summary["attempted"], 2)
         self.assertEqual(summary["failed"], 1)
         self.assertEqual(len(summary["errors"]), 1)
         self.assertEqual(summary["errors"][0]["entity_key"], "name:broken")
@@ -280,6 +333,10 @@ class DecisionParallelismTest(unittest.TestCase):
                     ("name:first", "github:owner/first"),
                     ("name:second", "github:owner/second"),
                 ],
+            )
+            self.assertEqual(
+                conn.execute("select count(*) from api_cache where source='resolver'").fetchone()[0],
+                2,
             )
 
     def test_x_stage1_batches_share_the_bounded_parallel_budget(self) -> None:
@@ -432,7 +489,26 @@ class DecisionParallelismTest(unittest.TestCase):
                 );
                 """
             )
+            conn.execute(
+                "insert into snapshots(run_id,source,fetched_at,status,item_count) values ('s','github_trending',?,'ok',1)",
+                (NOW,),
+            )
+            snapshot_id = conn.execute("select id from snapshots").fetchone()[0]
+            conn.execute(
+                """
+                insert into items(run_id,snapshot_id,source,external_id,name,url,fetched_at,
+                                  metadata_json,raw_json)
+                values ('s',?,'github_trending','owner/repo','owner/repo',
+                        'https://github.com/owner/repo',?,?,'{}')
+                """,
+                (
+                    snapshot_id,
+                    NOW,
+                    json.dumps({"period": "daily", "window": "24h", "period_stars": 1200}),
+                ),
+            )
             init_decision_db(conn)
+            conn.commit()
             conn.close()
 
             with (
@@ -447,6 +523,7 @@ class DecisionParallelismTest(unittest.TestCase):
                         "aliases": 0,
                         "proposals": 0,
                         "researched": 0,
+                        "attempted": 1,
                         "failed": 1,
                         "errors": [
                             {
@@ -474,8 +551,91 @@ class DecisionParallelismTest(unittest.TestCase):
                 "select status, note from decision_runs where run_id='run'"
             ).fetchone()
             self.assertEqual(summary["resolver_failed"], 1)
+            self.assertEqual(summary["resolver_attempted"], 1)
             self.assertEqual(status, "ok_with_errors")
             self.assertEqual(json.loads(note)["resolver_failed"], 1)
+
+    def test_attempted_candidate_work_with_no_usable_output_marks_run_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "hero.sqlite"
+            export_path = Path(tmpdir) / "candidates.json"
+            conn = sqlite3.connect(db_path)
+            conn.executescript(
+                """
+                create table snapshots (
+                    id integer primary key autoincrement, run_id text, source text,
+                    fetched_at text, status text, item_count integer, error text
+                );
+                create table items (
+                    id integer primary key autoincrement, run_id text, snapshot_id integer,
+                    source text, external_id text, name text, url text, fetched_at text,
+                    heat real, velocity real, acceleration real, source_rank integer,
+                    description text, metadata_json text, raw_json text
+                );
+                """
+            )
+            init_decision_db(conn)
+            conn.close()
+
+            with patch(
+                "pipeline.decision.hn_classifier.run_hn_classifier",
+                return_value={"classified": 1},
+            ):
+                with self.assertRaisesRegex(RuntimeError, "no usable candidates"):
+                    run_decision(
+                        db_path=db_path,
+                        run_id="run",
+                        export_json_path=export_path,
+                        now=NOW,
+                        hn_llm_provider=object(),
+                        hn_classifier_limit=1,
+                    )
+
+            conn = sqlite3.connect(db_path)
+            self.addCleanup(conn.close)
+            status, note = conn.execute(
+                "select status, note from decision_runs where run_id='run'"
+            ).fetchone()
+            self.assertEqual(status, "failed")
+            self.assertIn("no usable candidates", note)
+
+    def test_empty_run_is_ok_when_all_candidate_stages_are_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "hero.sqlite"
+            export_path = Path(tmpdir) / "candidates.json"
+            conn = sqlite3.connect(db_path)
+            conn.executescript(
+                """
+                create table snapshots (
+                    id integer primary key autoincrement, run_id text, source text,
+                    fetched_at text, status text, item_count integer, error text
+                );
+                create table items (
+                    id integer primary key autoincrement, run_id text, snapshot_id integer,
+                    source text, external_id text, name text, url text, fetched_at text,
+                    heat real, velocity real, acceleration real, source_rank integer,
+                    description text, metadata_json text, raw_json text
+                );
+                """
+            )
+            init_decision_db(conn)
+            conn.close()
+
+            summary = run_decision(
+                db_path=db_path,
+                run_id="run",
+                export_json_path=export_path,
+                now=NOW,
+            )
+
+            self.assertEqual(summary["potential_candidates"], 0)
+            self.assertEqual(summary["edge_watch_candidates"], 0)
+            conn = sqlite3.connect(db_path)
+            self.addCleanup(conn.close)
+            status = conn.execute(
+                "select status from decision_runs where run_id='run'"
+            ).fetchone()[0]
+            self.assertEqual(status, "ok")
 
 
 if __name__ == "__main__":

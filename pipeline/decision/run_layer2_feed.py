@@ -7,7 +7,6 @@ import shutil
 import sqlite3
 import sys
 from pathlib import Path
-from threading import BoundedSemaphore
 from typing import Any, Callable
 
 from pipeline.decision.kimi_provider import (
@@ -56,6 +55,7 @@ from pipeline.decision.layer2_scoring_investigator import (
 )
 from pipeline.decision.layer2_scout import scout_edge_watch_groups
 from pipeline.decision.readme_enrichment import GitHubReadmeClient
+from pipeline.decision.rate_limit import CallRateLimiter
 from pipeline.decision.schema import init_decision_db, to_json, utc_now
 
 
@@ -929,14 +929,23 @@ def _active_brief_concurrency(
 
 def _tool_family_limiters_from_config(cfg: dict[str, Any]) -> dict[str, Any]:
     return {
-        "github": BoundedSemaphore(
-            max(1, int(cfg.get("github_tool_concurrency", 5)))
+        "github": CallRateLimiter(
+            max_in_flight=max(1, int(cfg.get("github_tool_concurrency", 5))),
+            starts_per_second=max(
+                0.0, float(cfg.get("github_tool_rate_limit_per_second", 2.0))
+            ),
         ),
-        "homepage": BoundedSemaphore(
-            max(1, int(cfg.get("homepage_tool_concurrency", 4)))
+        "homepage": CallRateLimiter(
+            max_in_flight=max(1, int(cfg.get("homepage_tool_concurrency", 4))),
+            starts_per_second=max(
+                0.0, float(cfg.get("homepage_tool_rate_limit_per_second", 2.0))
+            ),
         ),
-        "web_search": BoundedSemaphore(
-            max(1, int(cfg.get("web_search_tool_concurrency", 2)))
+        "web_search": CallRateLimiter(
+            max_in_flight=max(1, int(cfg.get("web_search_tool_concurrency", 2))),
+            starts_per_second=max(
+                0.0, float(cfg.get("web_search_tool_rate_limit_per_second", 1.0))
+            ),
         ),
     }
 
@@ -1124,6 +1133,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--github-tool-concurrency", type=int, default=5)
     parser.add_argument("--homepage-tool-concurrency", type=int, default=4)
     parser.add_argument("--web-search-tool-concurrency", type=int, default=2)
+    parser.add_argument("--github-tool-rate-limit-per-second", type=float, default=2.0)
+    parser.add_argument("--homepage-tool-rate-limit-per-second", type=float, default=2.0)
+    parser.add_argument("--web-search-tool-rate-limit-per-second", type=float, default=1.0)
     parser.add_argument("--scout-timeout-seconds", type=int, default=None)
     parser.add_argument("--scoring-timeout-seconds", type=int, default=None)
     parser.add_argument("--deepdive-timeout-seconds", type=int, default=None)
@@ -1169,6 +1181,9 @@ def config_from_args(args: argparse.Namespace) -> dict[str, Any]:
         "github_tool_concurrency": args.github_tool_concurrency,
         "homepage_tool_concurrency": args.homepage_tool_concurrency,
         "web_search_tool_concurrency": args.web_search_tool_concurrency,
+        "github_tool_rate_limit_per_second": args.github_tool_rate_limit_per_second,
+        "homepage_tool_rate_limit_per_second": args.homepage_tool_rate_limit_per_second,
+        "web_search_tool_rate_limit_per_second": args.web_search_tool_rate_limit_per_second,
         "scout_timeout_seconds": args.scout_timeout_seconds,
         "scoring_timeout_seconds": args.scoring_timeout_seconds,
         "deepdive_timeout_seconds": args.deepdive_timeout_seconds,

@@ -272,6 +272,9 @@
     "max_parallel_tool_calls_per_turn": 4,
     "github_tool_concurrency": 5,
     "homepage_tool_concurrency": 4,
-    "web_search_tool_concurrency": 2
+    "web_search_tool_concurrency": 2,
+    "github_tool_rate_limit_per_second": 2.0,
+    "homepage_tool_rate_limit_per_second": 2.0,
+    "web_search_tool_rate_limit_per_second": 1.0
   }
 }

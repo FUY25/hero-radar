@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Any
+from types import TracebackType
+from typing import Any, Callable
 
 
 class StartRateLimiter:
@@ -12,22 +13,72 @@ class StartRateLimiter:
     pool from releasing all of its requests in one burst.
     """
 
-    def __init__(self, starts_per_second: float) -> None:
+    def __init__(
+        self,
+        starts_per_second: float,
+        *,
+        clock: Callable[[], float] | None = None,
+        sleeper: Callable[[float], None] | None = None,
+    ) -> None:
         rate = max(0.0, float(starts_per_second or 0.0))
         self._interval = 1.0 / rate if rate > 0 else 0.0
         self._next_start = 0.0
         self._lock = threading.Lock()
+        self._clock = clock
+        self._sleeper = sleeper
 
     def wait(self) -> None:
         if self._interval <= 0:
             return
         with self._lock:
-            now = time.monotonic()
+            now = (self._clock or time.monotonic)()
             scheduled = max(now, self._next_start)
             self._next_start = scheduled + self._interval
         delay = scheduled - now
         if delay > 0:
-            time.sleep(delay)
+            (self._sleeper or time.sleep)(delay)
+
+
+class CallRateLimiter:
+    """Bound in-flight calls and space the start of each real remote request.
+
+    Use one shared instance per provider family and wrap each actual network call
+    with ``with limiter:``. The injected clock and sleeper keep timing tests fast.
+    """
+
+    def __init__(
+        self,
+        *,
+        max_in_flight: int,
+        starts_per_second: float = 0,
+        clock: Callable[[], float] | None = None,
+        sleeper: Callable[[float], None] | None = None,
+    ) -> None:
+        if max_in_flight <= 0:
+            raise ValueError("max_in_flight must be positive")
+        self._in_flight = threading.BoundedSemaphore(max_in_flight)
+        self._starts = StartRateLimiter(
+            starts_per_second,
+            clock=clock,
+            sleeper=sleeper,
+        )
+
+    def __enter__(self) -> CallRateLimiter:
+        self._in_flight.acquire()
+        try:
+            self._starts.wait()
+        except BaseException:
+            self._in_flight.release()
+            raise
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        self._in_flight.release()
 
 
 class RateLimitedClient:

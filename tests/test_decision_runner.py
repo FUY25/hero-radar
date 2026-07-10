@@ -495,6 +495,54 @@ class DecisionRunnerTest(unittest.TestCase):
         self.assertEqual(calls[0]["x_stage1_batch_size"], 4)
         self.assertEqual(calls[0]["x_credible_handles"], {"credible1", "credible2"})
 
+    def test_run_from_args_builds_distinct_providers_for_concurrent_llm_branches(self):
+        from pipeline.decision.run_decision import run_from_args
+
+        captured = {}
+        built = []
+
+        def build_provider(_args):
+            provider = object()
+            built.append(provider)
+            return provider
+
+        def fake_runner(**kwargs):
+            captured.update(kwargs)
+            return {"entities": 0, "export": str(kwargs["export_json_path"])}
+
+        args = Namespace(
+            db=Path("db.sqlite"),
+            run_id="run",
+            export_json=Path("out.json"),
+            now="2026-05-31T00:00:00Z",
+            backfill=False,
+            classify_hn_limit=2,
+            classify_x_limit=3,
+            llm_model="deepseek-v4-flash",
+            llm_concurrency=3,
+            x_stage1_batch_size=4,
+            x_credible_handles="",
+            resolver_search_limit=1,
+            resolver_research_limit=5,
+            resolver_research_rounds=3,
+            enrich_readme_limit=0,
+            npm_backfill_limit=0,
+        )
+
+        run_from_args(
+            args,
+            decision_runner=fake_runner,
+            llm_provider_builder=build_provider,
+            github_client_builder=lambda: None,
+            resolver_search_client_builder=lambda parsed: object(),
+        )
+
+        self.assertEqual(len(built), 3)
+        self.assertIs(captured["hn_llm_provider"], built[0])
+        self.assertIs(captured["x_llm_provider"], built[1])
+        self.assertIs(captured["resolver_research_provider"], built[2])
+        self.assertEqual(len({id(provider) for provider in built}), 3)
+
     def test_run_from_args_builds_llm_provider_for_agentic_research_limit(self):
         from pipeline.decision.run_decision import run_from_args
 
@@ -1007,23 +1055,26 @@ class DecisionRunnerTest(unittest.TestCase):
                 ]
             )
 
-            summary = run_decision(
-                db_path=db_path,
-                run_id="decision-run-hn",
-                export_json_path=export_path,
-                now="2026-05-31T00:00:00Z",
-                hn_llm_provider=provider,
-                hn_classifier_limit=1,
-            )
+            with self.assertRaisesRegex(RuntimeError, "no usable candidates"):
+                run_decision(
+                    db_path=db_path,
+                    run_id="decision-run-hn",
+                    export_json_path=export_path,
+                    now="2026-05-31T00:00:00Z",
+                    hn_llm_provider=provider,
+                    hn_classifier_limit=1,
+                )
 
-            self.assertEqual(summary["hn_classified"], 1)
-            self.assertEqual(summary["potential_candidates"], 0)
             conn = sqlite3.connect(db_path)
             noise = conn.execute(
                 "select metric_value, signal_label from evidence_rows where source = 'hn_llm_classifier'"
             ).fetchone()
+            run_status = conn.execute(
+                "select status from decision_runs where run_id = 'decision-run-hn'"
+            ).fetchone()[0]
             conn.close()
             self.assertEqual(noise, ("news_article", "noise"))
+            self.assertEqual(run_status, "failed")
 
     def test_runner_passes_current_pass_candidate_impacts_to_hn_classifier(self):
         with tempfile.TemporaryDirectory() as tmpdir:

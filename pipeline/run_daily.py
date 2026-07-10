@@ -298,6 +298,9 @@ def layer2_command(
     github_tool_concurrency: int | None = None,
     homepage_tool_concurrency: int | None = None,
     web_search_tool_concurrency: int | None = None,
+    github_tool_rate_limit_per_second: float | None = None,
+    homepage_tool_rate_limit_per_second: float | None = None,
+    web_search_tool_rate_limit_per_second: float | None = None,
     finalize_stale_running_before: str | None = None,
 ) -> list[str]:
     cmd = [
@@ -348,6 +351,14 @@ def layer2_command(
     for flag, value in concurrency_options:
         if value is not None:
             cmd.extend([flag, str(max(1, value))])
+    rate_options = (
+        ("--github-tool-rate-limit-per-second", github_tool_rate_limit_per_second),
+        ("--homepage-tool-rate-limit-per-second", homepage_tool_rate_limit_per_second),
+        ("--web-search-tool-rate-limit-per-second", web_search_tool_rate_limit_per_second),
+    )
+    for flag, value in rate_options:
+        if value is not None:
+            cmd.extend([flag, str(max(0.0, value))])
     if finalize_stale_running_before:
         cmd.extend(["--finalize-stale-running-before", finalize_stale_running_before])
     return cmd
@@ -449,6 +460,9 @@ def run_daily(
     layer2_github_tool_concurrency: int | None = None,
     layer2_homepage_tool_concurrency: int | None = None,
     layer2_web_search_tool_concurrency: int | None = None,
+    layer2_github_tool_rate_limit_per_second: float | None = None,
+    layer2_homepage_tool_rate_limit_per_second: float | None = None,
+    layer2_web_search_tool_rate_limit_per_second: float | None = None,
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
     resume: bool = False,
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
@@ -538,6 +552,21 @@ def run_daily(
     )
     active_layer2_web_search_tool_concurrency = _configured_optional_int(
         layer2_web_search_tool_concurrency, layer2_cfg, "web_search_tool_concurrency"
+    )
+    active_layer2_github_tool_rate_limit_per_second = _configured_optional_float(
+        layer2_github_tool_rate_limit_per_second,
+        layer2_cfg,
+        "github_tool_rate_limit_per_second",
+    )
+    active_layer2_homepage_tool_rate_limit_per_second = _configured_optional_float(
+        layer2_homepage_tool_rate_limit_per_second,
+        layer2_cfg,
+        "homepage_tool_rate_limit_per_second",
+    )
+    active_layer2_web_search_tool_rate_limit_per_second = _configured_optional_float(
+        layer2_web_search_tool_rate_limit_per_second,
+        layer2_cfg,
+        "web_search_tool_rate_limit_per_second",
     )
     lock_path = active_root / "data" / "run_daily.lock"
     log_path = active_root / "data" / "logs" / "run_daily" / f"{active_run_id}.jsonl"
@@ -677,6 +706,9 @@ def run_daily(
                         github_tool_concurrency=active_layer2_github_tool_concurrency,
                         homepage_tool_concurrency=active_layer2_homepage_tool_concurrency,
                         web_search_tool_concurrency=active_layer2_web_search_tool_concurrency,
+                        github_tool_rate_limit_per_second=active_layer2_github_tool_rate_limit_per_second,
+                        homepage_tool_rate_limit_per_second=active_layer2_homepage_tool_rate_limit_per_second,
+                        web_search_tool_rate_limit_per_second=active_layer2_web_search_tool_rate_limit_per_second,
                         finalize_stale_running_before=active_now,
                     ),
                     cwd=active_root,
@@ -771,6 +803,9 @@ def main() -> int:
     parser.add_argument("--layer2-github-tool-concurrency", type=int, default=None)
     parser.add_argument("--layer2-homepage-tool-concurrency", type=int, default=None)
     parser.add_argument("--layer2-web-search-tool-concurrency", type=int, default=None)
+    parser.add_argument("--layer2-github-tool-rate-limit-per-second", type=float, default=None)
+    parser.add_argument("--layer2-homepage-tool-rate-limit-per-second", type=float, default=None)
+    parser.add_argument("--layer2-web-search-tool-rate-limit-per-second", type=float, default=None)
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_SECONDS)
     args = parser.parse_args()
 
@@ -812,6 +847,9 @@ def main() -> int:
         layer2_github_tool_concurrency=args.layer2_github_tool_concurrency,
         layer2_homepage_tool_concurrency=args.layer2_homepage_tool_concurrency,
         layer2_web_search_tool_concurrency=args.layer2_web_search_tool_concurrency,
+        layer2_github_tool_rate_limit_per_second=args.layer2_github_tool_rate_limit_per_second,
+        layer2_homepage_tool_rate_limit_per_second=args.layer2_homepage_tool_rate_limit_per_second,
+        layer2_web_search_tool_rate_limit_per_second=args.layer2_web_search_tool_rate_limit_per_second,
         timeout=args.timeout,
         resume=args.resume,
     )

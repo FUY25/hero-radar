@@ -341,6 +341,9 @@ class DashboardDataApiTest(unittest.TestCase):
                         "layer2_github_tool_concurrency": 5,
                         "layer2_homepage_tool_concurrency": 4,
                         "layer2_web_search_tool_concurrency": 2,
+                        "layer2_github_tool_rate_limit_per_second": 1.5,
+                        "layer2_homepage_tool_rate_limit_per_second": 1.25,
+                        "layer2_web_search_tool_rate_limit_per_second": 0.75,
                     }
                 )
 
@@ -368,6 +371,9 @@ class DashboardDataApiTest(unittest.TestCase):
             "--layer2-github-tool-concurrency": "5",
             "--layer2-homepage-tool-concurrency": "4",
             "--layer2-web-search-tool-concurrency": "2",
+            "--layer2-github-tool-rate-limit-per-second": "1.5",
+            "--layer2-homepage-tool-rate-limit-per-second": "1.25",
+            "--layer2-web-search-tool-rate-limit-per-second": "0.75",
         }
         for flag, value in expected.items():
             self.assertEqual(command[command.index(flag) + 1], value)

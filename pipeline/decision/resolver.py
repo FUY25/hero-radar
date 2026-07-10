@@ -238,6 +238,7 @@ def resolve_candidate_links(
     research_provider: Any | None = None,
     research_context: dict[str, Any] | None = None,
     max_research_rounds: int = 0,
+    cache_commit: bool = True,
 ) -> dict[str, Any]:
     internal_links = _select_internal_links(entity_key, _links_from_internal_rows(conn, entity_key))
     if internal_links:
@@ -249,6 +250,7 @@ def resolve_candidate_links(
 
     key, input_hash = _cache_key(entity_key, max_searches)
     cached = get_api_cache(conn, key)
+    cache_miss = cached is None
     if cached:
         response = cached
     else:
@@ -269,6 +271,49 @@ def resolve_candidate_links(
             "resolved_links": links,
             "source": "search" if links else "none",
         }
+    if response.get("resolved_links"):
+        if cache_miss:
+            put_api_cache(
+                conn,
+                cache_key=key,
+                source=RESOLVER_SOURCE,
+                external_id=entity_key,
+                window=RESOLVER_WINDOW,
+                input_hash=input_hash,
+                response=response,
+                status="ok",
+                commit=cache_commit,
+            )
+        return response
+    if research_provider is not None and search_client is not None and max_research_rounds > 0:
+        from pipeline.decision.web_research import research_candidate_link
+
+        researched = research_candidate_link(
+            conn,
+            entity_key=entity_key,
+            evidence_context=research_context or {"entity_key": entity_key},
+            provider=research_provider,
+            search_client=search_client,
+            max_rounds=max_research_rounds,
+            max_results=max(1, int(max_searches or 5)),
+            cache_commit=cache_commit,
+        )
+        # Cache the direct lookup only after all research calls finish so a
+        # caller-owned write transaction never spans a remote wait.
+        if cache_miss:
+            put_api_cache(
+                conn,
+                cache_key=key,
+                source=RESOLVER_SOURCE,
+                external_id=entity_key,
+                window=RESOLVER_WINDOW,
+                input_hash=input_hash,
+                response=response,
+                status="ok",
+                commit=cache_commit,
+            )
+        return researched
+    if cache_miss:
         put_api_cache(
             conn,
             cache_key=key,
@@ -278,20 +323,7 @@ def resolve_candidate_links(
             input_hash=input_hash,
             response=response,
             status="ok",
-        )
-    if response.get("resolved_links"):
-        return response
-    if research_provider is not None and search_client is not None and max_research_rounds > 0:
-        from pipeline.decision.web_research import research_candidate_link
-
-        return research_candidate_link(
-            conn,
-            entity_key=entity_key,
-            evidence_context=research_context or {"entity_key": entity_key},
-            provider=research_provider,
-            search_client=search_client,
-            max_rounds=max_research_rounds,
-            max_results=max(1, int(max_searches or 5)),
+            commit=cache_commit,
         )
     return response
 
@@ -521,9 +553,13 @@ def enrich_classifier_candidates(
                 research_provider=research_provider,
                 research_context={"entity_key": candidate["entity_key"], "run_id": run_id},
                 max_research_rounds=max_research_rounds,
+                cache_commit=False,
             )
+            worker_conn.commit()
             return {"candidate": candidate, "result": result, "error": None}
         except Exception as exc:
+            if worker_conn is not None:
+                worker_conn.rollback()
             return {"candidate": candidate, "result": None, "error": exc}
         finally:
             if worker_conn is not None:
@@ -583,6 +619,7 @@ def enrich_classifier_candidates(
             )
             continue
     return {
+        "attempted": len(candidates),
         "enriched": enriched,
         "aliases": aliases,
         "proposals": proposals,

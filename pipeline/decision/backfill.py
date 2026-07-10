@@ -19,7 +19,7 @@ from pipeline.decision.cache import (
     stable_hash,
 )
 from pipeline.decision.bounded_parallel import bounded_parallel_map
-from pipeline.decision.rate_limit import RateLimitedClient
+from pipeline.decision.rate_limit import CallRateLimiter, RateLimitedClient
 from pipeline.decision.rules import iso_time, parse_time
 from pipeline.decision.schema import utc_now
 
@@ -31,9 +31,19 @@ GITHUB_PAGE_LIMIT = 400
 
 
 class GitHubClient:
-    def __init__(self, *, token: str | None = None, timeout: int = 20) -> None:
+    def __init__(
+        self,
+        *,
+        token: str | None = None,
+        timeout: int = 20,
+        request_limiter: Any | None = None,
+    ) -> None:
         self.token = token
         self.timeout = timeout
+        self.request_limiter = request_limiter
+
+    def set_request_limiter(self, limiter: Any) -> None:
+        self.request_limiter = limiter
 
     def request_json(self, url: str, *, accept: str = "application/vnd.github+json") -> Any:
         headers = {
@@ -43,8 +53,18 @@ class GitHubClient:
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
         request = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(request, timeout=self.timeout) as response:
-            return json.loads(response.read().decode("utf-8"))
+
+        def perform_request() -> Any:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                return json.loads(response.read().decode("utf-8"))
+
+        if self.request_limiter is None:
+            return perform_request()
+        if hasattr(self.request_limiter, "__enter__"):
+            with self.request_limiter:
+                return perform_request()
+        self.request_limiter.wait()
+        return perform_request()
 
     def repo_metadata(self, full_name: str) -> dict[str, Any]:
         owner_repo = urllib.parse.quote(full_name, safe="/")
@@ -159,10 +179,21 @@ def run_backfill_jobs(
         (run_id,),
     ).fetchall()
     work: list[dict[str, Any]] = []
-    limited_client = RateLimitedClient(
-        github_client,
-        starts_per_second=rate_limit_per_second,
-    )
+    if isinstance(github_client, GitHubClient):
+        github_client.set_request_limiter(
+            CallRateLimiter(
+                max_in_flight=concurrency,
+                starts_per_second=rate_limit_per_second,
+            )
+        )
+        limited_client = github_client
+    else:
+        # Generic injected clients expose high-level methods rather than the HTTP
+        # seam, so retain the compatibility wrapper used by tests and embedders.
+        limited_client = RateLimitedClient(
+            github_client,
+            starts_per_second=rate_limit_per_second,
+        )
     for job_id, entity_id, canonical_entity, canonical_key, source, reason in jobs:
         if source != "github_stargazers":
             continue

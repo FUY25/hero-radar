@@ -870,6 +870,7 @@ def run_decision(
                     logger,
                     "classifier_resolver",
                     started,
+                    attempted=int(result.get("attempted") or 0),
                     enriched=int(result.get("enriched") or 0),
                     aliases=int(result.get("aliases") or 0),
                     proposals=int(result.get("proposals") or 0),
@@ -885,6 +886,7 @@ def run_decision(
         x_stage2_summary: dict[str, Any] = {"tiered": 0}
         npm_summary: dict[str, Any] = {"completed": 0, "failed": 0}
         resolver_summary: dict[str, Any] = {
+            "attempted": 0,
             "enriched": 0,
             "aliases": 0,
             "proposals": 0,
@@ -987,6 +989,25 @@ def run_decision(
             edge_watch_candidates=len(final_result.edge_watch_candidates),
             backfill_jobs=len(final_result.backfill_jobs),
         )
+        candidate_work_attempted = any(
+            (
+                len(pass1.potential_candidates),
+                len(pass1.edge_watch_candidates),
+                len(pass1.backfill_jobs),
+                int(hn_summary.get("classified") or 0),
+                int(x_stage1_summary.get("triaged") or 0),
+                int(x_stage2_summary.get("tiered") or 0),
+                int(resolver_summary.get("attempted") or 0),
+            )
+        )
+        if (
+            not final_result.potential_candidates
+            and not final_result.edge_watch_candidates
+            and candidate_work_attempted
+        ):
+            raise RuntimeError(
+                "decision run produced no usable candidates after candidate work was attempted"
+            )
 
         started = _stage_started(logger, "persist_results")
         referenced = referenced_entity_ids(final_result)
@@ -1046,6 +1067,7 @@ def run_decision(
             note=(
                 to_json(
                     {
+                        "resolver_attempted": int(resolver_summary.get("attempted") or 0),
                         "resolver_failed": resolver_failed,
                         "resolver_errors": resolver_summary.get("errors") or [],
                     }
@@ -1065,6 +1087,7 @@ def run_decision(
             "x_stage2_tiered": int(x_stage2_summary.get("tiered") or 0),
             "npm_backfill_completed": int(npm_summary.get("completed") or 0),
             "resolver_enriched": int(resolver_summary.get("enriched") or 0),
+            "resolver_attempted": int(resolver_summary.get("attempted") or 0),
             "resolver_aliases": int(resolver_summary.get("aliases") or 0),
             "resolver_proposals": int(resolver_summary.get("proposals") or 0),
             "resolver_researched": int(resolver_summary.get("researched") or 0),
@@ -1146,10 +1169,10 @@ def run_from_args(
     resolver_research_rounds = int(getattr(args, "resolver_research_rounds", 3) or 0)
     enrich_readme_limit = int(getattr(args, "enrich_readme_limit", 0) or 0)
     npm_backfill_limit = int(getattr(args, "npm_backfill_limit", 0) or 0)
-    llm_provider = (
-        llm_provider_builder(args)
-        if hn_limit > 0 or x_limit > 0 or resolver_research_limit > 0
-        else None
+    hn_llm_provider = llm_provider_builder(args) if hn_limit > 0 else None
+    x_llm_provider = llm_provider_builder(args) if x_limit > 0 else None
+    resolver_research_provider = (
+        llm_provider_builder(args) if resolver_research_limit > 0 else None
     )
     resolver_search_client = (
         resolver_search_client_builder(args)
@@ -1162,9 +1185,9 @@ def run_from_args(
         export_json_path=args.export_json,
         now=args.now,
         github_client=github_client_builder() if args.backfill else None,
-        hn_llm_provider=llm_provider if hn_limit > 0 else None,
+        hn_llm_provider=hn_llm_provider,
         hn_classifier_limit=hn_limit,
-        x_llm_provider=llm_provider if x_limit > 0 else None,
+        x_llm_provider=x_llm_provider,
         x_classifier_limit=x_limit,
         llm_concurrency=int(getattr(args, "llm_concurrency", 1) or 1),
         io_concurrency=int(getattr(args, "io_concurrency", 5) or 5),
@@ -1177,7 +1200,7 @@ def run_from_args(
         npm_backfill_limit=npm_backfill_limit,
         resolver_search_client=resolver_search_client,
         resolver_search_limit=resolver_search_limit,
-        resolver_research_provider=llm_provider if resolver_research_limit > 0 else None,
+        resolver_research_provider=resolver_research_provider,
         resolver_research_limit=resolver_research_limit,
         resolver_research_rounds=resolver_research_rounds,
         readme_client=(
@@ -1232,6 +1255,8 @@ def main() -> None:
         print(f"hn_classifier_will_process: {summary['hn_classifier_will_process']}")
     if "resolver_researched" in summary:
         print(f"resolver_researched: {summary['resolver_researched']}")
+    if "resolver_attempted" in summary:
+        print(f"resolver_attempted: {summary['resolver_attempted']}")
     if "readme_fetched" in summary:
         print(f"readme_fetched: {summary['readme_fetched']}")
     print(f"export: {summary['export']}")

@@ -495,6 +495,9 @@ def build_run_command(payload: Any) -> list[str]:
     float_options = {
         "layer2_deepdive_min_l2_score": "--layer2-deepdive-min-l2-score",
         "decision_io_rate_limit_per_second": "--decision-io-rate-limit-per-second",
+        "layer2_github_tool_rate_limit_per_second": "--layer2-github-tool-rate-limit-per-second",
+        "layer2_homepage_tool_rate_limit_per_second": "--layer2-homepage-tool-rate-limit-per-second",
+        "layer2_web_search_tool_rate_limit_per_second": "--layer2-web-search-tool-rate-limit-per-second",
     }
     for key, flag in float_options.items():
         value = options.get(key)

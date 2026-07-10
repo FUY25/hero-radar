@@ -53,6 +53,7 @@ def research_candidate_link(
     search_client: Any,
     max_rounds: int = 3,
     max_results: int = 5,
+    cache_commit: bool = True,
 ) -> dict[str, Any]:
     rounds = max(1, min(int(max_rounds or 3), 3))
     results_limit = max(1, int(max_results or 5))
@@ -120,5 +121,6 @@ def research_candidate_link(
         input_hash=input_hash,
         response=response,
         status="ok",
+        commit=cache_commit,
     )
     return response

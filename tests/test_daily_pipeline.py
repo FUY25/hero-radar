@@ -480,6 +480,9 @@ class DailyPipelineTest(unittest.TestCase):
                             "github_tool_concurrency": 5,
                             "homepage_tool_concurrency": 4,
                             "web_search_tool_concurrency": 2,
+                            "github_tool_rate_limit_per_second": 1.5,
+                            "homepage_tool_rate_limit_per_second": 1.25,
+                            "web_search_tool_rate_limit_per_second": 0.75,
                         },
                     }
                 )
@@ -509,6 +512,9 @@ class DailyPipelineTest(unittest.TestCase):
             "--github-tool-concurrency": "5",
             "--homepage-tool-concurrency": "4",
             "--web-search-tool-concurrency": "2",
+            "--github-tool-rate-limit-per-second": "1.5",
+            "--homepage-tool-rate-limit-per-second": "1.25",
+            "--web-search-tool-rate-limit-per-second": "0.75",
         }
         for flag, value in expected.items():
             self.assertEqual(layer2_cmd[layer2_cmd.index(flag) + 1], value)

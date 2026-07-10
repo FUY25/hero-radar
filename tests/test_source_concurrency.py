@@ -101,5 +101,56 @@ class RateGateTest(unittest.TestCase):
         self.assertEqual(gate.run(lambda: "ok"), "ok")
 
 
+class RequestPolicyRegistryTest(unittest.TestCase):
+    def test_reuses_one_gate_for_every_url_on_the_same_host(self) -> None:
+        from pipeline.source_concurrency import RequestPolicyRegistry
+
+        created: list[tuple[int, float]] = []
+
+        class RecordingGate:
+            def __init__(self, *, max_in_flight: int, min_interval_seconds: float) -> None:
+                created.append((max_in_flight, min_interval_seconds))
+
+            def run(self, function):
+                return function()
+
+        policies = RequestPolicyRegistry(
+            gate_factory=RecordingGate,
+        )
+
+        policies.register_url(
+            "https://api.github.com/search/repositories?q=first",
+            max_in_flight=3,
+            min_interval_seconds=6.2,
+        )
+        policies.run_url(
+            "https://api.github.com/search/repositories?q=second",
+            lambda: None,
+            max_in_flight=3,
+            min_interval_seconds=6.2,
+        )
+
+        self.assertEqual(created, [(3, 6.2)])
+
+    def test_different_hosts_use_separate_rate_buckets(self) -> None:
+        from pipeline.source_concurrency import RequestPolicyRegistry
+
+        policies = RequestPolicyRegistry()
+        github_html = policies.register_url(
+            "https://github.com/trending",
+            max_in_flight=4,
+            min_interval_seconds=0.5,
+        )
+        github_api = policies.register_url(
+            "https://api.github.com/search/repositories",
+            max_in_flight=3,
+            min_interval_seconds=6.2,
+        )
+
+        self.assertIsNot(github_html, github_api)
+        self.assertEqual(policies.spec_for_url("https://github.com/other"), (4, 0.5))
+        self.assertEqual(policies.spec_for_url("https://api.github.com/rate_limit"), (3, 6.2))
+
+
 if __name__ == "__main__":
     unittest.main()

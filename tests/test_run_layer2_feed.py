@@ -1227,3 +1227,6 @@ class Layer2RunnerTest(unittest.TestCase):
         self.assertEqual(default_config["brief_concurrency"], 4)
         self.assertEqual(default_config["max_parallel_tool_calls_per_turn"], 4)
         self.assertEqual(default_config["github_tool_concurrency"], 5)
+        self.assertEqual(default_config["github_tool_rate_limit_per_second"], 2.0)
+        self.assertEqual(default_config["homepage_tool_rate_limit_per_second"], 2.0)
+        self.assertEqual(default_config["web_search_tool_rate_limit_per_second"], 1.0)
