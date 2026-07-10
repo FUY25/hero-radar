@@ -1,6 +1,10 @@
 data/*.sqlite
+data/*.bak
+data/backups/
+data/logs/
 data/raw/
 data/exports/
+tmp/
 __pycache__/
 *.pyc
 .env
