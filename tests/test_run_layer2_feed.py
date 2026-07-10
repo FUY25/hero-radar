@@ -12,6 +12,25 @@ from pipeline.decision.schema import init_decision_db
 
 
 class Layer2RunnerTest(unittest.TestCase):
+    def layer2_config(
+        self,
+        *,
+        routing: dict | None = None,
+        scoring_agent: dict | None = None,
+        brief_writer: dict | None = None,
+        tool_runtime: dict | None = None,
+        edge_scout: dict | None = None,
+        legacy_deepdive: dict | None = None,
+    ) -> dict:
+        return {
+            "routing": routing or {},
+            "scoring_agent": scoring_agent or {},
+            "brief_writer": brief_writer or {},
+            "tool_runtime": tool_runtime or {},
+            "edge_scout": edge_scout or {},
+            "legacy_deepdive": legacy_deepdive or {},
+        }
+
     def make_db_with_potentials(self, db_path: Path, names: list[str]) -> None:
         self.make_db_with_candidates(
             db_path, [(name, "potential") for name in names]
@@ -142,6 +161,115 @@ class Layer2RunnerTest(unittest.TestCase):
         self.assertEqual(latest_decision_run(conn), "decision-partial")
         conn.close()
 
+    def test_flat_layer2_runtime_config_is_rejected(self):
+        from pipeline.decision.run_layer2_feed import validate_layer2_config
+
+        with self.assertRaisesRegex(ValueError, "canonical nested"):
+            validate_layer2_config({"scoring_model": "old-flat-model"})
+
+    def test_component_factories_apply_independent_model_timeout_and_output_caps(self):
+        from pipeline.decision.run_layer2_feed import _kimi_provider_factory
+
+        scoring = _kimi_provider_factory(
+            {
+                "provider": "kimi",
+                "model": "score-model",
+                "timeout_seconds": 91,
+                "max_output_tokens": 1800,
+            },
+            component="scoring_agent",
+            default_model="default-score",
+        )()
+        brief = _kimi_provider_factory(
+            {
+                "provider": "kimi",
+                "model": "brief-model",
+                "timeout_seconds": 61,
+                "max_output_tokens": 1000,
+            },
+            component="brief_writer",
+            default_model="default-brief",
+        )()
+
+        self.assertEqual((scoring.model, scoring.timeout, scoring.max_output_tokens), ("score-model", 91, 1800))
+        self.assertEqual((brief.model, brief.timeout, brief.max_output_tokens), ("brief-model", 61, 1000))
+
+    def test_scoring_and_brief_factories_have_independent_runtime_identity(self):
+        from pipeline.decision.run_layer2_feed import run_layer2_feed
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "hero.sqlite"
+            self.make_db_with_potentials(db_path, ["owner/repo"])
+
+            class ScoringProvider:
+                provider_name = "fake-scoring"
+                model = "score-model"
+                max_output_tokens = 1800
+
+                def complete_json(self, **_kwargs):
+                    return self_outer.valid_score_response()
+
+            class BriefProvider:
+                provider_name = "fake-brief"
+                model = "brief-model"
+                max_output_tokens = 1000
+
+                def complete_json(self, **_kwargs):
+                    return self_outer.valid_brief_response()
+
+            self_outer = self
+            summary = run_layer2_feed(
+                db_path=db_path,
+                decision_run_id="decision-run",
+                feed_run_id="l2-independent-components",
+                now="2026-07-10T12:00:00Z",
+                scoring_provider_factory=ScoringProvider,
+                brief_provider_factory=BriefProvider,
+                config=self.layer2_config(
+                    routing={
+                        "max_scored_candidates": 1,
+                        "brief_min_score": 0,
+                        "brief_target_count": 1,
+                        "brief_max_count": 1,
+                    },
+                    scoring_agent={
+                        "provider": "fake-scoring",
+                        "model": "score-model",
+                        "max_output_tokens": 1800,
+                        "concurrency": 1,
+                    },
+                    brief_writer={
+                        "enabled": True,
+                        "provider": "fake-brief",
+                        "model": "brief-model",
+                        "max_output_tokens": 1000,
+                        "concurrency": 1,
+                    },
+                ),
+            )
+
+            conn = sqlite3.connect(db_path)
+            profile = json.loads(
+                conn.execute(
+                    "select model_profile_json from l2_feed_runs where feed_run_id = ?",
+                    ("l2-independent-components",),
+                ).fetchone()[0]
+            )
+            brief_identity = conn.execute(
+                "select provider, model from l2_deepdive_briefs where feed_run_id = ?",
+                ("l2-independent-components",),
+            ).fetchone()
+            conn.close()
+
+        self.assertTrue(summary["ok"])
+        self.assertEqual(profile["scoring"], "score-model")
+        self.assertEqual(profile["brief"], "brief-model")
+        self.assertEqual(profile["scoring_provider"], "fake-scoring")
+        self.assertEqual(profile["brief_provider"], "fake-brief")
+        self.assertEqual(profile["scoring_max_output_tokens"], 1800)
+        self.assertEqual(profile["brief_max_output_tokens"], 1000)
+        self.assertEqual(brief_identity, ("fake-brief", "brief-model"))
+
     def test_pre_full_run_helpers_create_explicit_ids_and_backup_db(self):
         from pipeline.decision.run_layer2_feed import (
             backup_sqlite_db,
@@ -240,7 +368,9 @@ class Layer2RunnerTest(unittest.TestCase):
                 feed_run_id="l2-test",
                 now="2026-05-31T12:00:00Z",
                 provider=provider,
-                config={"brief_min_score": 0, "brief_target_count": 1},
+                config=self.layer2_config(
+                    routing={"brief_min_score": 0, "brief_target_count": 1}
+                ),
             )
 
             self.assertTrue(summary["ok"])
@@ -354,13 +484,15 @@ class Layer2RunnerTest(unittest.TestCase):
                 feed_run_id="l2-routes",
                 now="2026-06-01T12:00:00Z",
                 provider=provider,
-                config={
-                    "max_scored_candidates": 4,
-                    "brief_min_score": 70,
-                    "score_only_min_score": 50,
-                    "brief_target_count": 1,
-                    "brief_max_count": 1,
-                },
+                config=self.layer2_config(
+                    routing={
+                        "max_scored_candidates": 4,
+                        "brief_min_score": 70,
+                        "score_only_min_score": 50,
+                        "brief_target_count": 1,
+                        "brief_max_count": 1,
+                    }
+                ),
             )
 
             conn = sqlite3.connect(db_path)
@@ -478,13 +610,15 @@ class Layer2RunnerTest(unittest.TestCase):
                 feed_run_id="l2-known-paradigm",
                 now="2026-06-01T12:00:00Z",
                 provider=provider,
-                config={
-                    "max_scored_candidates": 2,
-                    "brief_min_score": 70,
-                    "score_only_min_score": 50,
-                    "brief_target_count": 1,
-                    "brief_max_count": 1,
-                },
+                config=self.layer2_config(
+                    routing={
+                        "max_scored_candidates": 2,
+                        "brief_min_score": 70,
+                        "score_only_min_score": 50,
+                        "brief_target_count": 1,
+                        "brief_max_count": 1,
+                    }
+                ),
             )
 
             conn = sqlite3.connect(db_path)
@@ -545,7 +679,9 @@ class Layer2RunnerTest(unittest.TestCase):
                 feed_run_id="l2-brief-error",
                 now="2026-06-01T12:00:00Z",
                 provider=provider,
-                config={"brief_min_score": 70, "brief_target_count": 1},
+                config=self.layer2_config(
+                    routing={"brief_min_score": 70, "brief_target_count": 1}
+                ),
             )
 
             conn = sqlite3.connect(db_path)
@@ -591,11 +727,13 @@ class Layer2RunnerTest(unittest.TestCase):
                 feed_run_id="l2-rank-stable",
                 now="2026-06-01T12:00:00Z",
                 provider=provider,
-                config={
-                    "brief_min_score": 70,
-                    "brief_target_count": 2,
-                    "brief_max_count": 2,
-                },
+                config=self.layer2_config(
+                    routing={
+                        "brief_min_score": 70,
+                        "brief_target_count": 2,
+                        "brief_max_count": 2,
+                    }
+                ),
             )
 
             conn = sqlite3.connect(db_path)
@@ -675,10 +813,10 @@ class Layer2RunnerTest(unittest.TestCase):
                 feed_run_id="l2-errors",
                 now="2026-06-01T12:00:00Z",
                 provider=provider,
-                config={
-                    "max_investigation_turns": 1,
-                    "enable_deepdive_briefs": False,
-                },
+                config=self.layer2_config(
+                    scoring_agent={"max_investigation_turns": 1},
+                    brief_writer={"enabled": False},
+                ),
             )
 
             self.assertTrue(summary["ok"])
@@ -744,11 +882,13 @@ class Layer2RunnerTest(unittest.TestCase):
                 feed_run_id="l2-total-cap",
                 now="2026-06-01T12:00:00Z",
                 provider=provider,
-                config={
-                    "max_scored_candidates": 2,
-                    "max_total_scoring_candidates": 1,
-                    "enable_deepdive_briefs": False,
-                },
+                config=self.layer2_config(
+                    routing={
+                        "max_scored_candidates": 2,
+                        "max_total_scoring_candidates": 1,
+                    },
+                    brief_writer={"enabled": False},
+                ),
             )
 
             conn = sqlite3.connect(db_path)
@@ -804,11 +944,11 @@ class Layer2RunnerTest(unittest.TestCase):
                 feed_run_id="l2-concurrent",
                 now="2026-06-01T12:00:00Z",
                 scoring_provider_factory=ConcurrentProvider,
-                config={
-                    "max_scored_candidates": 6,
-                    "scoring_concurrency": 3,
-                    "enable_deepdive_briefs": False,
-                },
+                config=self.layer2_config(
+                    routing={"max_scored_candidates": 6},
+                    scoring_agent={"concurrency": 3},
+                    brief_writer={"enabled": False},
+                ),
             )
 
         self.assertEqual(summary["scored"], 6)
@@ -874,7 +1014,7 @@ class Layer2RunnerTest(unittest.TestCase):
                                 },
                                 {
                                     "name": "read_evidence_rows",
-                                    "arguments": {"entity_id": "entity:0"},
+                                    "arguments": {"entity_id": "entity:missing"},
                                 },
                             ],
                         }
@@ -886,12 +1026,15 @@ class Layer2RunnerTest(unittest.TestCase):
                 feed_run_id="l2-parallel-db-tools",
                 now="2026-06-01T12:00:00Z",
                 scoring_provider_factory=ToolRequestingProvider,
-                config={
-                    "max_scored_candidates": 1,
-                    "scoring_concurrency": 2,
-                    "max_parallel_tool_calls_per_turn": 2,
-                    "enable_deepdive_briefs": False,
-                },
+                config=self.layer2_config(
+                    routing={"max_scored_candidates": 1},
+                    scoring_agent={
+                        "concurrency": 2,
+                        "tool_budget": {"max_parallel_calls_per_turn": 2},
+                        "context_budget": {"top_evidence_allocation": 0},
+                    },
+                    brief_writer={"enabled": False},
+                ),
             )
 
             conn = sqlite3.connect(db_path)
@@ -937,9 +1080,9 @@ class Layer2RunnerTest(unittest.TestCase):
                         active += 1
                         max_active = max(max_active, active)
                     try:
-                        canonical_name = kwargs["input_payload"]["candidate_identity"][
-                            "canonical_name"
-                        ]
+                        canonical_name = kwargs["input_payload"]["candidate"][
+                            "identity"
+                        ]["canonical_name"]
                         time.sleep(0.05)
                         return {
                             "category": {"primary": "开发工具", "tags": ["agent"]},
@@ -958,13 +1101,15 @@ class Layer2RunnerTest(unittest.TestCase):
                 now="2026-06-01T12:00:00Z",
                 provider=scoring_provider,
                 brief_provider_factory=ConcurrentBriefProvider,
-                config={
-                    "max_scored_candidates": 4,
-                    "brief_min_score": 0,
-                    "brief_target_count": 4,
-                    "brief_max_count": 4,
-                    "brief_concurrency": 4,
-                },
+                config=self.layer2_config(
+                    routing={
+                        "max_scored_candidates": 4,
+                        "brief_min_score": 0,
+                        "brief_target_count": 4,
+                        "brief_max_count": 4,
+                    },
+                    brief_writer={"enabled": True, "concurrency": 4},
+                ),
             )
 
             conn = sqlite3.connect(db_path)
@@ -1012,7 +1157,7 @@ class Layer2RunnerTest(unittest.TestCase):
                 model = "fake-brief-json"
 
                 def complete_json(self, **kwargs):
-                    canonical_name = kwargs["input_payload"]["candidate_identity"][
+                    canonical_name = kwargs["input_payload"]["candidate"]["identity"][
                         "canonical_name"
                     ]
                     if canonical_name == "bad/repo":
@@ -1031,13 +1176,15 @@ class Layer2RunnerTest(unittest.TestCase):
                 now="2026-06-01T12:00:00Z",
                 provider=scoring_provider,
                 brief_provider_factory=PartiallyFailingBriefProvider,
-                config={
-                    "max_scored_candidates": 3,
-                    "brief_min_score": 0,
-                    "brief_target_count": 3,
-                    "brief_max_count": 3,
-                    "brief_concurrency": 3,
-                },
+                config=self.layer2_config(
+                    routing={
+                        "max_scored_candidates": 3,
+                        "brief_min_score": 0,
+                        "brief_target_count": 3,
+                        "brief_max_count": 3,
+                    },
+                    brief_writer={"enabled": True, "concurrency": 3},
+                ),
             )
 
             conn = sqlite3.connect(db_path)
@@ -1081,7 +1228,7 @@ class Layer2RunnerTest(unittest.TestCase):
                 feed_run_id="l2-scout-disabled",
                 now="2026-06-01T12:00:00Z",
                 provider=provider,
-                config={"enable_deepdive_briefs": False},
+                config=self.layer2_config(brief_writer={"enabled": False}),
             )
 
             conn = sqlite3.connect(db_path)
@@ -1135,10 +1282,10 @@ class Layer2RunnerTest(unittest.TestCase):
                 feed_run_id="l2-scout-enabled",
                 now="2026-06-01T12:00:00Z",
                 provider=provider,
-                config={
-                    "enable_edge_scout": True,
-                    "enable_deepdive_briefs": False,
-                },
+                config=self.layer2_config(
+                    edge_scout={"enabled": True},
+                    brief_writer={"enabled": False},
+                ),
             )
 
         self.assertEqual(summary["scored"], 1)
@@ -1178,10 +1325,12 @@ class Layer2RunnerTest(unittest.TestCase):
                 feed_run_id="l2-new",
                 now="2026-06-01T12:00:00Z",
                 provider=provider,
-                config={
-                    "enable_deepdive_briefs": False,
-                    "finalize_stale_running_before": "2026-06-01T01:00:00Z",
-                },
+                config=self.layer2_config(
+                    routing={
+                        "finalize_stale_running_before": "2026-06-01T01:00:00Z"
+                    },
+                    brief_writer={"enabled": False},
+                ),
             )
 
             conn = sqlite3.connect(db_path)
@@ -1210,23 +1359,61 @@ class Layer2RunnerTest(unittest.TestCase):
         )
         config = config_from_args(args)
 
-        self.assertFalse(config["enable_edge_scout"])
-        self.assertEqual(config["max_deepdives_per_run"], 0)
-        self.assertTrue(config["enable_deepdive_briefs"])
-        self.assertEqual(config["scout_timeout_seconds"], 7)
-        self.assertEqual(config["max_total_scoring_candidates"], 2)
-        self.assertEqual(config["score_only_min_score"], 55)
+        self.assertFalse(config["edge_scout"]["enabled"])
+        self.assertEqual(config["routing"]["max_deepdives_per_run"], 0)
+        self.assertTrue(config["brief_writer"]["enabled"])
+        self.assertEqual(config["edge_scout"]["timeout_seconds"], 7)
+        self.assertEqual(config["routing"]["max_total_scoring_candidates"], 2)
+        self.assertEqual(config["routing"]["score_only_min_score"], 55)
 
         enabled = config_from_args(parse_args(["--enable-edge-scout"]))
-        self.assertTrue(enabled["enable_edge_scout"])
+        self.assertTrue(enabled["edge_scout"]["enabled"])
         default_config = config_from_args(parse_args([]))
-        self.assertEqual(default_config["max_deepdives_per_run"], 0)
-        self.assertEqual(default_config["brief_target_count"], 8)
-        self.assertEqual(default_config["score_only_min_score"], 50)
-        self.assertEqual(default_config["scoring_concurrency"], 5)
-        self.assertEqual(default_config["brief_concurrency"], 4)
-        self.assertEqual(default_config["max_parallel_tool_calls_per_turn"], 4)
-        self.assertEqual(default_config["github_tool_concurrency"], 5)
-        self.assertEqual(default_config["github_tool_rate_limit_per_second"], 2.0)
-        self.assertEqual(default_config["homepage_tool_rate_limit_per_second"], 2.0)
-        self.assertEqual(default_config["web_search_tool_rate_limit_per_second"], 1.0)
+        self.assertEqual(default_config["routing"]["max_deepdives_per_run"], 0)
+        self.assertEqual(default_config["routing"]["brief_target_count"], 8)
+        self.assertEqual(default_config["routing"]["score_only_min_score"], 50)
+        self.assertEqual(default_config["scoring_agent"]["concurrency"], 5)
+        self.assertEqual(default_config["brief_writer"]["concurrency"], 4)
+        self.assertEqual(
+            default_config["scoring_agent"]["tool_budget"][
+                "max_parallel_calls_per_turn"
+            ],
+            4,
+        )
+        self.assertEqual(
+            default_config["tool_runtime"]["families"]["github"][
+                "max_in_flight"
+            ],
+            5,
+        )
+        self.assertEqual(
+            default_config["tool_runtime"]["families"]["github"][
+                "starts_per_second"
+            ],
+            2.0,
+        )
+        self.assertEqual(
+            default_config["tool_runtime"]["families"]["homepage"][
+                "starts_per_second"
+            ],
+            2.0,
+        )
+        self.assertEqual(
+            default_config["tool_runtime"]["families"]["web_search"][
+                "starts_per_second"
+            ],
+            1.0,
+        )
+        self.assertEqual(default_config["scoring_agent"]["max_output_tokens"], 3000)
+        self.assertEqual(default_config["brief_writer"]["max_output_tokens"], 1000)
+        self.assertEqual(
+            default_config["scoring_agent"]["prompt_version"],
+            "layer2-scoring-investigator-v2",
+        )
+        self.assertEqual(
+            default_config["brief_writer"]["prompt_version"],
+            "layer2-scoring-investigator-brief-v2",
+        )
+        self.assertEqual(
+            default_config["tool_runtime"]["max_evidence_rows_per_fetch"], 80
+        )

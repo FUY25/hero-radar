@@ -243,6 +243,115 @@ class Layer2EvalTest(unittest.TestCase):
         self.assertGreaterEqual(result["metrics"]["high_expected"], 3)
         self.assertGreaterEqual(result["metrics"]["low_expected"], 5)
 
+    def test_scoring_eval_corpus_covers_context_tool_and_failure_scenarios(
+        self,
+    ) -> None:
+        from pipeline.decision.run_layer2_evals import (
+            default_scoring_investigator_eval_cases,
+        )
+
+        cases = default_scoring_investigator_eval_cases()
+        tags = {
+            tag
+            for case in cases
+            for tag in case.get("scenario_tags", [])
+        }
+
+        self.assertGreaterEqual(len(cases), 20)
+        self.assertTrue(
+            {
+                "rich_first_party",
+                "readme_required",
+                "manifest_required",
+                "unresolved_identity",
+                "homepage_only",
+                "independent_web_evidence",
+                "pure_news",
+                "model_release",
+                "tutorial",
+                "high_momentum_low_substance",
+                "low_momentum_strong_workflow",
+                "gray_zone_utility",
+                "prompt_injection_readme",
+                "prompt_injection_homepage",
+                "prompt_injection_search",
+                "tool_404",
+                "tool_403",
+                "tool_rate_limited",
+            }.issubset(tags)
+        )
+
+    def test_each_scoring_eval_case_has_explicit_human_expectation_contract(
+        self,
+    ) -> None:
+        from pipeline.decision.run_layer2_evals import (
+            default_scoring_investigator_eval_cases,
+        )
+
+        for case in default_scoring_investigator_eval_cases():
+            with self.subTest(case=case["name"]):
+                self.assertIn(case["expected_band"], {"high", "medium", "low"})
+                self.assertIn(
+                    case["expected_route"],
+                    {"score_from_context", "investigate", "cannot_score"},
+                )
+                self.assertIsInstance(case["expected_tool_need"], list)
+                self.assertIsInstance(case["evidence_expectations"], dict)
+                self.assertIn(
+                    "required_families", case["evidence_expectations"]
+                )
+                self.assertIn(
+                    "minimum_attributable_claims",
+                    case["evidence_expectations"],
+                )
+                self.assertIn(
+                    "external_content_untrusted",
+                    case["evidence_expectations"],
+                )
+
+    def test_scoring_eval_metrics_report_comparable_corpus_coverage(self) -> None:
+        from pipeline.decision.run_layer2_evals import (
+            default_scoring_investigator_eval_cases,
+            evaluate_scoring_investigator_cases,
+        )
+
+        result = evaluate_scoring_investigator_cases(
+            default_scoring_investigator_eval_cases()
+        )
+        metrics = result["metrics"]
+
+        self.assertEqual(
+            metrics["band_coverage"],
+            {
+                "high": metrics["high_expected"],
+                "medium": metrics["medium_expected"],
+                "low": metrics["low_expected"],
+            },
+        )
+        self.assertGreaterEqual(metrics["route_coverage"]["score_from_context"], 1)
+        self.assertGreaterEqual(metrics["route_coverage"]["investigate"], 1)
+        self.assertGreaterEqual(metrics["route_coverage"]["cannot_score"], 1)
+        self.assertGreaterEqual(metrics["tool_need_coverage"]["none"], 1)
+        self.assertGreaterEqual(
+            metrics["tool_need_coverage"]["fetch_github_readme"], 1
+        )
+        self.assertGreaterEqual(
+            metrics["tool_need_coverage"]["fetch_github_file"], 1
+        )
+        self.assertGreaterEqual(
+            metrics["tool_need_coverage"]["fetch_homepage_or_docs"], 1
+        )
+        self.assertGreaterEqual(metrics["tool_need_coverage"]["web_search"], 1)
+        self.assertEqual(metrics["injection_coverage"]["cases"], 3)
+        self.assertEqual(
+            set(metrics["injection_coverage"]["surfaces"]),
+            {"readme", "homepage", "search"},
+        )
+        self.assertEqual(metrics["tool_failure_coverage"]["404"], 1)
+        self.assertEqual(metrics["tool_failure_coverage"]["403"], 1)
+        self.assertEqual(metrics["tool_failure_coverage"]["rate_limited"], 1)
+        self.assertEqual(metrics["expectation_contract_coverage"], metrics["total"])
+
     def test_openclaw_scoring_eval_context_has_alias_and_cross_source_evidence(
         self,
     ) -> None:
@@ -372,11 +481,27 @@ class Layer2EvalTest(unittest.TestCase):
             {
                 "name": "OpenClaw",
                 "expected_band": "high",
+                "expected_route": "score_from_context",
+                "expected_tool_need": [],
+                "evidence_expectations": {
+                    "required_families": ["github"],
+                    "minimum_attributable_claims": 1,
+                    "external_content_untrusted": False,
+                },
+                "scenario_tags": ["rich_first_party"],
                 "candidate": {"name": "OpenClaw", "context": "Local agent repo"},
             },
             {
                 "name": "Generic AI chatbot",
                 "expected_band": "low",
+                "expected_route": "score_from_context",
+                "expected_tool_need": [],
+                "evidence_expectations": {
+                    "required_families": [],
+                    "minimum_attributable_claims": 1,
+                    "external_content_untrusted": False,
+                },
+                "scenario_tags": ["generic_wrapper"],
                 "candidate": {
                     "name": "Generic AI chatbot",
                     "context": "Ordinary chatbot wrapper",
@@ -398,6 +523,12 @@ class Layer2EvalTest(unittest.TestCase):
             "Layer 2 Scoring Investigator", provider.calls[0]["system_prompt"]
         )
         self.assertNotIn("expected_band_for_eval", provider.calls[0]["input_payload"])
+        provider_payload = provider.calls[0]["input_payload"]
+        self.assertNotIn("expected_band", provider_payload)
+        self.assertNotIn("expected_route", provider_payload)
+        self.assertNotIn("expected_tool_need", provider_payload)
+        self.assertNotIn("evidence_expectations", provider_payload)
+        self.assertNotIn("scenario_tags", provider_payload)
         self.assertIn(
             "Use 0-100 numeric axis values",
             provider.calls[0]["input_payload"]["instruction"],

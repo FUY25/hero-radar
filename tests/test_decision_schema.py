@@ -154,6 +154,48 @@ class DecisionSchemaTest(unittest.TestCase):
         ).fetchone()
         self.assertEqual(row, ("scoring_error", "ValueError"))
 
+    def test_init_adds_attributable_context_and_model_call_telemetry(self):
+        conn = sqlite3.connect(":memory:")
+        self.addCleanup(conn.close)
+        init_decision_db(conn)
+
+        score_columns = {
+            row[1] for row in conn.execute("pragma table_info(l2_scores)").fetchall()
+        }
+        self.assertTrue(
+            {"supporting_claims_json", "negative_claims_json", "known_gaps_json"}
+            <= score_columns
+        )
+        investigation_columns = {
+            row[1]
+            for row in conn.execute(
+                "pragma table_info(l2_scoring_investigations)"
+            ).fetchall()
+        }
+        self.assertTrue(
+            {"observation_trace_json", "context_manifests_json"}
+            <= investigation_columns
+        )
+        model_call_columns = {
+            row[1] for row in conn.execute("pragma table_info(l2_model_calls)").fetchall()
+        }
+        self.assertTrue(
+            {
+                "feed_run_id",
+                "group_id",
+                "component",
+                "turn_index",
+                "request_fingerprint",
+                "context_policy_version",
+                "prompt_tokens",
+                "completion_tokens",
+                "temperature",
+                "max_output_tokens",
+                "context_manifest_json",
+            }
+            <= model_call_columns
+        )
+
     def test_reset_stage_allows_layer2_run_scoped_tables(self):
         conn = sqlite3.connect(":memory:")
         init_decision_db(conn)

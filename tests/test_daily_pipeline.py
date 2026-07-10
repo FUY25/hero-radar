@@ -425,16 +425,80 @@ class DailyPipelineTest(unittest.TestCase):
                     {
                         "layer2": {
                             "enabled": True,
-                            "max_edge_watch_scout": 50,
-                            "max_scored_candidates": 0,
-                            "max_deepdives_per_run": 0,
-                            "deepdive_min_l2_score": 70,
-                            "scoring_model": "kimi-k2.5",
-                            "enable_kimi_web_search": False,
-                            "max_tool_calls_per_candidate": 8,
-                            "max_web_search_calls_per_candidate": 1,
-                            "max_repo_files_per_candidate": 3,
-                            "max_pages_per_candidate": 1,
+                            "routing": {
+                                "max_edge_watch_scout": 50,
+                                "max_scored_candidates": 0,
+                                "max_total_scoring_candidates": 17,
+                                "max_deepdives_per_run": 0,
+                                "deepdive_min_l2_score": 70,
+                                "brief_min_score": 72,
+                                "brief_target_count": 7,
+                                "brief_max_count": 9,
+                                "score_only_min_score": 52,
+                                "known_paradigm_keys": ["github:owner/known"],
+                            },
+                            "scoring_agent": {
+                                "provider": "kimi",
+                                "model": "score-model",
+                                "prompt_id": "scorer-id",
+                                "prompt_version": "scorer-v1",
+                                "output_schema_version": "score-schema-v1",
+                                "context_policy_version": "context-v1",
+                                "timeout_seconds": 91,
+                                "max_output_tokens": 1800,
+                                "max_investigation_turns": 2,
+                                "max_scoring_attempts": 4,
+                                "enable_direct_final": True,
+                                "context_budget": {
+                                    "max_context_tokens": 28000,
+                                    "safety_margin": 600,
+                                    "identity_allocation": 700,
+                                    "evidence_summary_allocation": 750,
+                                    "top_evidence_allocation": 2100,
+                                    "previous_turn_allocation": 650,
+                                    "tool_observation_allocation": 2200,
+                                    "recent_raw_tool_result_count": 2,
+                                },
+                                "tool_budget": {
+                                    "max_calls_per_candidate": 8,
+                                    "max_web_search_calls_per_candidate": 1,
+                                    "max_github_file_calls_per_candidate": 3,
+                                    "max_homepage_calls_per_candidate": 1,
+                                },
+                            },
+                            "brief_writer": {
+                                "enabled": True,
+                                "provider": "kimi",
+                                "model": "brief-model",
+                                "prompt_id": "brief-id",
+                                "prompt_version": "brief-v2",
+                                "output_schema_version": "brief-schema-v1",
+                                "timeout_seconds": 61,
+                                "max_output_tokens": 1000,
+                            },
+                            "tool_runtime": {
+                                "registry_version": "registry-v1",
+                                "enable_kimi_web_search": False,
+                                "web_search_timeout_seconds": 31,
+                                "max_evidence_rows_per_fetch": 71,
+                                "max_github_file_chars": 5001,
+                                "max_homepage_chars": 5002,
+                                "max_web_results": 4,
+                            },
+                            "edge_scout": {
+                                "provider": "kimi",
+                                "model": "scout-model",
+                                "timeout_seconds": 41,
+                            },
+                            "legacy_deepdive": {
+                                "provider": "kimi",
+                                "model": "deepdive-model",
+                                "timeout_seconds": 51,
+                                "max_tool_calls_per_candidate": 13,
+                                "max_web_search_calls_per_candidate": 2,
+                                "max_repo_files_per_candidate": 6,
+                                "max_pages_per_candidate": 4,
+                            },
                         }
                     }
                 )
@@ -457,6 +521,105 @@ class DailyPipelineTest(unittest.TestCase):
         self.assertEqual(layer2_cmd[layer2_cmd.index("--scoring-limit") + 1], "0")
         self.assertIn("--max-tool-calls-per-candidate", layer2_cmd)
         self.assertEqual(layer2_cmd[layer2_cmd.index("--max-tool-calls-per-candidate") + 1], "8")
+        self.assertEqual(layer2_cmd[layer2_cmd.index("--scoring-model") + 1], "score-model")
+        self.assertEqual(layer2_cmd[layer2_cmd.index("--brief-model") + 1], "brief-model")
+        self.assertEqual(
+            layer2_cmd[layer2_cmd.index("--scoring-max-output-tokens") + 1],
+            "1800",
+        )
+        self.assertEqual(
+            layer2_cmd[layer2_cmd.index("--brief-max-output-tokens") + 1],
+            "1000",
+        )
+        expected = {
+            "--max-total-scoring-candidates": "17",
+            "--brief-min-score": "72.0",
+            "--brief-target-count": "7",
+            "--brief-max-count": "9",
+            "--score-only-min-score": "52.0",
+            "--scoring-prompt-version": "scorer-v1",
+            "--brief-prompt-version": "brief-v2",
+            "--max-investigation-turns": "2",
+            "--max-scoring-attempts": "4",
+            "--max-context-tokens": "28000",
+            "--context-safety-margin": "600",
+            "--identity-token-allocation": "700",
+            "--evidence-summary-token-allocation": "750",
+            "--top-evidence-token-allocation": "2100",
+            "--previous-turn-token-allocation": "650",
+            "--tool-observation-token-allocation": "2200",
+            "--recent-raw-tool-result-count": "2",
+            "--max-evidence-rows-per-fetch": "71",
+            "--max-github-file-chars": "5001",
+            "--max-homepage-chars": "5002",
+            "--max-web-results": "4",
+            "--scout-timeout-seconds": "41",
+            "--deepdive-timeout-seconds": "51",
+            "--web-search-timeout-seconds": "31",
+            "--legacy-max-tool-calls-per-candidate": "13",
+            "--legacy-max-web-search-calls-per-candidate": "2",
+            "--legacy-max-repo-files-per-candidate": "6",
+            "--legacy-max-pages-per-candidate": "4",
+        }
+        for flag, value in expected.items():
+            self.assertEqual(layer2_cmd[layer2_cmd.index(flag) + 1], value)
+        self.assertIn("--enable-direct-final", layer2_cmd)
+        self.assertEqual(
+            layer2_cmd[layer2_cmd.index("--known-paradigm-key") + 1],
+            "github:owner/known",
+        )
+
+    def test_daily_pipeline_rejects_flat_layer2_config(self):
+        from pipeline.run_daily import run_daily
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = root / "pipeline" / "config.json"
+            config_path.parent.mkdir(parents=True)
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "layer2": {
+                            "enabled": True,
+                            "scoring_model": "obsolete-flat-model",
+                        }
+                    }
+                )
+            )
+
+            with self.assertRaisesRegex(ValueError, "canonical nested"):
+                run_daily(root=root, python="py", runner=FakeRunner())
+
+    def test_daily_pipeline_maps_component_enabled_states(self):
+        from pipeline.run_daily import run_daily
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = root / "pipeline" / "config.json"
+            config_path.parent.mkdir(parents=True)
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "layer2": {
+                            "enabled": True,
+                            "routing": {},
+                            "scoring_agent": {},
+                            "brief_writer": {"enabled": False},
+                            "tool_runtime": {},
+                            "edge_scout": {"enabled": True},
+                            "legacy_deepdive": {"enabled": True},
+                        }
+                    }
+                )
+            )
+            runner = FakeRunner()
+
+            run_daily(root=root, python="py", runner=runner)
+
+        layer2_cmd = runner.calls[2]["cmd"]
+        self.assertIn("--enable-edge-scout", layer2_cmd)
+        self.assertIn("--enable-legacy-deepdive", layer2_cmd)
+        self.assertIn("--no-briefs", layer2_cmd)
 
     def test_daily_pipeline_passes_configured_parallelism_and_rate_limits(self):
         from pipeline.run_daily import run_daily
@@ -474,15 +637,32 @@ class DailyPipelineTest(unittest.TestCase):
                         },
                         "layer2": {
                             "enabled": True,
-                            "scoring_concurrency": 6,
-                            "brief_concurrency": 4,
-                            "max_parallel_tool_calls_per_turn": 3,
-                            "github_tool_concurrency": 5,
-                            "homepage_tool_concurrency": 4,
-                            "web_search_tool_concurrency": 2,
-                            "github_tool_rate_limit_per_second": 1.5,
-                            "homepage_tool_rate_limit_per_second": 1.25,
-                            "web_search_tool_rate_limit_per_second": 0.75,
+                            "routing": {},
+                            "scoring_agent": {
+                                "concurrency": 6,
+                                "tool_budget": {
+                                    "max_parallel_calls_per_turn": 3
+                                },
+                            },
+                            "brief_writer": {"concurrency": 4},
+                            "tool_runtime": {
+                                "families": {
+                                    "github": {
+                                        "max_in_flight": 5,
+                                        "starts_per_second": 1.5,
+                                    },
+                                    "homepage": {
+                                        "max_in_flight": 4,
+                                        "starts_per_second": 1.25,
+                                    },
+                                    "web_search": {
+                                        "max_in_flight": 2,
+                                        "starts_per_second": 0.75,
+                                    },
+                                }
+                            },
+                            "edge_scout": {},
+                            "legacy_deepdive": {},
                         },
                     }
                 )

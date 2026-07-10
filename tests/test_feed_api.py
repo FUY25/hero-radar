@@ -137,6 +137,46 @@ class FeedApiTest(unittest.TestCase):
             "owner/repo 值得今天重点看",
         )
 
+    def test_query_feed_payload_adds_structured_claims_with_text_projection(self):
+        import pipeline.server as server
+
+        temp, db_path = self.make_db()
+        self.addCleanup(temp.cleanup)
+        conn = sqlite3.connect(db_path)
+        claims = [
+            {
+                "claim": "README documents a validation harness.",
+                "evidence_refs": ["evidence:42"],
+                "supports_axes": ["technical_substance"],
+                "claim_type": "observed",
+            }
+        ]
+        conn.execute(
+            """
+            update l2_scores
+            set supporting_claims_json = ?, known_gaps_json = ?
+            where feed_run_id = ? and group_id = ?
+            """,
+            (
+                json.dumps(claims),
+                json.dumps(["Adoption durability"]),
+                "l2-run",
+                "group:repo",
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+        with mock.patch.object(server, "DB_PATH", db_path):
+            item = server.query_feed_payload()["today_focus"][0]
+
+        self.assertEqual(item["supporting_claims"], claims)
+        self.assertEqual(
+            item["supporting_evidence"],
+            ["README documents a validation harness."],
+        )
+        self.assertEqual(item["known_gaps"], ["Adoption durability"])
+
     def test_query_feed_payload_exposes_major_company_label(self):
         import pipeline.server as server
 

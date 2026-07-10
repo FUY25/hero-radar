@@ -194,6 +194,30 @@ def _best_alias_key(
     return None
 
 
+def approved_github_alias_key(
+    conn: sqlite3.Connection,
+    entity_id: str,
+    canonical_key: str | None = None,
+) -> str | None:
+    row = conn.execute(
+        """
+        select alias
+        from alias_links
+        where entity_id = ? and approved = 1 and alias like 'github:%'
+        order by
+            case
+                when origin = 'resolver' and external_id = ? then 0
+                when origin = 'resolver' then 1
+                else 2
+            end,
+            id
+        limit 1
+        """,
+        (entity_id, canonical_key or ""),
+    ).fetchone()
+    return str(row[0] or "") if row else None
+
+
 def _source_item_ids(entity: dict[str, Any]) -> list[int]:
     ids: list[int] = []
     for value in entity.get("source_item_ids") or []:
@@ -324,7 +348,11 @@ def _repo_key(key: str | None) -> str | None:
     if "/" not in repo:
         return None
     owner, name = repo.split("/", 1)
-    return f"{owner.lower()}/{name.lower()}"
+    owner = owner.strip().lower()
+    name = name.strip().lower().removesuffix(".git")
+    if not owner or not name or "/" in name:
+        return None
+    return f"{owner}/{name}"
 
 
 def _evidence_bullet(row: dict[str, Any]) -> dict[str, Any]:

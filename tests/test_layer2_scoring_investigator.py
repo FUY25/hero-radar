@@ -164,7 +164,7 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
             "select l2_score, primary_reason, prompt_version from l2_scores"
         ).fetchone()
         self.assertEqual(score_row[1], "Validation harness")
-        self.assertEqual(score_row[2], "layer2-scoring-investigator-v1")
+        self.assertEqual(score_row[2], "layer2-scoring-investigator-v2")
         trace_row = conn.execute(
             "select status, trace_json, tool_trace_json from l2_scoring_investigations"
         ).fetchone()
@@ -210,6 +210,45 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
             ).fetchone()[0]
         )
         self.assertEqual(tool_trace[1]["status"], "budget_exceeded")
+
+    def test_repeated_normalized_tool_signature_is_rejected_without_spending_budget(self):
+        from pipeline.decision.layer2_scoring_investigator import score_with_investigator
+
+        conn = self.make_conn()
+        repeated_request = {
+            "action": "use_tools",
+            "information_need": "Need README evidence.",
+            "tool_requests": [
+                {
+                    "name": "fetch_github_readme",
+                    "arguments": {"repo_key": "owner/repo"},
+                }
+            ],
+        }
+        provider = FakeLLMProvider(
+            [repeated_request, repeated_request, final_response()]
+        )
+        readme_tool = CountingTool({"status": "ok", "excerpt": "README"})
+
+        result = score_with_investigator(
+            conn,
+            feed_run_id="l2-run",
+            groups=[make_group()],
+            provider=provider,
+            tools={"fetch_github_readme": readme_tool},
+        )[0]
+
+        self.assertEqual(len(readme_tool.calls), 1)
+        self.assertEqual(
+            [row["status"] for row in result["tool_trace"]],
+            ["ok", "repeated_signature"],
+        )
+        self.assertEqual(
+            provider.calls[2]["input_payload"]["working_state"][
+                "used_tool_signatures"
+            ],
+            ['fetch_github_readme:{"repo_key":"owner/repo"}'],
+        )
 
     def test_same_turn_tools_run_concurrently_and_trace_keeps_request_order(self):
         from pipeline.decision.layer2_scoring_investigator import (
@@ -683,7 +722,7 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
         self.assertEqual(results[0]["tool_trace"], [])
         self.assertEqual(unused_tool.calls, [])
 
-    def test_tool_trace_is_passed_to_next_turn_and_persisted(self):
+    def test_observation_and_recent_raw_result_are_passed_while_full_trace_is_persisted(self):
         from pipeline.decision.layer2_scoring_investigator import (
             score_with_investigator,
         )
@@ -718,7 +757,11 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
 
         second_turn_payload = provider.calls[1]["input_payload"]
         self.assertEqual(
-            second_turn_payload["state"]["tool_trace"][0]["tool"],
+            second_turn_payload["working_state"]["verified_observations"][0]["tool"],
+            "fetch_github_readme",
+        )
+        self.assertEqual(
+            second_turn_payload["working_state"]["recent_raw_tool_results"][0]["tool"],
             "fetch_github_readme",
         )
         persisted = conn.execute(
@@ -763,7 +806,7 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
         self.assertEqual(results[0]["tool_trace"][0]["error_type"], "TimeoutError")
         self.assertGreater(results[0]["l2_score"], 0)
 
-    def test_all_primitive_tool_results_flow_to_next_turn_state(self):
+    def test_all_primitive_observations_and_one_recent_raw_result_flow_to_next_turn(self):
         from pipeline.decision.layer2_scoring_investigator import (
             score_with_investigator,
         )
@@ -822,9 +865,10 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
             tools=tools,
         )
 
-        tool_trace = provider.calls[1]["input_payload"]["state"]["tool_trace"]
+        working_state = provider.calls[1]["input_payload"]["working_state"]
+        observations = working_state["verified_observations"]
         self.assertEqual(
-            [row["tool"] for row in tool_trace],
+            [row["tool"] for row in observations],
             [
                 "read_evidence_rows",
                 "fetch_github_file",
@@ -832,10 +876,13 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
                 "web_search",
             ],
         )
-        self.assertEqual(tool_trace[0]["result"]["rows"][0]["metric_name"], "stars_today")
-        self.assertIn("CLI entrypoint", tool_trace[1]["result"]["excerpt"])
-        self.assertIn("persistent memory", tool_trace[2]["result"]["excerpt"])
-        self.assertEqual(tool_trace[3]["result"]["results"][0]["title"], "Launch discussion")
+        self.assertIn("stars_today", observations[0]["excerpt"])
+        self.assertIn("CLI entrypoint", observations[1]["excerpt"])
+        self.assertIn("persistent memory", observations[2]["excerpt"])
+        self.assertIn("Launch discussion", observations[3]["excerpt"])
+        recent_raw = working_state["recent_raw_tool_results"]
+        self.assertEqual(len(recent_raw), 1)
+        self.assertEqual(recent_raw[0]["tool"], "web_search")
 
     def test_unavailable_tool_records_trace_and_allows_fallback_final(self):
         from pipeline.decision.layer2_scoring_investigator import (
@@ -872,7 +919,9 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
 
         self.assertEqual(results[0]["tool_trace"][0]["status"], "unavailable")
         self.assertEqual(
-            provider.calls[1]["input_payload"]["state"]["tool_trace"][0]["status"],
+            provider.calls[1]["input_payload"]["working_state"][
+                "verified_observations"
+            ][0]["status"],
             "unavailable",
         )
 

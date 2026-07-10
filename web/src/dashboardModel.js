@@ -1027,22 +1027,82 @@ function numericConfigValue(config, path, fallback) {
 
 export function layer2RunOptionsFromConfig(config = {}) {
   const layer2 = config.layer2 || {};
+  const scoring = layer2.scoring_agent || {};
+  const brief = layer2.brief_writer || {};
+  const toolRuntime = layer2.tool_runtime || {};
+  const edgeScout = layer2.edge_scout || {};
+  const legacyDeepdive = layer2.legacy_deepdive || {};
+  const families = toolRuntime.families || {};
   return {
     run_layer2: Boolean(layer2.enabled),
-    layer2_scout_limit: numericConfigValue(config, 'layer2.max_edge_watch_scout', 50),
-    layer2_scoring_limit: numericConfigValue(config, 'layer2.max_scored_candidates', 0),
-    layer2_deepdive_limit: numericConfigValue(config, 'layer2.max_deepdives_per_run', 10),
-    layer2_deepdive_min_l2_score: numericConfigValue(config, 'layer2.deepdive_min_l2_score', 70),
-    layer2_scout_model: String(layer2.edge_scout_model || 'kimi-k2.5'),
-    layer2_scoring_model: String(layer2.scoring_model || 'kimi-k2.5'),
-    layer2_deepdive_model: String(layer2.deepdive_model || 'kimi-k2.6'),
-    layer2_enable_kimi_web_search: Boolean(layer2.enable_kimi_web_search),
-    layer2_max_tool_calls: numericConfigValue(config, 'layer2.max_tool_calls_per_candidate', 20),
-    layer2_max_web_search_calls: numericConfigValue(config, 'layer2.max_web_search_calls_per_candidate', 3),
-    layer2_max_repo_files: numericConfigValue(config, 'layer2.max_repo_files_per_candidate', 8),
-    layer2_max_pages: numericConfigValue(config, 'layer2.max_pages_per_candidate', 6),
-    layer2_max_hn_thread_fetches: numericConfigValue(config, 'layer2.max_hn_thread_fetches_per_candidate', 3),
-    layer2_max_x_context_fetches: numericConfigValue(config, 'layer2.max_x_context_fetches_per_candidate', 5),
+    layer2_enable_edge_scout: Boolean(edgeScout.enabled),
+    layer2_enable_briefs: brief.enabled !== false,
+    layer2_enable_legacy_deepdive: Boolean(legacyDeepdive.enabled),
+    layer2_scout_limit: numericConfigValue(config, 'layer2.routing.max_edge_watch_scout', 50),
+    layer2_scoring_limit: numericConfigValue(config, 'layer2.routing.max_scored_candidates', 0),
+    layer2_max_total_scoring_candidates: layer2.routing?.max_total_scoring_candidates == null
+      ? null
+      : numericConfigValue(config, 'layer2.routing.max_total_scoring_candidates', 0),
+    layer2_deepdive_limit: numericConfigValue(config, 'layer2.routing.max_deepdives_per_run', 10),
+    layer2_deepdive_min_l2_score: numericConfigValue(config, 'layer2.routing.deepdive_min_l2_score', 70),
+    layer2_brief_min_score: numericConfigValue(config, 'layer2.routing.brief_min_score', 70),
+    layer2_score_only_min_score: numericConfigValue(config, 'layer2.routing.score_only_min_score', 50),
+    layer2_brief_target_count: numericConfigValue(config, 'layer2.routing.brief_target_count', 8),
+    layer2_brief_max_count: numericConfigValue(config, 'layer2.routing.brief_max_count', 10),
+    layer2_known_paradigm_keys: Array.isArray(layer2.routing?.known_paradigm_keys)
+      ? [...layer2.routing.known_paradigm_keys]
+      : [],
+    layer2_scout_provider: String(edgeScout.provider || 'kimi'),
+    layer2_scout_model: String(edgeScout.model || 'kimi-k2.5'),
+    layer2_scoring_provider: String(scoring.provider || 'kimi'),
+    layer2_scoring_model: String(scoring.model || 'kimi-k2.5'),
+    layer2_scoring_prompt_id: String(scoring.prompt_id || 'layer2_scoring_investigator'),
+    layer2_scoring_prompt_version: String(scoring.prompt_version || 'layer2-scoring-investigator-v1'),
+    layer2_scoring_output_schema_version: String(scoring.output_schema_version || 'layer2-scoring-schema-v1'),
+    layer2_scoring_context_policy_version: String(scoring.context_policy_version || 'legacy-full-context-v1'),
+    layer2_brief_provider: String(brief.provider || 'kimi'),
+    layer2_brief_model: String(brief.model || 'kimi-k2.5'),
+    layer2_brief_prompt_id: String(brief.prompt_id || 'layer2_brief_writer'),
+    layer2_brief_prompt_version: String(brief.prompt_version || 'layer2-scoring-investigator-brief-v2'),
+    layer2_brief_output_schema_version: String(brief.output_schema_version || 'layer2-brief-schema-v1'),
+    layer2_deepdive_provider: String(legacyDeepdive.provider || 'kimi'),
+    layer2_deepdive_model: String(legacyDeepdive.model || 'kimi-k2.6'),
+    layer2_enable_kimi_web_search: Boolean(toolRuntime.enable_kimi_web_search),
+    layer2_max_tool_calls: numericConfigValue(config, 'layer2.scoring_agent.tool_budget.max_calls_per_candidate', 8),
+    layer2_max_web_search_calls: numericConfigValue(config, 'layer2.scoring_agent.tool_budget.max_web_search_calls_per_candidate', 1),
+    layer2_max_repo_files: numericConfigValue(config, 'layer2.scoring_agent.tool_budget.max_github_file_calls_per_candidate', 3),
+    layer2_max_pages: numericConfigValue(config, 'layer2.scoring_agent.tool_budget.max_homepage_calls_per_candidate', 1),
+    layer2_max_hn_thread_fetches: numericConfigValue(config, 'layer2.legacy_deepdive.max_hn_thread_fetches_per_candidate', 3),
+    layer2_max_x_context_fetches: numericConfigValue(config, 'layer2.legacy_deepdive.max_x_context_fetches_per_candidate', 5),
+    layer2_scoring_concurrency: numericConfigValue(config, 'layer2.scoring_agent.concurrency', 5),
+    layer2_brief_concurrency: numericConfigValue(config, 'layer2.brief_writer.concurrency', 4),
+    layer2_max_parallel_tool_calls: numericConfigValue(config, 'layer2.scoring_agent.tool_budget.max_parallel_calls_per_turn', 4),
+    layer2_github_tool_concurrency: Number(families.github?.max_in_flight ?? 5),
+    layer2_homepage_tool_concurrency: Number(families.homepage?.max_in_flight ?? 4),
+    layer2_web_search_tool_concurrency: Number(families.web_search?.max_in_flight ?? 2),
+    layer2_github_tool_rate_limit_per_second: Number(families.github?.starts_per_second ?? 2),
+    layer2_homepage_tool_rate_limit_per_second: Number(families.homepage?.starts_per_second ?? 2),
+    layer2_web_search_tool_rate_limit_per_second: Number(families.web_search?.starts_per_second ?? 1),
+    layer2_scoring_timeout_seconds: numericConfigValue(config, 'layer2.scoring_agent.timeout_seconds', 90),
+    layer2_brief_timeout_seconds: numericConfigValue(config, 'layer2.brief_writer.timeout_seconds', 90),
+    layer2_scout_timeout_seconds: numericConfigValue(config, 'layer2.edge_scout.timeout_seconds', 90),
+    layer2_deepdive_timeout_seconds: numericConfigValue(config, 'layer2.legacy_deepdive.timeout_seconds', 90),
+    layer2_web_search_timeout_seconds: toolRuntime.web_search_timeout_seconds == null
+      ? null
+      : numericConfigValue(config, 'layer2.tool_runtime.web_search_timeout_seconds', 90),
+    layer2_scoring_max_output_tokens: numericConfigValue(config, 'layer2.scoring_agent.max_output_tokens', 3000),
+    layer2_brief_max_output_tokens: numericConfigValue(config, 'layer2.brief_writer.max_output_tokens', 1000),
+    layer2_max_investigation_turns: numericConfigValue(config, 'layer2.scoring_agent.max_investigation_turns', 3),
+    layer2_max_scoring_attempts: numericConfigValue(config, 'layer2.scoring_agent.max_scoring_attempts', 3),
+    layer2_tool_registry_version: String(toolRuntime.registry_version || 'legacy-investigator-tools-v1'),
+    layer2_max_evidence_rows_per_fetch: numericConfigValue(config, 'layer2.tool_runtime.max_evidence_rows_per_fetch', 80),
+    layer2_max_github_file_chars: numericConfigValue(config, 'layer2.tool_runtime.max_github_file_chars', 6000),
+    layer2_max_homepage_chars: numericConfigValue(config, 'layer2.tool_runtime.max_homepage_chars', 6000),
+    layer2_max_web_results: numericConfigValue(config, 'layer2.tool_runtime.max_web_results', 5),
+    layer2_legacy_max_tool_calls: numericConfigValue(config, 'layer2.legacy_deepdive.max_tool_calls_per_candidate', 8),
+    layer2_legacy_max_web_search_calls: numericConfigValue(config, 'layer2.legacy_deepdive.max_web_search_calls_per_candidate', 1),
+    layer2_legacy_max_repo_files: numericConfigValue(config, 'layer2.legacy_deepdive.max_repo_files_per_candidate', 3),
+    layer2_legacy_max_pages: numericConfigValue(config, 'layer2.legacy_deepdive.max_pages_per_candidate', 1),
   };
 }
 

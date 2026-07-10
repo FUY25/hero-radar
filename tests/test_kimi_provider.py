@@ -21,6 +21,25 @@ class FakeHttpResponse:
 
 
 class KimiProviderTest(unittest.TestCase):
+    def test_complete_json_applies_configured_max_output_tokens(self):
+        from pipeline.decision.kimi_provider import KimiProvider
+
+        provider = KimiProvider(
+            api_key="secret",
+            model="kimi-k2.5",
+            max_output_tokens=1000,
+        )
+
+        payload = provider.build_payload(
+            system_prompt="Return JSON.",
+            user_payload={"candidate": "repo"},
+        )
+
+        self.assertEqual(provider.max_output_tokens, 1000)
+        self.assertEqual(provider.actual_temperature, 1)
+        self.assertEqual(provider.response_format, {"type": "json_object"})
+        self.assertEqual(payload["max_tokens"], 1000)
+
     def test_kimi_provider_builds_json_payload_with_k2_accepted_temperature(self):
         from pipeline.decision.kimi_provider import KimiProvider
 

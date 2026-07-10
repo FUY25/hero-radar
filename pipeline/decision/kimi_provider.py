@@ -52,6 +52,7 @@ class KimiProvider:
         base_url: str | None = None,
         timeout: int = 90,
         max_retries: int = 2,
+        max_output_tokens: int | None = None,
     ) -> None:
         local_config = load_local_kimi_config()
         self.api_key = (
@@ -75,12 +76,23 @@ class KimiProvider:
         ).rstrip("/")
         self.timeout = timeout
         self.max_retries = max(0, int(max_retries))
+        self.max_output_tokens = (
+            None if max_output_tokens is None else max(1, int(max_output_tokens))
+        )
 
     def __repr__(self) -> str:
         return (
             f"KimiProvider(model={self.model!r}, base_url={self.base_url!r}, "
             f"api_key_configured={bool(self.api_key)})"
         )
+
+    @property
+    def actual_temperature(self) -> float:
+        return kimi_temperature(self.model, 0)
+
+    @property
+    def response_format(self) -> dict[str, str]:
+        return {"type": "json_object"}
 
     def handshake(self) -> dict[str, Any]:
         host = urlparse(self.base_url).netloc
@@ -156,8 +168,11 @@ class KimiProvider:
         }
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
-        if max_tokens is not None:
-            payload["max_tokens"] = max_tokens
+        active_max_tokens = (
+            self.max_output_tokens if max_tokens is None else max(1, int(max_tokens))
+        )
+        if active_max_tokens is not None:
+            payload["max_tokens"] = active_max_tokens
         if tools:
             payload["tools"] = tools
         return payload

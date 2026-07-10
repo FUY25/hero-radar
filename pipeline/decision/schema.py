@@ -202,6 +202,9 @@ create table if not exists l2_scores (
     model text not null,
     prompt_version text not null,
     cache_key text not null,
+    supporting_claims_json text not null default '[]',
+    negative_claims_json text not null default '[]',
+    known_gaps_json text not null default '[]',
     unique(feed_run_id, group_id)
 );
 
@@ -216,8 +219,41 @@ create table if not exists l2_scoring_investigations (
     model text not null,
     prompt_version text not null,
     cache_key text not null,
+    observation_trace_json text not null default '[]',
+    context_manifests_json text not null default '[]',
     created_at text not null,
     unique(feed_run_id, group_id)
+);
+
+create table if not exists l2_model_calls (
+    id integer primary key autoincrement,
+    feed_run_id text not null,
+    group_id text,
+    component text not null,
+    task text not null,
+    turn_index integer,
+    attempt integer,
+    provider text not null,
+    model text not null,
+    request_fingerprint text not null,
+    cache_key text not null,
+    prompt_version text not null,
+    output_schema_version text not null,
+    tool_registry_version text not null,
+    context_policy_version text not null,
+    status text not null,
+    latency_ms integer,
+    prompt_tokens integer,
+    completion_tokens integer,
+    cached_input_tokens integer,
+    total_tokens integer,
+    temperature real,
+    max_output_tokens integer,
+    estimated_tokens_json text not null default '{}',
+    context_manifest_json text not null default '{}',
+    error_type text,
+    error text,
+    created_at text not null
 );
 
 create table if not exists l2_deepdive_briefs (
@@ -292,6 +328,7 @@ create index if not exists idx_l2_investigations_run on l2_scoring_investigation
 create index if not exists idx_l2_briefs_run on l2_deepdive_briefs(feed_run_id, status);
 create index if not exists idx_l2_feed_items_run_section on l2_feed_items(feed_run_id, section, rank);
 create index if not exists idx_l2_stage_events_run on l2_stage_events(feed_run_id, stage, status);
+create index if not exists idx_l2_model_calls_run on l2_model_calls(feed_run_id, group_id, component);
 """
 
 
@@ -310,6 +347,50 @@ def to_json(value: object) -> str:
 
 def init_decision_db(conn: sqlite3.Connection) -> None:
     conn.executescript(DECISION_SCHEMA_SQL)
+    _ensure_column(
+        conn,
+        "l2_scores",
+        "supporting_claims_json",
+        "text not null default '[]'",
+    )
+    _ensure_column(
+        conn,
+        "l2_scores",
+        "negative_claims_json",
+        "text not null default '[]'",
+    )
+    _ensure_column(
+        conn,
+        "l2_scores",
+        "known_gaps_json",
+        "text not null default '[]'",
+    )
+    _ensure_column(
+        conn,
+        "l2_scoring_investigations",
+        "observation_trace_json",
+        "text not null default '[]'",
+    )
+    _ensure_column(
+        conn,
+        "l2_scoring_investigations",
+        "context_manifests_json",
+        "text not null default '[]'",
+    )
+
+
+def _ensure_column(
+    conn: sqlite3.Connection,
+    table: str,
+    column: str,
+    declaration: str,
+) -> None:
+    existing = {
+        str(row[1]) for row in conn.execute(f"pragma table_info({table})").fetchall()
+    }
+    if column in existing:
+        return
+    conn.execute(f"alter table {table} add column {column} {declaration}")
 
 
 def begin_decision_run(
@@ -369,6 +450,7 @@ def reset_decision_stage(
         "deepdive_reports": "feed_run_id",
         "l2_feed_items": "feed_run_id",
         "l2_stage_events": "feed_run_id",
+        "l2_model_calls": "feed_run_id",
         "feed_feedback": "feed_run_id",
     }
     for table in tables:

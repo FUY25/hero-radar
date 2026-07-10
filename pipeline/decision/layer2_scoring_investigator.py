@@ -1,18 +1,39 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
-from pipeline.decision.layer2_harness import sanitize_text
+from pipeline.decision.layer2_brief_packet import build_brief_writer_packet
+from pipeline.decision.layer2_candidate_preflight import preflight_candidate
+from pipeline.decision.layer2_claims import normalize_attributable_claims
+from pipeline.decision.layer2_context_builder import (
+    ContextBudget,
+    ScoringContextBuilder,
+    conservative_token_estimate,
+)
+from pipeline.decision.layer2_contracts import (
+    brief_writer_output_schema_v1,
+    scoring_turn_output_schema_v2,
+)
+from pipeline.decision.layer2_harness import ModelCallTelemetryContext, sanitize_text
 from pipeline.decision.layer2_models import LEVEL_RANK, CandidateGroup
+from pipeline.decision.layer2_prompts import SCORING_INVESTIGATOR_SYSTEM_PROMPT_V2
+from pipeline.decision.layer2_tool_registry import ToolSpec
+from pipeline.decision.request_contract import LLMRequestContract
 from pipeline.decision.schema import to_json, utc_now
 
 
-DEFAULT_INVESTIGATOR_PROMPT_VERSION = "layer2-scoring-investigator-v1"
+DEFAULT_INVESTIGATOR_PROMPT_VERSION = "layer2-scoring-investigator-v2"
 DEFAULT_BRIEF_PROMPT_VERSION = "layer2-scoring-investigator-brief-v2"
+SCORING_OUTPUT_SCHEMA_VERSION = "layer2-scoring-output-v2"
+SCORING_CONTEXT_POLICY_VERSION = "layer2-scoring-context-v1"
+TOOL_REGISTRY_VERSION = "layer2-tools-v1"
+BRIEF_OUTPUT_SCHEMA_VERSION = "layer2-brief-output-v1"
+BRIEF_CONTEXT_POLICY_VERSION = "layer2-brief-packet-v1"
 
 ROUTE_SCORE_ONLY = "score_only"
 ROUTE_SCORE_PLUS_DEEPDIVE = "score_plus_deepdive"
@@ -53,7 +74,7 @@ MAJOR_COMPANY_LABELS = {
 }
 
 
-SCORING_INVESTIGATOR_SYSTEM_PROMPT = """
+SCORING_INVESTIGATOR_SYSTEM_PROMPT_V1 = """
 You are the Layer 2 Scoring Investigator for Hero Radar.
 
 Your job is to decide whether this candidate is strategically worth reading
@@ -88,6 +109,8 @@ Return strict JSON. On each turn return either:
 or:
 {"action":"final","score":{...},"brief":{"should_print":false}}
 """
+
+SCORING_INVESTIGATOR_SYSTEM_PROMPT = SCORING_INVESTIGATOR_SYSTEM_PROMPT_V2
 
 
 BRIEF_SYSTEM_PROMPT = """
@@ -181,10 +204,23 @@ def score_with_investigator(
     groups: list[CandidateGroup],
     provider: Any,
     tools: dict[str, ToolFn],
+    tool_specs: Mapping[str, ToolSpec] | None = None,
     limits: InvestigatorLimits | None = None,
+    context_builder: ScoringContextBuilder | None = None,
+    context_budget: ContextBudget | None = None,
+    direct_final_enabled: bool = False,
     prompt_version: str = DEFAULT_INVESTIGATOR_PROMPT_VERSION,
+    output_schema_version: str = SCORING_OUTPUT_SCHEMA_VERSION,
+    tool_registry_version: str = TOOL_REGISTRY_VERSION,
+    system_prompt: str | None = None,
 ) -> list[dict[str, Any]]:
     active_limits = limits or InvestigatorLimits()
+    active_context_builder = context_builder or ScoringContextBuilder()
+    active_system_prompt = system_prompt or (
+        SCORING_INVESTIGATOR_SYSTEM_PROMPT_V1
+        if str(prompt_version).endswith("-v1")
+        else SCORING_INVESTIGATOR_SYSTEM_PROMPT_V2
+    )
     results: list[dict[str, Any]] = []
     for group in groups:
         result = _score_one_group(
@@ -193,8 +229,15 @@ def score_with_investigator(
             group=group,
             provider=provider,
             tools=tools,
+            tool_specs=tool_specs,
             limits=active_limits,
+            context_builder=active_context_builder,
+            context_budget=context_budget or ContextBudget(),
+            direct_final_enabled=direct_final_enabled,
             prompt_version=prompt_version,
+            output_schema_version=output_schema_version,
+            tool_registry_version=tool_registry_version,
+            system_prompt=active_system_prompt,
         )
         results.append(result)
     conn.commit()
@@ -302,35 +345,48 @@ def build_deepdive_brief(
     prompt_version: str = DEFAULT_BRIEF_PROMPT_VERSION,
 ) -> dict[str, Any]:
     group = row["group"]
-    payload = {
-        "group_id": group.group_id,
-        "candidate": group.context,
-        "candidate_identity": _candidate_identity(group),
-        "score": {
-            key: row.get(key)
-            for key in [
-                "object_type",
-                "is_product_or_repo",
-                "axes",
-                "l2_score",
-                "supporting_evidence",
-                "negative_evidence",
-                "known_gaps",
-                "primary_reason",
-                "rationale_short",
-                "topic_tags",
-                "caveats",
-            ]
-        },
-        "investigation_trace": row.get("trace") or [],
-        "tool_trace": row.get("tool_trace") or [],
-        "schema": _brief_schema(),
+    output_schema = _brief_schema()
+    payload = build_brief_writer_packet(row, output_schema=output_schema)
+    brief_section_tokens = {
+        "system_prompt": conservative_token_estimate(BRIEF_SYSTEM_PROMPT),
+        "brief_packet": conservative_token_estimate(payload),
+        "tool_schemas": 0,
     }
-    response = provider.complete_json(
+    brief_manifest = {
+        "context_policy_version": BRIEF_CONTEXT_POLICY_VERSION,
+        "section_tokens": brief_section_tokens,
+        "estimated_input_tokens": sum(brief_section_tokens.values()),
+    }
+    request_contract = LLMRequestContract.for_provider(
+        provider,
+        task="layer2_scoring_investigator_brief",
+        system_prompt=BRIEF_SYSTEM_PROMPT,
+        active_tools=[],
+        active_tool_versions=[],
+        output_schema=output_schema,
+        context_policy_version=BRIEF_CONTEXT_POLICY_VERSION,
+        input_payload=payload,
+        prompt_version=prompt_version,
+        output_schema_version=BRIEF_OUTPUT_SCHEMA_VERSION,
+        tool_registry_version="none",
+    )
+    response = _complete_json_with_contract(
+        provider,
         task="layer2_scoring_investigator_brief",
         prompt_version=prompt_version,
         input_payload=payload,
         system_prompt=BRIEF_SYSTEM_PROMPT,
+        request_contract=request_contract,
+        call_context=ModelCallTelemetryContext(
+            component="brief_writer",
+            turn_index=None,
+            attempt=1,
+            estimated_tokens=brief_section_tokens,
+            context_manifest=brief_manifest,
+            output_schema_version=BRIEF_OUTPUT_SCHEMA_VERSION,
+            tool_registry_version="none",
+            context_policy_version=BRIEF_CONTEXT_POLICY_VERSION,
+        ),
     )
     brief = normalize_deepdive_brief(response)
     cache_payload = {**payload, "brief": brief}
@@ -418,51 +474,198 @@ def _score_one_group(
     group: CandidateGroup,
     provider: Any,
     tools: dict[str, ToolFn],
+    tool_specs: Mapping[str, ToolSpec] | None,
     limits: InvestigatorLimits,
+    context_builder: ScoringContextBuilder,
+    context_budget: ContextBudget,
+    direct_final_enabled: bool,
     prompt_version: str,
+    output_schema_version: str,
+    tool_registry_version: str,
+    system_prompt: str,
 ) -> dict[str, Any]:
-    state: dict[str, Any] = {
-        "known_facts": [],
-        "open_questions": [],
-        "tool_trace": [],
-        "information_sufficiency": {
-            "identity": "weak",
-            "workflow_shift": "weak",
-            "technical_substance": "weak",
-            "product_market_fit": "weak",
-            "momentum": "weak",
-        },
-    }
+    state: dict[str, Any] = {"used_tool_signatures": []}
     turn_trace: list[dict[str, Any]] = []
     tool_trace: list[dict[str, Any]] = []
+    observations: list[dict[str, Any]] = []
+    context_manifests: list[dict[str, Any]] = []
+    previous_turn: dict[str, Any] | None = None
+    used_tool_signatures: set[str] = set()
+    valid_evidence_refs: set[str] = set()
     tool_counts: dict[str, int] = {}
     total_tool_calls = 0
     final_response: dict[str, Any] | None = None
+    output_schema = scoring_turn_output_schema_v2()
+    evidence_rows = _context_evidence_rows(group)
+    candidate_packet = _scoring_candidate_packet(group)
+    preliminary_context = context_builder.build(
+        task={
+            "decision": "score_candidate",
+            "mode": "preflight",
+            "turn_index": 0,
+            "must_finalize": False,
+        },
+        candidate=candidate_packet,
+        evidence_rows=evidence_rows,
+        observations=[],
+        previous_turn=None,
+        decision_state={
+            "information_sufficiency": _initial_information_sufficiency(group),
+            "used_tool_signatures": [],
+        },
+        raw_tool_results=[],
+        active_tools=[],
+        remaining_budget=_remaining_budget_payload(
+            limits,
+            turn_index=0,
+            total_tool_calls=0,
+            tool_counts={},
+        ),
+        system_prompt=system_prompt,
+        output_schema=output_schema,
+        budget=context_budget,
+    )
+    preflight = preflight_candidate(
+        group,
+        context_manifest=preliminary_context.manifest,
+        direct_final_enabled=direct_final_enabled,
+    )
+    state["information_sufficiency"] = preflight.information_sufficiency
+    if preflight.open_questions:
+        state["open_questions"] = [
+            {
+                "question": question,
+                "status": "open",
+                "owner": "scoring_investigator",
+            }
+            for question in preflight.open_questions
+        ]
+    active_specs = {
+        name: spec
+        for name, spec in dict(tool_specs or {}).items()
+        if name in tools and spec.is_available(preflight.tool_candidate_context)
+    }
+    if tool_specs is not None:
+        tools = {name: tools[name] for name in active_specs}
+    model_tools = (
+        [spec.model_projection() for spec in active_specs.values()]
+        if active_specs
+        else [{"name": name} for name in sorted(tools)]
+    )
+    preflight_mode = preflight.mode
+    if preflight_mode == "score_from_context":
+        active_specs = {}
+        model_tools = []
+        tools = {}
+
+    if preflight_mode == "cannot_score":
+        payload = preliminary_context.payload
+        context_manifests.append(
+            {"turn_index": 0, **preliminary_context.manifest}
+        )
+        final_response = _cannot_score_response(preflight.reason)
+        turn_trace.append(
+            {
+                "turn": 0,
+                "action": "final",
+                "information_need": {},
+                "preflight_mode": "cannot_score",
+                "reason": preflight.reason,
+            }
+        )
 
     try:
-        for turn_index in range(1, max(1, limits.max_investigation_turns) + 1):
-            payload = {
-                "group_id": group.group_id,
-                "candidate": group.context,
-                "candidate_identity": _candidate_identity(group),
-                "state": state,
-                "available_tools": sorted(tools),
-                "limits": _limits_payload(limits),
-                "turn_index": turn_index,
-                "schema": _turn_schema(),
-            }
-            response = provider.complete_json(
+        for turn_index in (
+            []
+            if preflight_mode == "cannot_score"
+            else range(1, max(1, limits.max_investigation_turns) + 1)
+        ):
+            remaining_budget = _remaining_budget_payload(
+                limits,
+                turn_index=turn_index,
+                total_tool_calls=total_tool_calls,
+                tool_counts=tool_counts,
+            )
+            built_context = context_builder.build(
+                task={
+                    "decision": "score_candidate",
+                    "mode": preflight_mode,
+                    "turn_index": turn_index,
+                    "must_finalize": (
+                        preflight.must_finalize
+                        or turn_index >= max(1, limits.max_investigation_turns)
+                    ),
+                    "preflight_reason": preflight.reason,
+                },
+                candidate=candidate_packet,
+                evidence_rows=evidence_rows,
+                observations=observations,
+                previous_turn=previous_turn,
+                decision_state=state,
+                raw_tool_results=tool_trace,
+                active_tools=model_tools,
+                remaining_budget=remaining_budget,
+                system_prompt=system_prompt,
+                output_schema=output_schema,
+                budget=context_budget,
+            )
+            payload = built_context.payload
+            context_manifests.append(
+                {"turn_index": turn_index, **built_context.manifest}
+            )
+            valid_evidence_refs.update(
+                built_context.manifest["included_evidence_ids"]
+            )
+            valid_evidence_refs.update(
+                str(row.get("observation_id"))
+                for row in observations
+                if row.get("observation_id")
+            )
+            request_contract = LLMRequestContract.for_provider(
+                provider,
+                task="layer2_scoring_investigator_turn",
+                system_prompt=system_prompt,
+                active_tools=model_tools,
+                active_tool_versions=[spec.version for spec in active_specs.values()],
+                output_schema=output_schema,
+                context_policy_version=context_builder.context_policy_version,
+                input_payload=payload,
+                prompt_version=prompt_version,
+                output_schema_version=output_schema_version,
+                tool_registry_version=tool_registry_version,
+            )
+            response = _complete_json_with_contract(
+                provider,
                 task="layer2_scoring_investigator_turn",
                 prompt_version=prompt_version,
                 input_payload=payload,
-                system_prompt=SCORING_INVESTIGATOR_SYSTEM_PROMPT,
+                system_prompt=system_prompt,
+                request_contract=request_contract,
+                call_context=ModelCallTelemetryContext(
+                    component="scoring_agent",
+                    turn_index=turn_index,
+                    attempt=1,
+                    estimated_tokens=built_context.manifest["section_tokens"],
+                    context_manifest=built_context.manifest,
+                    output_schema_version=output_schema_version,
+                    tool_registry_version=tool_registry_version,
+                    context_policy_version=context_builder.context_policy_version,
+                ),
             )
             action = str(response.get("action") or "").strip()
+            response_sufficiency = _normalize_information_sufficiency(
+                response.get("information_sufficiency")
+            )
+            if response_sufficiency:
+                state["information_sufficiency"] = response_sufficiency
+            information_need = _normalize_information_need(
+                response.get("information_need")
+            )
             turn_trace.append(
                 {
                     "turn": turn_index,
                     "action": action,
-                    "information_need": str(response.get("information_need") or ""),
+                    "information_need": information_need,
                 }
             )
             if action == "final":
@@ -480,9 +683,49 @@ def _score_one_group(
                 limits=limits,
                 tool_counts=tool_counts,
                 total_tool_calls=total_tool_calls,
+                used_signatures=used_tool_signatures,
             )
             tool_trace.extend(turn_tool_trace)
-            state["tool_trace"] = tool_trace
+            turn_observations = _project_tool_observations(
+                turn_tool_trace,
+                active_specs=active_specs,
+                turn_index=turn_index,
+            )
+            observations.extend(turn_observations)
+            valid_evidence_refs.update(
+                row["observation_id"] for row in turn_observations
+            )
+            state["used_tool_signatures"] = sorted(used_tool_signatures)
+            if information_need:
+                state["open_questions"] = [
+                    {
+                        **information_need,
+                        "status": "answered"
+                        if any(row.get("status") == "ok" for row in turn_tool_trace)
+                        else "blocked",
+                        "owner": "scoring_investigator",
+                    }
+                ]
+            previous_turn = {
+                "information_need": information_need,
+                "requested_tool_signatures": [
+                    _tool_request_signature(request)
+                    for request in requests
+                    if isinstance(request, dict)
+                ],
+                "outcomes": [
+                    {
+                        "tool": row.get("tool"),
+                        "status": row.get("status"),
+                        "observation_id": (
+                            turn_observations[index].get("observation_id")
+                            if index < len(turn_observations)
+                            else ""
+                        ),
+                    }
+                    for index, row in enumerate(turn_tool_trace)
+                ],
+            }
 
         if final_response is None:
             final_response = {
@@ -498,9 +741,20 @@ def _score_one_group(
             group=group,
             state=state,
             turn_trace=turn_trace,
-            tool_trace=tool_trace,
+            last_payload=payload,
             response=final_response,
             limits=limits,
+            valid_evidence_refs=valid_evidence_refs,
+            output_schema=output_schema,
+            active_tools=model_tools,
+            active_tool_versions=[spec.version for spec in active_specs.values()],
+            context_policy_version=context_builder.context_policy_version,
+            output_schema_version=output_schema_version,
+            tool_registry_version=tool_registry_version,
+            last_context_manifest=(
+                context_manifests[-1] if context_manifests else {}
+            ),
+            system_prompt=system_prompt,
         )
     except Exception as exc:
         cache_payload = {
@@ -522,6 +776,8 @@ def _score_one_group(
             status="error",
             turn_trace=turn_trace,
             tool_trace=tool_trace,
+            observations=observations,
+            context_manifests=context_manifests,
             provider=provider,
             prompt_version=prompt_version,
             cache_key=cache_key,
@@ -541,9 +797,10 @@ def _score_one_group(
         insert or replace into l2_scores(
           feed_run_id, group_id, l2_score, axes_json, primary_reason,
           topic_tags_json, rationale_short, caveats_json, provider, model,
-          prompt_version, cache_key
+          prompt_version, cache_key, supporting_claims_json,
+          negative_claims_json, known_gaps_json
         )
-        values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             feed_run_id,
@@ -558,6 +815,9 @@ def _score_one_group(
             provider.model,
             prompt_version,
             cache_key,
+            to_json(normalized["supporting_claims"]),
+            to_json(normalized["negative_claims"]),
+            to_json(normalized["known_gaps"]),
         ),
     )
     _persist_scoring_investigation(
@@ -567,11 +827,20 @@ def _score_one_group(
         status="ok",
         turn_trace=turn_trace,
         tool_trace=tool_trace,
+        observations=observations,
+        context_manifests=context_manifests,
         provider=provider,
         prompt_version=prompt_version,
         cache_key=cache_key,
     )
-    return {"group": group, **normalized, "tool_trace": tool_trace, "trace": turn_trace}
+    return {
+        "group": group,
+        **normalized,
+        "observations": observations,
+        "tool_trace": tool_trace,
+        "trace": turn_trace,
+        "context_manifests": context_manifests,
+    }
 
 
 def _persist_scoring_investigation(
@@ -582,6 +851,8 @@ def _persist_scoring_investigation(
     status: str,
     turn_trace: list[dict[str, Any]],
     tool_trace: list[dict[str, Any]],
+    observations: list[dict[str, Any]],
+    context_manifests: list[dict[str, Any]],
     provider: Any,
     prompt_version: str,
     cache_key: str,
@@ -590,9 +861,10 @@ def _persist_scoring_investigation(
         """
         insert or replace into l2_scoring_investigations(
           feed_run_id, group_id, status, trace_json, tool_trace_json,
-          provider, model, prompt_version, cache_key, created_at
+          provider, model, prompt_version, cache_key, observation_trace_json,
+          context_manifests_json, created_at
         )
-        values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             feed_run_id,
@@ -604,6 +876,8 @@ def _persist_scoring_investigation(
             provider.model,
             prompt_version,
             cache_key,
+            to_json(observations),
+            to_json(context_manifests),
             utc_now(),
         ),
     )
@@ -616,36 +890,89 @@ def _validate_or_repair_final(
     group: CandidateGroup,
     state: dict[str, Any],
     turn_trace: list[dict[str, Any]],
-    tool_trace: list[dict[str, Any]],
+    last_payload: dict[str, Any],
     response: dict[str, Any],
     limits: InvestigatorLimits,
+    valid_evidence_refs: set[str],
+    output_schema: dict[str, Any],
+    active_tools: list[dict[str, Any]],
+    active_tool_versions: list[str],
+    context_policy_version: str,
+    output_schema_version: str,
+    tool_registry_version: str,
+    last_context_manifest: dict[str, Any],
+    system_prompt: str,
 ) -> dict[str, Any]:
     try:
-        return _validate_final_response(response)
+        return _validate_final_response(
+            response,
+            valid_evidence_refs=valid_evidence_refs,
+        )
     except ValueError as exc:
         if limits.max_scoring_attempts < 2:
             raise
         repair_payload = {
-            "group_id": group.group_id,
-            "candidate": group.context,
-            "state": state,
-            "turn_trace": turn_trace,
-            "tool_trace": tool_trace,
+            "task": {
+                "decision": "repair_final_score",
+                "must_finalize": True,
+            },
+            "candidate": last_payload.get("candidate") or {},
+            "working_state": last_payload.get("working_state") or state,
             "validation_error": str(exc),
             "previous_response_shape": _response_shape(response),
             "instruction": "Return a complete corrected action=final scoring JSON object.",
-            "schema": _turn_schema(),
+            "output_schema": output_schema,
         }
-        repaired = provider.complete_json(
+        request_contract = LLMRequestContract.for_provider(
+            provider,
+            task="layer2_scoring_investigator_repair",
+            system_prompt=system_prompt,
+            active_tools=[],
+            active_tool_versions=[],
+            output_schema=output_schema,
+            context_policy_version=context_policy_version,
+            input_payload=repair_payload,
+            prompt_version=prompt_version,
+            output_schema_version=output_schema_version,
+            tool_registry_version=tool_registry_version,
+        )
+        repaired = _complete_json_with_contract(
+            provider,
             task="layer2_scoring_investigator_repair",
             prompt_version=prompt_version,
             input_payload=repair_payload,
-            system_prompt=SCORING_INVESTIGATOR_SYSTEM_PROMPT,
+        system_prompt=system_prompt,
+        request_contract=request_contract,
+        call_context=ModelCallTelemetryContext(
+            component="scoring_agent_repair",
+            turn_index=(
+                int(last_context_manifest.get("turn_index"))
+                if last_context_manifest.get("turn_index") is not None
+                else None
+            ),
+            attempt=2,
+            estimated_tokens=(
+                last_context_manifest.get("section_tokens")
+                if isinstance(last_context_manifest.get("section_tokens"), dict)
+                else {}
+            ),
+            context_manifest=last_context_manifest,
+            output_schema_version=output_schema_version,
+            tool_registry_version=tool_registry_version,
+            context_policy_version=context_policy_version,
+        ),
         )
-        return _validate_final_response(repaired)
+        return _validate_final_response(
+            repaired,
+            valid_evidence_refs=valid_evidence_refs,
+        )
 
 
-def _validate_final_response(response: dict[str, Any]) -> dict[str, Any]:
+def _validate_final_response(
+    response: dict[str, Any],
+    *,
+    valid_evidence_refs: set[str] | None = None,
+) -> dict[str, Any]:
     if str(response.get("action") or "") != "final":
         raise ValueError("scoring investigator final response must use action=final")
     score = response.get("score")
@@ -662,13 +989,33 @@ def _validate_final_response(response: dict[str, Any]) -> dict[str, Any]:
         object_type=object_type,
         is_product_or_repo=is_product_or_repo,
     )
+    if (
+        max(
+            normalized_axes["workflow_shift"],
+            normalized_axes["technical_substance"],
+            normalized_axes["product_market_fit"],
+        )
+        >= 70
+        and not score.get("supporting_evidence")
+    ):
+        raise ValueError("high core-axis scores require supporting evidence")
+    supporting_claims, supporting_evidence = _normalize_claim_output(
+        score.get("supporting_evidence"),
+        valid_evidence_refs=valid_evidence_refs or set(),
+    )
+    negative_claims, negative_evidence = _normalize_claim_output(
+        score.get("negative_evidence"),
+        valid_evidence_refs=valid_evidence_refs or set(),
+    )
     return {
         "object_type": object_type,
         "is_product_or_repo": is_product_or_repo,
         "axes": normalized_axes,
         "l2_score": l2_score,
-        "supporting_evidence": _string_list(score.get("supporting_evidence"), 8, 240),
-        "negative_evidence": _string_list(score.get("negative_evidence"), 8, 240),
+        "supporting_claims": supporting_claims,
+        "negative_claims": negative_claims,
+        "supporting_evidence": supporting_evidence,
+        "negative_evidence": negative_evidence,
         "known_gaps": _string_list(score.get("known_gaps"), 8, 160),
         "primary_reason": str(score.get("primary_reason") or "Signal")[:80],
         "rationale_short": str(score.get("rationale_short") or "")[:1000],
@@ -677,6 +1024,26 @@ def _validate_final_response(response: dict[str, Any]) -> dict[str, Any]:
         "should_print": bool(score.get("should_print", False)),
         "brief": response.get("brief") if isinstance(response.get("brief"), dict) else {},
     }
+
+
+def _normalize_claim_output(
+    value: Any,
+    *,
+    valid_evidence_refs: set[str],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    if not isinstance(value, list) or not value:
+        return [], []
+    if all(isinstance(item, dict) for item in value):
+        return normalize_attributable_claims(
+            value,
+            valid_evidence_refs=valid_evidence_refs,
+        )
+    if all(isinstance(item, str) for item in value):
+        # Historical v1 cache rows and fixtures remain readable. V2 requests expose
+        # only the claim-object schema, so new provider responses should not use this
+        # compatibility projection.
+        return [], _string_list(value, 8, 240)
+    raise ValueError("evidence claims must be uniformly structured claim objects")
 
 
 def _run_tool_request(
@@ -693,6 +1060,7 @@ def _run_tool_request(
         limits=limits,
         tool_counts=tool_counts,
         total_tool_calls=total_tool_calls,
+        used_signatures=None,
         max_workers=1,
     )
     return rows[0], updated_total
@@ -705,6 +1073,7 @@ def _run_tool_requests(
     limits: InvestigatorLimits,
     tool_counts: dict[str, int],
     total_tool_calls: int,
+    used_signatures: set[str] | None = None,
     max_workers: int | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     """Reserve budgets in request order, execute accepted calls concurrently."""
@@ -719,6 +1088,14 @@ def _run_tool_requests(
             else {}
         )
         family = _tool_family(name)
+        signature = _tool_request_signature(
+            {"name": name, "arguments": arguments}
+        )
+        if used_signatures is not None and signature in used_signatures:
+            trace_rows[index] = _trace_row(
+                name, arguments, family, "repeated_signature", {}
+            )
+            continue
         if total_tool_calls >= max(0, limits.max_tool_calls_per_candidate):
             trace_rows[index] = _trace_row(
                 name, arguments, family, "budget_exceeded", {}
@@ -734,6 +1111,8 @@ def _run_tool_requests(
             continue
         total_tool_calls += 1
         tool_counts[family] = tool_counts.get(family, 0) + 1
+        if used_signatures is not None:
+            used_signatures.add(signature)
         reserved.append(
             _ReservedToolRequest(
                 index=index,
@@ -894,6 +1273,335 @@ def _candidate_identity(group: CandidateGroup) -> dict[str, Any]:
     }
 
 
+def _scoring_candidate_packet(group: CandidateGroup) -> dict[str, Any]:
+    members: list[dict[str, Any]] = []
+    for raw_member in group.context.get("members") or []:
+        if not isinstance(raw_member, dict):
+            continue
+        members.append(
+            {
+                key: raw_member.get(key)
+                for key in [
+                    "entity_id",
+                    "canonical_link",
+                    "binding_confidence",
+                    "context_preview",
+                    "readme_excerpt_available",
+                    "source_families",
+                ]
+                if raw_member.get(key) not in (None, "", [], {})
+            }
+        )
+    return {
+        "identity": _candidate_identity(group),
+        "hard_facts": {
+            "level": group.level,
+            "source_families": list(group.source_families),
+            "member_count": len(group.member_entity_ids),
+        },
+        "context_summary": {"members": members},
+    }
+
+
+def _context_evidence_rows(group: CandidateGroup) -> list[dict[str, Any]]:
+    evidence: list[dict[str, Any]] = []
+    for raw_row in group.context.get("evidence_rows") or []:
+        if not isinstance(raw_row, dict):
+            continue
+        row = dict(raw_row)
+        row["trust"] = "external_untrusted"
+        row["decision_value"] = _evidence_decision_value(row)
+        evidence.append(row)
+    for member_index, raw_member in enumerate(group.context.get("members") or []):
+        if not isinstance(raw_member, dict):
+            continue
+        for bullet_index, raw_bullet in enumerate(
+            raw_member.get("evidence_bullets") or []
+        ):
+            if not isinstance(raw_bullet, dict):
+                continue
+            evidence.append(
+                {
+                    "evidence_id": f"evidence:member:{member_index}:{bullet_index}",
+                    "source": str(raw_bullet.get("family") or "candidate_context"),
+                    "family": str(raw_bullet.get("family") or ""),
+                    "claim": str(
+                        raw_bullet.get("label")
+                        or raw_bullet.get("note")
+                        or raw_bullet
+                    ),
+                    "source_refs": raw_bullet.get("source_refs") or [],
+                    "trust": "external_untrusted",
+                    "decision_value": _evidence_decision_value(raw_bullet),
+                }
+            )
+    return evidence
+
+
+def _evidence_decision_value(row: Mapping[str, Any]) -> int:
+    family = str(row.get("family") or row.get("source") or "").lower()
+    metric = str(row.get("metric_name") or row.get("metric") or "").lower()
+    if "readme" in family or "readme" in metric:
+        return 95
+    if any(value in metric for value in ["manifest", "package", "workflow"]):
+        return 90
+    if family in {"github", "github_api", "npm", "package_family"}:
+        return 75
+    if family in {"product_hunt", "hn", "x_social"}:
+        return 60
+    return 50
+
+
+def _initial_information_sufficiency(group: CandidateGroup) -> dict[str, str]:
+    members = [
+        row
+        for row in group.context.get("members") or []
+        if isinstance(row, dict)
+    ]
+    has_readme = any(bool(row.get("readme_excerpt_available")) for row in members)
+    has_context = any(bool(str(row.get("context_preview") or "").strip()) for row in members)
+    evidence_rows = _context_evidence_rows(group)
+    evidence_families = {
+        str(row.get("family") or row.get("source") or "")
+        for row in evidence_rows
+        if row.get("family") or row.get("source")
+    }
+    canonical_key = str(group.canonical_key or "")
+    has_verified_identity = bool(group.canonical_link) and not canonical_key.startswith(
+        "name:"
+    )
+    return {
+        "identity": "strong"
+        if has_verified_identity
+        else "medium"
+        if group.canonical_link
+        else "weak",
+        "workflow_shift": "strong"
+        if has_readme
+        else "medium"
+        if has_context
+        else "weak",
+        "technical_substance": "strong"
+        if has_readme
+        else "medium"
+        if has_context or evidence_rows
+        else "weak",
+        "product_market_fit": "medium" if has_context or evidence_rows else "weak",
+        "momentum": "strong"
+        if len(evidence_families) >= 2
+        else "medium"
+        if evidence_rows
+        else "weak",
+    }
+
+
+def _has_rich_first_party_context(group: CandidateGroup) -> bool:
+    sufficiency = _initial_information_sufficiency(group)
+    return (
+        sufficiency["identity"] == "strong"
+        and sufficiency["workflow_shift"] == "strong"
+        and sufficiency["technical_substance"] == "strong"
+    )
+
+
+def _cannot_score_response(reason: str) -> dict[str, Any]:
+    return {
+        "action": "final",
+        "information_sufficiency": {
+            "identity": "weak",
+            "workflow_shift": "weak",
+            "technical_substance": "weak",
+            "product_market_fit": "weak",
+            "momentum": "weak",
+        },
+        "score": {
+            "object_type": "unknown",
+            "is_product_or_repo": False,
+            "axes": {
+                "workflow_shift": 0,
+                "technical_substance": 0,
+                "product_market_fit": 0,
+                "momentum": 0,
+                "confidence": 0,
+                "risk_penalty": 0,
+                "derivative_news_penalty": 0,
+            },
+            "supporting_evidence": [],
+            "negative_evidence": [],
+            "known_gaps": [str(reason)[:240]],
+            "primary_reason": "Insufficient attributable context",
+            "rationale_short": str(reason)[:1_000],
+            "topic_tags": [],
+            "caveats": ["Candidate was not sent to the model."],
+            "should_print": False,
+        },
+    }
+
+
+def _remaining_budget_payload(
+    limits: InvestigatorLimits,
+    *,
+    turn_index: int,
+    total_tool_calls: int,
+    tool_counts: Mapping[str, int],
+) -> dict[str, Any]:
+    return {
+        "turns": max(0, int(limits.max_investigation_turns) - int(turn_index)),
+        "tool_calls": max(
+            0, int(limits.max_tool_calls_per_candidate) - int(total_tool_calls)
+        ),
+        "family_tool_calls": {
+            "web_search": max(
+                0,
+                int(limits.max_web_search_calls_per_candidate)
+                - int(tool_counts.get("web_search", 0)),
+            ),
+            "github_file": max(
+                0,
+                int(limits.max_github_file_calls_per_candidate)
+                - int(tool_counts.get("github_file", 0)),
+            ),
+            "homepage": max(
+                0,
+                int(limits.max_homepage_fetches_per_candidate)
+                - int(tool_counts.get("homepage", 0)),
+            ),
+        },
+    }
+
+
+def _normalize_information_sufficiency(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    allowed = {"weak", "medium", "strong"}
+    normalized: dict[str, str] = {}
+    for key in [
+        "identity",
+        "workflow_shift",
+        "technical_substance",
+        "product_market_fit",
+        "momentum",
+    ]:
+        level = str(value.get(key) or "")
+        if level in allowed:
+            normalized[key] = level
+    return normalized if len(normalized) == 5 else {}
+
+
+def _normalize_information_need(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        question = str(value.get("question") or "").strip()
+        target_axes = _string_list(value.get("target_axes"), 7, 40)
+        impact = str(value.get("expected_decision_impact") or "").strip()
+        if question:
+            return {
+                "question": question[:1_000],
+                "target_axes": target_axes,
+                "expected_decision_impact": impact[:1_000],
+            }
+    question = str(value or "").strip()
+    if not question:
+        return {}
+    return {
+        "question": question[:1_000],
+        "target_axes": [],
+        "expected_decision_impact": "",
+    }
+
+
+def _tool_request_signature(request: Mapping[str, Any]) -> str:
+    name = str(request.get("name") or "").strip()
+    arguments = request.get("arguments")
+    if not isinstance(arguments, dict):
+        arguments = {}
+    return f"{name}:{to_json(arguments)}"
+
+
+def _project_tool_observations(
+    trace_rows: list[dict[str, Any]],
+    *,
+    active_specs: Mapping[str, ToolSpec],
+    turn_index: int,
+) -> list[dict[str, Any]]:
+    observations: list[dict[str, Any]] = []
+    for request_index, row in enumerate(trace_rows):
+        observation_id = f"tool:t{turn_index}:{request_index}"
+        name = str(row.get("tool") or "")
+        arguments = row.get("arguments") if isinstance(row.get("arguments"), dict) else {}
+        result = row.get("result") if isinstance(row.get("result"), dict) else {}
+        projected_result = {**result, "status": str(row.get("status") or "error")}
+        spec = active_specs.get(name)
+        if spec is not None:
+            try:
+                observation = spec.project_result(
+                    projected_result,
+                    observation_id=observation_id,
+                    arguments=arguments,
+                )
+            except Exception as exc:
+                observation = {
+                    "observation_id": observation_id,
+                    "tool": name,
+                    "status": "projection_error",
+                    "trust": "external_untrusted",
+                    "provenance": {},
+                    "facts": {},
+                    "excerpt": sanitize_text(exc),
+                    "truncated": False,
+                    "relevant_axes": ["confidence"],
+                }
+        else:
+            observation = {
+                "observation_id": observation_id,
+                "tool": name,
+                "status": str(row.get("status") or "error"),
+                "trust": "external_untrusted",
+                "provenance": {"arguments": arguments},
+                "facts": {},
+                "excerpt": sanitize_text(result, max_chars=2_000),
+                "truncated": False,
+                "relevant_axes": ["confidence"],
+            }
+        observation["requested_turn"] = turn_index
+        observation["request_index"] = request_index
+        observations.append(observation)
+    return observations
+
+
+def _complete_json_with_contract(
+    provider: Any,
+    *,
+    task: str,
+    prompt_version: str,
+    input_payload: dict[str, Any],
+    system_prompt: str,
+    request_contract: LLMRequestContract,
+    call_context: ModelCallTelemetryContext | None = None,
+) -> dict[str, Any]:
+    parameters = inspect.signature(provider.complete_json).parameters.values()
+    accepts_contract = any(
+        parameter.name == "request_contract"
+        or parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
+    kwargs: dict[str, Any] = {
+        "task": task,
+        "prompt_version": prompt_version,
+        "input_payload": input_payload,
+        "system_prompt": system_prompt,
+    }
+    if accepts_contract:
+        kwargs["request_contract"] = request_contract
+    accepts_call_context = any(
+        parameter.name == "call_context"
+        or parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
+    if accepts_call_context and call_context is not None:
+        kwargs["call_context"] = call_context
+    return provider.complete_json(**kwargs)
+
+
 def major_company_label_for_row(row: dict[str, Any]) -> str:
     group = row.get("group")
     if group is None:
@@ -981,44 +1689,11 @@ def _limits_payload(limits: InvestigatorLimits) -> dict[str, int]:
 
 
 def _turn_schema() -> dict[str, Any]:
-    return {
-        "action": "use_tools|final",
-        "information_need": "string",
-        "tool_requests": [{"name": "string", "arguments": {}}],
-        "score": {
-            "object_type": "product|repo|package|research_tool|model_release|article|news|unknown",
-            "is_product_or_repo": "boolean",
-            "axes": {
-                "workflow_shift": "0..100",
-                "technical_substance": "0..100",
-                "product_market_fit": "0..100",
-                "momentum": "0..100",
-                "confidence": "0..100",
-                "risk_penalty": "0..25",
-                "derivative_news_penalty": "0..25",
-            },
-            "supporting_evidence": ["string"],
-            "negative_evidence": ["string"],
-            "known_gaps": ["string"],
-            "primary_reason": "string",
-            "rationale_short": "string",
-            "topic_tags": ["string"],
-            "caveats": ["string"],
-            "should_print": "boolean",
-        },
-    }
+    return scoring_turn_output_schema_v2()
 
 
 def _brief_schema() -> dict[str, Any]:
-    return {
-        "category": {"primary": "string", "tags": ["string"]},
-        "headline": "Chinese one-line brief headline",
-        "core_highlights": [
-            "1-3 concise Chinese items around workflow, technical substance, or product wedge"
-        ],
-        "use_cases": ["1-4 concise Chinese use cases"],
-        "caveat": "optional Chinese caveat",
-    }
+    return brief_writer_output_schema_v1()
 
 
 def _response_shape(response: dict[str, Any]) -> dict[str, str]:

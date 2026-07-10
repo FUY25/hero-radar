@@ -438,9 +438,12 @@ test('settingsPanelDefs includes Layer 2 settings when config has layer2', () =>
     config: {
       layer2: {
         enabled: true,
-        edge_scout_model: 'kimi-k2.5',
-        scoring_model: 'kimi-k2.5',
-        deepdive_model: 'kimi-k2.6',
+        routing: {},
+        scoring_agent: { model: 'kimi-k2.5' },
+        brief_writer: { model: 'kimi-k2.5' },
+        tool_runtime: {},
+        edge_scout: { model: 'kimi-k2.5' },
+        legacy_deepdive: { model: 'kimi-k2.6' },
       },
     },
   });
@@ -452,36 +455,51 @@ test('layer2RunOptionsFromConfig maps settings to run payload defaults', () => {
   const options = layer2RunOptionsFromConfig({
     layer2: {
       enabled: true,
-      edge_scout_model: 'kimi-k2.5',
-      scoring_model: 'kimi-k2.5',
-      deepdive_model: 'kimi-k2.6',
-      max_edge_watch_scout: 11,
-      max_scored_candidates: 22,
-      max_deepdives_per_run: 3,
-      deepdive_min_l2_score: 71,
-      enable_kimi_web_search: true,
-      max_web_search_calls_per_candidate: 4,
+      routing: {
+        max_edge_watch_scout: 11,
+        max_scored_candidates: 22,
+        max_deepdives_per_run: 3,
+        deepdive_min_l2_score: 71,
+      },
+      scoring_agent: {
+        model: 'score-model',
+        tool_budget: { max_web_search_calls_per_candidate: 4 },
+      },
+      brief_writer: { enabled: true, model: 'brief-model' },
+      tool_runtime: { enable_kimi_web_search: true },
+      edge_scout: { enabled: false, model: 'scout-model' },
+      legacy_deepdive: { enabled: false, model: 'deepdive-model' },
     },
   });
 
   assert.deepEqual(
     {
       run_layer2: options.run_layer2,
+      layer2_enable_edge_scout: options.layer2_enable_edge_scout,
+      layer2_enable_briefs: options.layer2_enable_briefs,
+      layer2_enable_legacy_deepdive: options.layer2_enable_legacy_deepdive,
       layer2_scout_limit: options.layer2_scout_limit,
       layer2_scoring_limit: options.layer2_scoring_limit,
       layer2_deepdive_limit: options.layer2_deepdive_limit,
       layer2_deepdive_min_l2_score: options.layer2_deepdive_min_l2_score,
+      layer2_scoring_model: options.layer2_scoring_model,
+      layer2_brief_model: options.layer2_brief_model,
       layer2_deepdive_model: options.layer2_deepdive_model,
       layer2_enable_kimi_web_search: options.layer2_enable_kimi_web_search,
       layer2_max_web_search_calls: options.layer2_max_web_search_calls,
     },
     {
       run_layer2: true,
+      layer2_enable_edge_scout: false,
+      layer2_enable_briefs: true,
+      layer2_enable_legacy_deepdive: false,
       layer2_scout_limit: 11,
       layer2_scoring_limit: 22,
       layer2_deepdive_limit: 3,
       layer2_deepdive_min_l2_score: 71,
-      layer2_deepdive_model: 'kimi-k2.6',
+      layer2_scoring_model: 'score-model',
+      layer2_brief_model: 'brief-model',
+      layer2_deepdive_model: 'deepdive-model',
       layer2_enable_kimi_web_search: true,
       layer2_max_web_search_calls: 4,
     },
@@ -492,7 +510,7 @@ test('layer2RunOptionsFromConfig preserves zero scoring limit as no cap', () => 
   const options = layer2RunOptionsFromConfig({
     layer2: {
       enabled: true,
-      max_scored_candidates: 0,
+      routing: { max_scored_candidates: 0 },
     },
   });
 

@@ -264,6 +264,8 @@ def query_feed_payload(feed_run_id: str | None = None) -> dict[str, Any]:
                        g.source_families_json, g.context_json,
                        s.l2_score, s.axes_json, s.primary_reason,
                        s.topic_tags_json, s.rationale_short, s.caveats_json,
+                       s.supporting_claims_json, s.negative_claims_json,
+                       s.known_gaps_json,
                        d.summary_json, b.brief_json, ff.vote
                 from l2_feed_items fi
                 join l2_candidate_groups g
@@ -360,9 +362,22 @@ def _feed_item(row: tuple[Any, ...]) -> dict[str, Any]:
         "topic_tags": json_loads(row[15], []),
         "rationale_short": row[16],
         "caveats": json_loads(row[17], []),
-        "deepdive": json_loads(row[18], {}) if row[18] else None,
-        "deepdive_brief": json_loads(row[19], {}) if row[19] else None,
-        "feedback": row[20],
+        "supporting_claims": json_loads(row[18], []),
+        "negative_claims": json_loads(row[19], []),
+        "known_gaps": json_loads(row[20], []),
+        "supporting_evidence": [
+            str(claim.get("claim") or "")
+            for claim in json_loads(row[18], [])
+            if isinstance(claim, dict) and claim.get("claim")
+        ],
+        "negative_evidence": [
+            str(claim.get("claim") or "")
+            for claim in json_loads(row[19], [])
+            if isinstance(claim, dict) and claim.get("claim")
+        ],
+        "deepdive": json_loads(row[21], {}) if row[21] else None,
+        "deepdive_brief": json_loads(row[22], {}) if row[22] else None,
+        "feedback": row[23],
     }
 
 
@@ -443,15 +458,49 @@ def build_run_command(payload: Any) -> list[str]:
         cmd.append("--run-layer2")
     if options.get("layer2_enable_kimi_web_search"):
         cmd.append("--layer2-enable-kimi-web-search")
+    boolean_layer2_options = {
+        "layer2_enable_edge_scout": (
+            "--layer2-enable-edge-scout",
+            "--layer2-disable-edge-scout",
+        ),
+        "layer2_enable_briefs": (
+            "--layer2-enable-briefs",
+            "--layer2-no-briefs",
+        ),
+        "layer2_enable_legacy_deepdive": (
+            "--layer2-enable-legacy-deepdive",
+            "--layer2-disable-legacy-deepdive",
+        ),
+    }
+    for key, (true_flag, false_flag) in boolean_layer2_options.items():
+        if key not in options:
+            continue
+        value = options[key]
+        if not isinstance(value, bool):
+            raise ValueError(f"{key} must be a boolean")
+        cmd.append(true_flag if value else false_flag)
 
     string_options = {
         "run_id": "--run-id",
         "now": "--now",
         "llm_model": "--llm-model",
         "x_credible_handles": "--x-credible-handles",
+        "layer2_scout_provider": "--layer2-scout-provider",
         "layer2_scout_model": "--layer2-scout-model",
+        "layer2_scoring_provider": "--layer2-scoring-provider",
         "layer2_scoring_model": "--layer2-scoring-model",
+        "layer2_scoring_prompt_id": "--layer2-scoring-prompt-id",
+        "layer2_scoring_prompt_version": "--layer2-scoring-prompt-version",
+        "layer2_scoring_output_schema_version": "--layer2-scoring-output-schema-version",
+        "layer2_scoring_context_policy_version": "--layer2-scoring-context-policy-version",
+        "layer2_brief_provider": "--layer2-brief-provider",
+        "layer2_brief_model": "--layer2-brief-model",
+        "layer2_brief_prompt_id": "--layer2-brief-prompt-id",
+        "layer2_brief_prompt_version": "--layer2-brief-prompt-version",
+        "layer2_brief_output_schema_version": "--layer2-brief-output-schema-version",
+        "layer2_deepdive_provider": "--layer2-deepdive-provider",
         "layer2_deepdive_model": "--layer2-deepdive-model",
+        "layer2_tool_registry_version": "--layer2-tool-registry-version",
     }
     for key, flag in string_options.items():
         value = options.get(key)
@@ -472,7 +521,10 @@ def build_run_command(payload: Any) -> list[str]:
         "enrich_readme_limit": "--enrich-readme-limit",
         "layer2_scout_limit": "--layer2-scout-limit",
         "layer2_scoring_limit": "--layer2-scoring-limit",
+        "layer2_max_total_scoring_candidates": "--layer2-max-total-scoring-candidates",
         "layer2_deepdive_limit": "--layer2-deepdive-limit",
+        "layer2_brief_target_count": "--layer2-brief-target-count",
+        "layer2_brief_max_count": "--layer2-brief-max-count",
         "layer2_max_tool_calls": "--layer2-max-tool-calls",
         "layer2_max_web_search_calls": "--layer2-max-web-search-calls",
         "layer2_max_repo_files": "--layer2-max-repo-files",
@@ -485,6 +537,23 @@ def build_run_command(payload: Any) -> list[str]:
         "layer2_github_tool_concurrency": "--layer2-github-tool-concurrency",
         "layer2_homepage_tool_concurrency": "--layer2-homepage-tool-concurrency",
         "layer2_web_search_tool_concurrency": "--layer2-web-search-tool-concurrency",
+        "layer2_scoring_timeout_seconds": "--layer2-scoring-timeout-seconds",
+        "layer2_brief_timeout_seconds": "--layer2-brief-timeout-seconds",
+        "layer2_scout_timeout_seconds": "--layer2-scout-timeout-seconds",
+        "layer2_deepdive_timeout_seconds": "--layer2-deepdive-timeout-seconds",
+        "layer2_web_search_timeout_seconds": "--layer2-web-search-timeout-seconds",
+        "layer2_scoring_max_output_tokens": "--layer2-scoring-max-output-tokens",
+        "layer2_brief_max_output_tokens": "--layer2-brief-max-output-tokens",
+        "layer2_max_investigation_turns": "--layer2-max-investigation-turns",
+        "layer2_max_scoring_attempts": "--layer2-max-scoring-attempts",
+        "layer2_max_evidence_rows_per_fetch": "--layer2-max-evidence-rows-per-fetch",
+        "layer2_max_github_file_chars": "--layer2-max-github-file-chars",
+        "layer2_max_homepage_chars": "--layer2-max-homepage-chars",
+        "layer2_max_web_results": "--layer2-max-web-results",
+        "layer2_legacy_max_tool_calls": "--layer2-legacy-max-tool-calls",
+        "layer2_legacy_max_web_search_calls": "--layer2-legacy-max-web-search-calls",
+        "layer2_legacy_max_repo_files": "--layer2-legacy-max-repo-files",
+        "layer2_legacy_max_pages": "--layer2-legacy-max-pages",
     }
     for key, flag in integer_options.items():
         value = options.get(key)
@@ -494,6 +563,8 @@ def build_run_command(payload: Any) -> list[str]:
             cmd.extend([flag, str(value)])
     float_options = {
         "layer2_deepdive_min_l2_score": "--layer2-deepdive-min-l2-score",
+        "layer2_brief_min_score": "--layer2-brief-min-score",
+        "layer2_score_only_min_score": "--layer2-score-only-min-score",
         "decision_io_rate_limit_per_second": "--decision-io-rate-limit-per-second",
         "layer2_github_tool_rate_limit_per_second": "--layer2-github-tool-rate-limit-per-second",
         "layer2_homepage_tool_rate_limit_per_second": "--layer2-homepage-tool-rate-limit-per-second",
@@ -505,6 +576,14 @@ def build_run_command(payload: Any) -> list[str]:
             if not isinstance(value, (int, float)) or isinstance(value, bool):
                 raise ValueError(f"{key} must be numeric")
             cmd.extend([flag, str(value)])
+    known_paradigm_keys = options.get("layer2_known_paradigm_keys")
+    if known_paradigm_keys is not None:
+        if not isinstance(known_paradigm_keys, list) or not all(
+            isinstance(item, str) for item in known_paradigm_keys
+        ):
+            raise ValueError("layer2_known_paradigm_keys must be a list of strings")
+        for item in known_paradigm_keys:
+            cmd.extend(["--layer2-known-paradigm-key", item])
     return cmd
 
 

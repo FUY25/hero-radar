@@ -185,7 +185,21 @@ class PipelineSourcesTest(unittest.TestCase):
 
         self.assertFalse(config["apify"]["enabled"])
         self.assertTrue(config["layer2"]["enabled"])
-        self.assertEqual(config["layer2"]["max_scored_candidates"], 0)
+        self.assertEqual(
+            set(config["layer2"]),
+            {
+                "enabled",
+                "routing",
+                "scoring_agent",
+                "brief_writer",
+                "tool_runtime",
+                "edge_scout",
+                "legacy_deepdive",
+            },
+        )
+        self.assertEqual(config["layer2"]["routing"]["max_scored_candidates"], 0)
+        self.assertFalse(config["layer2"]["edge_scout"]["enabled"])
+        self.assertFalse(config["layer2"]["legacy_deepdive"]["enabled"])
 
     def test_run_pipeline_writes_per_source_structured_log(self) -> None:
         import pipeline.run_pipeline as run_pipeline

@@ -50,7 +50,33 @@ def read_pipeline_config(root: Path) -> dict[str, Any]:
 
 def _layer2_config(config: dict[str, Any]) -> dict[str, Any]:
     layer2 = config.get("layer2", {})
-    return layer2 if isinstance(layer2, dict) else {}
+    if not isinstance(layer2, dict):
+        return {}
+    owners = {
+        "routing",
+        "scoring_agent",
+        "brief_writer",
+        "tool_runtime",
+        "edge_scout",
+        "legacy_deepdive",
+    }
+    invalid = sorted(set(layer2) - owners - {"enabled"})
+    if invalid:
+        raise ValueError(
+            "Layer 2 uses canonical nested component config; "
+            f"move flat keys under their owner: {', '.join(invalid)}"
+        )
+    for owner in owners:
+        if owner in layer2 and not isinstance(layer2[owner], dict):
+            raise ValueError(f"layer2.{owner} must be an object")
+    return layer2
+
+
+def _layer2_component_config(
+    layer2: dict[str, Any], owner: str
+) -> dict[str, Any]:
+    component = layer2.get(owner, {})
+    return component if isinstance(component, dict) else {}
 
 
 def _decision_config(config: dict[str, Any]) -> dict[str, Any]:
@@ -118,6 +144,21 @@ def _configured_optional_str(
     if value is None or value == "":
         return None
     return str(value)
+
+
+def _configured_optional_str_list(
+    explicit: list[str] | None,
+    cfg: dict[str, Any],
+    key: str,
+) -> list[str] | None:
+    if explicit is not None:
+        return [str(value) for value in explicit]
+    value = cfg.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise ValueError(f"{key} must be a list")
+    return [str(item) for item in value]
 
 
 def completed_stages_from_log(log_path: Path) -> set[str]:
@@ -281,9 +322,30 @@ def layer2_command(
     scout_limit: int,
     scoring_limit: int,
     deepdive_limit: int,
+    max_total_scoring_candidates: int | None = None,
     deepdive_min_l2_score: float | None = None,
+    brief_min_score: float | None = None,
+    score_only_min_score: float | None = None,
+    brief_target_count: int | None = None,
+    brief_max_count: int | None = None,
+    known_paradigm_keys: list[str] | None = None,
+    enable_edge_scout: bool = False,
+    enable_briefs: bool = True,
+    enable_legacy_deepdive: bool = False,
+    scout_provider: str | None = None,
     scout_model: str | None = None,
+    scoring_provider: str | None = None,
     scoring_model: str | None = None,
+    scoring_prompt_id: str | None = None,
+    scoring_prompt_version: str | None = None,
+    scoring_output_schema_version: str | None = None,
+    scoring_context_policy_version: str | None = None,
+    brief_provider: str | None = None,
+    brief_model: str | None = None,
+    brief_prompt_id: str | None = None,
+    brief_prompt_version: str | None = None,
+    brief_output_schema_version: str | None = None,
+    deepdive_provider: str | None = None,
     deepdive_model: str | None = None,
     enable_kimi_web_search: bool = False,
     max_tool_calls: int | None = None,
@@ -301,6 +363,33 @@ def layer2_command(
     github_tool_rate_limit_per_second: float | None = None,
     homepage_tool_rate_limit_per_second: float | None = None,
     web_search_tool_rate_limit_per_second: float | None = None,
+    scoring_timeout_seconds: int | None = None,
+    brief_timeout_seconds: int | None = None,
+    scout_timeout_seconds: int | None = None,
+    deepdive_timeout_seconds: int | None = None,
+    web_search_timeout_seconds: int | None = None,
+    scoring_max_output_tokens: int | None = None,
+    brief_max_output_tokens: int | None = None,
+    max_investigation_turns: int | None = None,
+    max_scoring_attempts: int | None = None,
+    enable_direct_final: bool = False,
+    max_context_tokens: int | None = None,
+    context_safety_margin: int | None = None,
+    identity_token_allocation: int | None = None,
+    evidence_summary_token_allocation: int | None = None,
+    top_evidence_token_allocation: int | None = None,
+    previous_turn_token_allocation: int | None = None,
+    tool_observation_token_allocation: int | None = None,
+    recent_raw_tool_result_count: int | None = None,
+    tool_registry_version: str | None = None,
+    max_evidence_rows_per_fetch: int | None = None,
+    max_github_file_chars: int | None = None,
+    max_homepage_chars: int | None = None,
+    max_web_results: int | None = None,
+    legacy_max_tool_calls: int | None = None,
+    legacy_max_web_search_calls: int | None = None,
+    legacy_max_repo_files: int | None = None,
+    legacy_max_pages: int | None = None,
     finalize_stale_running_before: str | None = None,
 ) -> list[str]:
     cmd = [
@@ -320,14 +409,48 @@ def layer2_command(
     ]
     if deepdive_min_l2_score is not None:
         cmd.extend(["--deepdive-min-l2-score", str(deepdive_min_l2_score)])
-    if scout_model:
-        cmd.extend(["--scout-model", scout_model])
-    if scoring_model:
-        cmd.extend(["--scoring-model", scoring_model])
-    if deepdive_model:
-        cmd.extend(["--deepdive-model", deepdive_model])
+    optional_routing_values = (
+        ("--max-total-scoring-candidates", max_total_scoring_candidates),
+        ("--brief-min-score", brief_min_score),
+        ("--score-only-min-score", score_only_min_score),
+        ("--brief-target-count", brief_target_count),
+        ("--brief-max-count", brief_max_count),
+    )
+    for flag, value in optional_routing_values:
+        if value is not None:
+            cmd.extend([flag, str(value)])
+    for key in known_paradigm_keys or []:
+        cmd.extend(["--known-paradigm-key", str(key)])
+    if enable_edge_scout:
+        cmd.append("--enable-edge-scout")
+    if not enable_briefs:
+        cmd.append("--no-briefs")
+    if enable_legacy_deepdive:
+        cmd.append("--enable-legacy-deepdive")
+    string_options = (
+        ("--scout-provider", scout_provider),
+        ("--scout-model", scout_model),
+        ("--scoring-provider", scoring_provider),
+        ("--scoring-model", scoring_model),
+        ("--scoring-prompt-id", scoring_prompt_id),
+        ("--scoring-prompt-version", scoring_prompt_version),
+        ("--scoring-output-schema-version", scoring_output_schema_version),
+        ("--scoring-context-policy-version", scoring_context_policy_version),
+        ("--brief-provider", brief_provider),
+        ("--brief-model", brief_model),
+        ("--brief-prompt-id", brief_prompt_id),
+        ("--brief-prompt-version", brief_prompt_version),
+        ("--brief-output-schema-version", brief_output_schema_version),
+        ("--deepdive-provider", deepdive_provider),
+        ("--deepdive-model", deepdive_model),
+    )
+    for flag, value in string_options:
+        if value:
+            cmd.extend([flag, value])
     if enable_kimi_web_search:
         cmd.append("--enable-kimi-web-search")
+    if enable_direct_final:
+        cmd.append("--enable-direct-final")
     if max_tool_calls is not None:
         cmd.extend(["--max-tool-calls-per-candidate", str(max_tool_calls)])
     if max_web_search_calls is not None:
@@ -340,6 +463,19 @@ def layer2_command(
         cmd.extend(["--max-hn-thread-fetches-per-candidate", str(max_hn_thread_fetches)])
     if max_x_context_fetches is not None:
         cmd.extend(["--max-x-context-fetches-per-candidate", str(max_x_context_fetches)])
+    context_budget_options = (
+        ("--max-context-tokens", max_context_tokens),
+        ("--context-safety-margin", context_safety_margin),
+        ("--identity-token-allocation", identity_token_allocation),
+        ("--evidence-summary-token-allocation", evidence_summary_token_allocation),
+        ("--top-evidence-token-allocation", top_evidence_token_allocation),
+        ("--previous-turn-token-allocation", previous_turn_token_allocation),
+        ("--tool-observation-token-allocation", tool_observation_token_allocation),
+        ("--recent-raw-tool-result-count", recent_raw_tool_result_count),
+    )
+    for flag, value in context_budget_options:
+        if value is not None:
+            cmd.extend([flag, str(value)])
     concurrency_options = (
         ("--scoring-concurrency", scoring_concurrency),
         ("--brief-concurrency", brief_concurrency),
@@ -347,6 +483,26 @@ def layer2_command(
         ("--github-tool-concurrency", github_tool_concurrency),
         ("--homepage-tool-concurrency", homepage_tool_concurrency),
         ("--web-search-tool-concurrency", web_search_tool_concurrency),
+        ("--scoring-timeout-seconds", scoring_timeout_seconds),
+        ("--brief-timeout-seconds", brief_timeout_seconds),
+        ("--scout-timeout-seconds", scout_timeout_seconds),
+        ("--deepdive-timeout-seconds", deepdive_timeout_seconds),
+        ("--web-search-timeout-seconds", web_search_timeout_seconds),
+        ("--scoring-max-output-tokens", scoring_max_output_tokens),
+        ("--brief-max-output-tokens", brief_max_output_tokens),
+        ("--max-investigation-turns", max_investigation_turns),
+        ("--max-scoring-attempts", max_scoring_attempts),
+        ("--max-evidence-rows-per-fetch", max_evidence_rows_per_fetch),
+        ("--max-github-file-chars", max_github_file_chars),
+        ("--max-homepage-chars", max_homepage_chars),
+        ("--max-web-results", max_web_results),
+        ("--legacy-max-tool-calls-per-candidate", legacy_max_tool_calls),
+        (
+            "--legacy-max-web-search-calls-per-candidate",
+            legacy_max_web_search_calls,
+        ),
+        ("--legacy-max-repo-files-per-candidate", legacy_max_repo_files),
+        ("--legacy-max-pages-per-candidate", legacy_max_pages),
     )
     for flag, value in concurrency_options:
         if value is not None:
@@ -359,6 +515,8 @@ def layer2_command(
     for flag, value in rate_options:
         if value is not None:
             cmd.extend([flag, str(max(0.0, value))])
+    if tool_registry_version:
+        cmd.extend(["--tool-registry-version", tool_registry_version])
     if finalize_stale_running_before:
         cmd.extend(["--finalize-stale-running-before", finalize_stale_running_before])
     return cmd
@@ -442,10 +600,31 @@ def run_daily(
     run_layer2: bool | None = None,
     layer2_scout_limit: int | None = None,
     layer2_scoring_limit: int | None = None,
+    layer2_max_total_scoring_candidates: int | None = None,
     layer2_deepdive_limit: int | None = None,
     layer2_deepdive_min_l2_score: float | None = None,
+    layer2_brief_min_score: float | None = None,
+    layer2_score_only_min_score: float | None = None,
+    layer2_brief_target_count: int | None = None,
+    layer2_brief_max_count: int | None = None,
+    layer2_known_paradigm_keys: list[str] | None = None,
+    layer2_enable_edge_scout: bool | None = None,
+    layer2_enable_briefs: bool | None = None,
+    layer2_enable_legacy_deepdive: bool | None = None,
+    layer2_scout_provider: str | None = None,
     layer2_scout_model: str | None = None,
+    layer2_scoring_provider: str | None = None,
     layer2_scoring_model: str | None = None,
+    layer2_scoring_prompt_id: str | None = None,
+    layer2_scoring_prompt_version: str | None = None,
+    layer2_scoring_output_schema_version: str | None = None,
+    layer2_scoring_context_policy_version: str | None = None,
+    layer2_brief_provider: str | None = None,
+    layer2_brief_model: str | None = None,
+    layer2_brief_prompt_id: str | None = None,
+    layer2_brief_prompt_version: str | None = None,
+    layer2_brief_output_schema_version: str | None = None,
+    layer2_deepdive_provider: str | None = None,
     layer2_deepdive_model: str | None = None,
     layer2_enable_kimi_web_search: bool | None = None,
     layer2_max_tool_calls: int | None = None,
@@ -463,6 +642,24 @@ def run_daily(
     layer2_github_tool_rate_limit_per_second: float | None = None,
     layer2_homepage_tool_rate_limit_per_second: float | None = None,
     layer2_web_search_tool_rate_limit_per_second: float | None = None,
+    layer2_scoring_timeout_seconds: int | None = None,
+    layer2_brief_timeout_seconds: int | None = None,
+    layer2_scout_timeout_seconds: int | None = None,
+    layer2_deepdive_timeout_seconds: int | None = None,
+    layer2_web_search_timeout_seconds: int | None = None,
+    layer2_scoring_max_output_tokens: int | None = None,
+    layer2_brief_max_output_tokens: int | None = None,
+    layer2_max_investigation_turns: int | None = None,
+    layer2_max_scoring_attempts: int | None = None,
+    layer2_tool_registry_version: str | None = None,
+    layer2_max_evidence_rows_per_fetch: int | None = None,
+    layer2_max_github_file_chars: int | None = None,
+    layer2_max_homepage_chars: int | None = None,
+    layer2_max_web_results: int | None = None,
+    layer2_legacy_max_tool_calls: int | None = None,
+    layer2_legacy_max_web_search_calls: int | None = None,
+    layer2_legacy_max_repo_files: int | None = None,
+    layer2_legacy_max_pages: int | None = None,
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
     resume: bool = False,
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
@@ -473,6 +670,19 @@ def run_daily(
     config = read_pipeline_config(active_root)
     decision_cfg = _decision_config(config)
     layer2_cfg = _layer2_config(config)
+    routing_cfg = _layer2_component_config(layer2_cfg, "routing")
+    scoring_cfg = _layer2_component_config(layer2_cfg, "scoring_agent")
+    scoring_context_budget_cfg = _layer2_component_config(
+        scoring_cfg, "context_budget"
+    )
+    brief_cfg = _layer2_component_config(layer2_cfg, "brief_writer")
+    tool_cfg = _layer2_component_config(layer2_cfg, "tool_runtime")
+    tool_families_cfg = _layer2_component_config(tool_cfg, "families")
+    github_tool_cfg = _layer2_component_config(tool_families_cfg, "github")
+    homepage_tool_cfg = _layer2_component_config(tool_families_cfg, "homepage")
+    web_search_tool_cfg = _layer2_component_config(tool_families_cfg, "web_search")
+    edge_cfg = _layer2_component_config(layer2_cfg, "edge_scout")
+    legacy_cfg = _layer2_component_config(layer2_cfg, "legacy_deepdive")
     active_decision_io_concurrency = _configured_optional_int(
         decision_io_concurrency, decision_cfg, "io_concurrency"
     )
@@ -483,90 +693,252 @@ def run_daily(
     )
     active_run_layer2 = _configured_bool(run_layer2, layer2_cfg, "enabled", False)
     active_layer2_scout_limit = _configured_int(
-        layer2_scout_limit, layer2_cfg, "max_edge_watch_scout", 50
+        layer2_scout_limit, routing_cfg, "max_edge_watch_scout", 50
     )
     active_layer2_scoring_limit = _configured_int(
-        layer2_scoring_limit, layer2_cfg, "max_scored_candidates", 150
+        layer2_scoring_limit, routing_cfg, "max_scored_candidates", 150
+    )
+    active_layer2_max_total_scoring_candidates = _configured_optional_int(
+        layer2_max_total_scoring_candidates,
+        routing_cfg,
+        "max_total_scoring_candidates",
     )
     active_layer2_deepdive_limit = _configured_int(
-        layer2_deepdive_limit, layer2_cfg, "max_deepdives_per_run", 10
+        layer2_deepdive_limit, routing_cfg, "max_deepdives_per_run", 10
     )
     active_layer2_deepdive_min_l2_score = _configured_optional_float(
-        layer2_deepdive_min_l2_score, layer2_cfg, "deepdive_min_l2_score"
+        layer2_deepdive_min_l2_score, routing_cfg, "deepdive_min_l2_score"
+    )
+    active_layer2_brief_min_score = _configured_optional_float(
+        layer2_brief_min_score, routing_cfg, "brief_min_score"
+    )
+    active_layer2_score_only_min_score = _configured_optional_float(
+        layer2_score_only_min_score, routing_cfg, "score_only_min_score"
+    )
+    active_layer2_brief_target_count = _configured_optional_int(
+        layer2_brief_target_count, routing_cfg, "brief_target_count"
+    )
+    active_layer2_brief_max_count = _configured_optional_int(
+        layer2_brief_max_count, routing_cfg, "brief_max_count"
+    )
+    active_layer2_known_paradigm_keys = _configured_optional_str_list(
+        layer2_known_paradigm_keys, routing_cfg, "known_paradigm_keys"
+    )
+    active_layer2_enable_edge_scout = _configured_bool(
+        layer2_enable_edge_scout, edge_cfg, "enabled", False
+    )
+    active_layer2_enable_briefs = _configured_bool(
+        layer2_enable_briefs, brief_cfg, "enabled", True
+    )
+    active_layer2_enable_legacy_deepdive = _configured_bool(
+        layer2_enable_legacy_deepdive, legacy_cfg, "enabled", False
+    )
+    active_layer2_scout_provider = _configured_optional_str(
+        layer2_scout_provider, edge_cfg, "provider"
     )
     active_layer2_scout_model = _configured_optional_str(
-        layer2_scout_model, layer2_cfg, "edge_scout_model"
+        layer2_scout_model, edge_cfg, "model"
+    )
+    active_layer2_scoring_provider = _configured_optional_str(
+        layer2_scoring_provider, scoring_cfg, "provider"
     )
     active_layer2_scoring_model = _configured_optional_str(
-        layer2_scoring_model, layer2_cfg, "scoring_model"
+        layer2_scoring_model, scoring_cfg, "model"
+    )
+    active_layer2_scoring_prompt_id = _configured_optional_str(
+        layer2_scoring_prompt_id, scoring_cfg, "prompt_id"
+    )
+    active_layer2_scoring_prompt_version = _configured_optional_str(
+        layer2_scoring_prompt_version, scoring_cfg, "prompt_version"
+    )
+    active_layer2_scoring_output_schema_version = _configured_optional_str(
+        layer2_scoring_output_schema_version, scoring_cfg, "output_schema_version"
+    )
+    active_layer2_scoring_context_policy_version = _configured_optional_str(
+        layer2_scoring_context_policy_version, scoring_cfg, "context_policy_version"
+    )
+    active_layer2_brief_provider = _configured_optional_str(
+        layer2_brief_provider, brief_cfg, "provider"
+    )
+    active_layer2_brief_model = _configured_optional_str(
+        layer2_brief_model, brief_cfg, "model"
+    )
+    active_layer2_brief_prompt_id = _configured_optional_str(
+        layer2_brief_prompt_id, brief_cfg, "prompt_id"
+    )
+    active_layer2_brief_prompt_version = _configured_optional_str(
+        layer2_brief_prompt_version, brief_cfg, "prompt_version"
+    )
+    active_layer2_brief_output_schema_version = _configured_optional_str(
+        layer2_brief_output_schema_version, brief_cfg, "output_schema_version"
+    )
+    active_layer2_deepdive_provider = _configured_optional_str(
+        layer2_deepdive_provider, legacy_cfg, "provider"
     )
     active_layer2_deepdive_model = _configured_optional_str(
-        layer2_deepdive_model, layer2_cfg, "deepdive_model"
+        layer2_deepdive_model, legacy_cfg, "model"
     )
     active_layer2_enable_kimi_web_search = _configured_bool(
         layer2_enable_kimi_web_search,
-        layer2_cfg,
+        tool_cfg,
         "enable_kimi_web_search",
         False,
     )
     active_layer2_max_tool_calls = _configured_optional_int(
-        layer2_max_tool_calls, layer2_cfg, "max_tool_calls_per_candidate"
+        layer2_max_tool_calls,
+        _layer2_component_config(scoring_cfg, "tool_budget"),
+        "max_calls_per_candidate",
     )
     active_layer2_max_web_search_calls = _configured_optional_int(
         layer2_max_web_search_calls,
-        layer2_cfg,
+        _layer2_component_config(scoring_cfg, "tool_budget"),
         "max_web_search_calls_per_candidate",
     )
     active_layer2_max_repo_files = _configured_optional_int(
-        layer2_max_repo_files, layer2_cfg, "max_repo_files_per_candidate"
+        layer2_max_repo_files,
+        _layer2_component_config(scoring_cfg, "tool_budget"),
+        "max_github_file_calls_per_candidate",
     )
     active_layer2_max_pages = _configured_optional_int(
-        layer2_max_pages, layer2_cfg, "max_pages_per_candidate"
+        layer2_max_pages,
+        _layer2_component_config(scoring_cfg, "tool_budget"),
+        "max_homepage_calls_per_candidate",
     )
     active_layer2_max_hn_thread_fetches = _configured_optional_int(
         layer2_max_hn_thread_fetches,
-        layer2_cfg,
+        legacy_cfg,
         "max_hn_thread_fetches_per_candidate",
     )
     active_layer2_max_x_context_fetches = _configured_optional_int(
         layer2_max_x_context_fetches,
-        layer2_cfg,
+        legacy_cfg,
         "max_x_context_fetches_per_candidate",
     )
     active_layer2_scoring_concurrency = _configured_optional_int(
-        layer2_scoring_concurrency, layer2_cfg, "scoring_concurrency"
+        layer2_scoring_concurrency, scoring_cfg, "concurrency"
     )
     active_layer2_brief_concurrency = _configured_optional_int(
-        layer2_brief_concurrency, layer2_cfg, "brief_concurrency"
+        layer2_brief_concurrency, brief_cfg, "concurrency"
     )
     active_layer2_max_parallel_tool_calls = _configured_optional_int(
         layer2_max_parallel_tool_calls,
-        layer2_cfg,
-        "max_parallel_tool_calls_per_turn",
+        _layer2_component_config(scoring_cfg, "tool_budget"),
+        "max_parallel_calls_per_turn",
     )
     active_layer2_github_tool_concurrency = _configured_optional_int(
-        layer2_github_tool_concurrency, layer2_cfg, "github_tool_concurrency"
+        layer2_github_tool_concurrency, github_tool_cfg, "max_in_flight"
     )
     active_layer2_homepage_tool_concurrency = _configured_optional_int(
-        layer2_homepage_tool_concurrency, layer2_cfg, "homepage_tool_concurrency"
+        layer2_homepage_tool_concurrency, homepage_tool_cfg, "max_in_flight"
     )
     active_layer2_web_search_tool_concurrency = _configured_optional_int(
-        layer2_web_search_tool_concurrency, layer2_cfg, "web_search_tool_concurrency"
+        layer2_web_search_tool_concurrency, web_search_tool_cfg, "max_in_flight"
     )
     active_layer2_github_tool_rate_limit_per_second = _configured_optional_float(
         layer2_github_tool_rate_limit_per_second,
-        layer2_cfg,
-        "github_tool_rate_limit_per_second",
+        github_tool_cfg,
+        "starts_per_second",
     )
     active_layer2_homepage_tool_rate_limit_per_second = _configured_optional_float(
         layer2_homepage_tool_rate_limit_per_second,
-        layer2_cfg,
-        "homepage_tool_rate_limit_per_second",
+        homepage_tool_cfg,
+        "starts_per_second",
     )
     active_layer2_web_search_tool_rate_limit_per_second = _configured_optional_float(
         layer2_web_search_tool_rate_limit_per_second,
-        layer2_cfg,
-        "web_search_tool_rate_limit_per_second",
+        web_search_tool_cfg,
+        "starts_per_second",
+    )
+    active_layer2_scoring_timeout_seconds = _configured_optional_int(
+        layer2_scoring_timeout_seconds, scoring_cfg, "timeout_seconds"
+    )
+    active_layer2_brief_timeout_seconds = _configured_optional_int(
+        layer2_brief_timeout_seconds, brief_cfg, "timeout_seconds"
+    )
+    active_layer2_scout_timeout_seconds = _configured_optional_int(
+        layer2_scout_timeout_seconds, edge_cfg, "timeout_seconds"
+    )
+    active_layer2_deepdive_timeout_seconds = _configured_optional_int(
+        layer2_deepdive_timeout_seconds, legacy_cfg, "timeout_seconds"
+    )
+    active_layer2_web_search_timeout_seconds = _configured_optional_int(
+        layer2_web_search_timeout_seconds, tool_cfg, "web_search_timeout_seconds"
+    )
+    active_layer2_scoring_max_output_tokens = _configured_optional_int(
+        layer2_scoring_max_output_tokens, scoring_cfg, "max_output_tokens"
+    )
+    active_layer2_brief_max_output_tokens = _configured_optional_int(
+        layer2_brief_max_output_tokens, brief_cfg, "max_output_tokens"
+    )
+    active_layer2_max_investigation_turns = _configured_optional_int(
+        layer2_max_investigation_turns, scoring_cfg, "max_investigation_turns"
+    )
+    active_layer2_max_scoring_attempts = _configured_optional_int(
+        layer2_max_scoring_attempts, scoring_cfg, "max_scoring_attempts"
+    )
+    active_layer2_enable_direct_final = _configured_bool(
+        None, scoring_cfg, "enable_direct_final", False
+    )
+    active_layer2_max_context_tokens = _configured_optional_int(
+        None, scoring_context_budget_cfg, "max_context_tokens"
+    )
+    active_layer2_context_safety_margin = _configured_optional_int(
+        None, scoring_context_budget_cfg, "safety_margin"
+    )
+    active_layer2_identity_token_allocation = _configured_optional_int(
+        None, scoring_context_budget_cfg, "identity_allocation"
+    )
+    active_layer2_evidence_summary_token_allocation = _configured_optional_int(
+        None, scoring_context_budget_cfg, "evidence_summary_allocation"
+    )
+    active_layer2_top_evidence_token_allocation = _configured_optional_int(
+        None, scoring_context_budget_cfg, "top_evidence_allocation"
+    )
+    active_layer2_previous_turn_token_allocation = _configured_optional_int(
+        None, scoring_context_budget_cfg, "previous_turn_allocation"
+    )
+    active_layer2_tool_observation_token_allocation = _configured_optional_int(
+        None, scoring_context_budget_cfg, "tool_observation_allocation"
+    )
+    active_layer2_recent_raw_tool_result_count = _configured_optional_int(
+        None, scoring_context_budget_cfg, "recent_raw_tool_result_count"
+    )
+    active_layer2_tool_registry_version = _configured_optional_str(
+        layer2_tool_registry_version, tool_cfg, "registry_version"
+    )
+    active_layer2_max_evidence_rows_per_fetch = _configured_optional_int(
+        layer2_max_evidence_rows_per_fetch,
+        tool_cfg,
+        "max_evidence_rows_per_fetch",
+    )
+    active_layer2_max_github_file_chars = _configured_optional_int(
+        layer2_max_github_file_chars, tool_cfg, "max_github_file_chars"
+    )
+    active_layer2_max_homepage_chars = _configured_optional_int(
+        layer2_max_homepage_chars, tool_cfg, "max_homepage_chars"
+    )
+    active_layer2_max_web_results = _configured_optional_int(
+        layer2_max_web_results, tool_cfg, "max_web_results"
+    )
+    active_layer2_legacy_max_tool_calls = _configured_optional_int(
+        layer2_legacy_max_tool_calls,
+        legacy_cfg,
+        "max_tool_calls_per_candidate",
+    )
+    active_layer2_legacy_max_web_search_calls = _configured_optional_int(
+        layer2_legacy_max_web_search_calls,
+        legacy_cfg,
+        "max_web_search_calls_per_candidate",
+    )
+    active_layer2_legacy_max_repo_files = _configured_optional_int(
+        layer2_legacy_max_repo_files,
+        legacy_cfg,
+        "max_repo_files_per_candidate",
+    )
+    active_layer2_legacy_max_pages = _configured_optional_int(
+        layer2_legacy_max_pages,
+        legacy_cfg,
+        "max_pages_per_candidate",
     )
     lock_path = active_root / "data" / "run_daily.lock"
     log_path = active_root / "data" / "logs" / "run_daily" / f"{active_run_id}.jsonl"
@@ -689,9 +1061,30 @@ def run_daily(
                         scout_limit=active_layer2_scout_limit,
                         scoring_limit=active_layer2_scoring_limit,
                         deepdive_limit=active_layer2_deepdive_limit,
+                        max_total_scoring_candidates=active_layer2_max_total_scoring_candidates,
                         deepdive_min_l2_score=active_layer2_deepdive_min_l2_score,
+                        brief_min_score=active_layer2_brief_min_score,
+                        score_only_min_score=active_layer2_score_only_min_score,
+                        brief_target_count=active_layer2_brief_target_count,
+                        brief_max_count=active_layer2_brief_max_count,
+                        known_paradigm_keys=active_layer2_known_paradigm_keys,
+                        enable_edge_scout=active_layer2_enable_edge_scout,
+                        enable_briefs=active_layer2_enable_briefs,
+                        enable_legacy_deepdive=active_layer2_enable_legacy_deepdive,
+                        scout_provider=active_layer2_scout_provider,
                         scout_model=active_layer2_scout_model,
+                        scoring_provider=active_layer2_scoring_provider,
                         scoring_model=active_layer2_scoring_model,
+                        scoring_prompt_id=active_layer2_scoring_prompt_id,
+                        scoring_prompt_version=active_layer2_scoring_prompt_version,
+                        scoring_output_schema_version=active_layer2_scoring_output_schema_version,
+                        scoring_context_policy_version=active_layer2_scoring_context_policy_version,
+                        brief_provider=active_layer2_brief_provider,
+                        brief_model=active_layer2_brief_model,
+                        brief_prompt_id=active_layer2_brief_prompt_id,
+                        brief_prompt_version=active_layer2_brief_prompt_version,
+                        brief_output_schema_version=active_layer2_brief_output_schema_version,
+                        deepdive_provider=active_layer2_deepdive_provider,
                         deepdive_model=active_layer2_deepdive_model,
                         enable_kimi_web_search=active_layer2_enable_kimi_web_search,
                         max_tool_calls=active_layer2_max_tool_calls,
@@ -709,6 +1102,33 @@ def run_daily(
                         github_tool_rate_limit_per_second=active_layer2_github_tool_rate_limit_per_second,
                         homepage_tool_rate_limit_per_second=active_layer2_homepage_tool_rate_limit_per_second,
                         web_search_tool_rate_limit_per_second=active_layer2_web_search_tool_rate_limit_per_second,
+                        scoring_timeout_seconds=active_layer2_scoring_timeout_seconds,
+                        brief_timeout_seconds=active_layer2_brief_timeout_seconds,
+                        scout_timeout_seconds=active_layer2_scout_timeout_seconds,
+                        deepdive_timeout_seconds=active_layer2_deepdive_timeout_seconds,
+                        web_search_timeout_seconds=active_layer2_web_search_timeout_seconds,
+                        scoring_max_output_tokens=active_layer2_scoring_max_output_tokens,
+                        brief_max_output_tokens=active_layer2_brief_max_output_tokens,
+                        max_investigation_turns=active_layer2_max_investigation_turns,
+                        max_scoring_attempts=active_layer2_max_scoring_attempts,
+                        enable_direct_final=active_layer2_enable_direct_final,
+                        max_context_tokens=active_layer2_max_context_tokens,
+                        context_safety_margin=active_layer2_context_safety_margin,
+                        identity_token_allocation=active_layer2_identity_token_allocation,
+                        evidence_summary_token_allocation=active_layer2_evidence_summary_token_allocation,
+                        top_evidence_token_allocation=active_layer2_top_evidence_token_allocation,
+                        previous_turn_token_allocation=active_layer2_previous_turn_token_allocation,
+                        tool_observation_token_allocation=active_layer2_tool_observation_token_allocation,
+                        recent_raw_tool_result_count=active_layer2_recent_raw_tool_result_count,
+                        tool_registry_version=active_layer2_tool_registry_version,
+                        max_evidence_rows_per_fetch=active_layer2_max_evidence_rows_per_fetch,
+                        max_github_file_chars=active_layer2_max_github_file_chars,
+                        max_homepage_chars=active_layer2_max_homepage_chars,
+                        max_web_results=active_layer2_max_web_results,
+                        legacy_max_tool_calls=active_layer2_legacy_max_tool_calls,
+                        legacy_max_web_search_calls=active_layer2_legacy_max_web_search_calls,
+                        legacy_max_repo_files=active_layer2_legacy_max_repo_files,
+                        legacy_max_pages=active_layer2_legacy_max_pages,
                         finalize_stale_running_before=active_now,
                     ),
                     cwd=active_root,
@@ -775,10 +1195,61 @@ def main() -> int:
     parser.add_argument("--no-layer2", dest="run_layer2", action="store_false")
     parser.add_argument("--layer2-scout-limit", type=int, default=None)
     parser.add_argument("--layer2-scoring-limit", type=int, default=None)
+    parser.add_argument("--layer2-max-total-scoring-candidates", type=int, default=None)
     parser.add_argument("--layer2-deepdive-limit", type=int, default=None)
     parser.add_argument("--layer2-deepdive-min-l2-score", type=float, default=None)
+    parser.add_argument("--layer2-brief-min-score", type=float, default=None)
+    parser.add_argument("--layer2-score-only-min-score", type=float, default=None)
+    parser.add_argument("--layer2-brief-target-count", type=int, default=None)
+    parser.add_argument("--layer2-brief-max-count", type=int, default=None)
+    parser.add_argument("--layer2-known-paradigm-key", action="append", default=None)
+    parser.add_argument(
+        "--layer2-enable-edge-scout",
+        dest="layer2_enable_edge_scout",
+        action="store_true",
+        default=None,
+    )
+    parser.add_argument(
+        "--layer2-disable-edge-scout",
+        dest="layer2_enable_edge_scout",
+        action="store_false",
+    )
+    parser.add_argument(
+        "--layer2-enable-briefs",
+        dest="layer2_enable_briefs",
+        action="store_true",
+        default=None,
+    )
+    parser.add_argument(
+        "--layer2-no-briefs",
+        dest="layer2_enable_briefs",
+        action="store_false",
+    )
+    parser.add_argument(
+        "--layer2-enable-legacy-deepdive",
+        dest="layer2_enable_legacy_deepdive",
+        action="store_true",
+        default=None,
+    )
+    parser.add_argument(
+        "--layer2-disable-legacy-deepdive",
+        dest="layer2_enable_legacy_deepdive",
+        action="store_false",
+    )
+    parser.add_argument("--layer2-scout-provider", default=None)
     parser.add_argument("--layer2-scout-model", default=None)
+    parser.add_argument("--layer2-scoring-provider", default=None)
     parser.add_argument("--layer2-scoring-model", default=None)
+    parser.add_argument("--layer2-scoring-prompt-id", default=None)
+    parser.add_argument("--layer2-scoring-prompt-version", default=None)
+    parser.add_argument("--layer2-scoring-output-schema-version", default=None)
+    parser.add_argument("--layer2-scoring-context-policy-version", default=None)
+    parser.add_argument("--layer2-brief-provider", default=None)
+    parser.add_argument("--layer2-brief-model", default=None)
+    parser.add_argument("--layer2-brief-prompt-id", default=None)
+    parser.add_argument("--layer2-brief-prompt-version", default=None)
+    parser.add_argument("--layer2-brief-output-schema-version", default=None)
+    parser.add_argument("--layer2-deepdive-provider", default=None)
     parser.add_argument("--layer2-deepdive-model", default=None)
     parser.add_argument(
         "--layer2-enable-kimi-web-search",
@@ -806,6 +1277,24 @@ def main() -> int:
     parser.add_argument("--layer2-github-tool-rate-limit-per-second", type=float, default=None)
     parser.add_argument("--layer2-homepage-tool-rate-limit-per-second", type=float, default=None)
     parser.add_argument("--layer2-web-search-tool-rate-limit-per-second", type=float, default=None)
+    parser.add_argument("--layer2-scoring-timeout-seconds", type=int, default=None)
+    parser.add_argument("--layer2-brief-timeout-seconds", type=int, default=None)
+    parser.add_argument("--layer2-scout-timeout-seconds", type=int, default=None)
+    parser.add_argument("--layer2-deepdive-timeout-seconds", type=int, default=None)
+    parser.add_argument("--layer2-web-search-timeout-seconds", type=int, default=None)
+    parser.add_argument("--layer2-scoring-max-output-tokens", type=int, default=None)
+    parser.add_argument("--layer2-brief-max-output-tokens", type=int, default=None)
+    parser.add_argument("--layer2-max-investigation-turns", type=int, default=None)
+    parser.add_argument("--layer2-max-scoring-attempts", type=int, default=None)
+    parser.add_argument("--layer2-tool-registry-version", default=None)
+    parser.add_argument("--layer2-max-evidence-rows-per-fetch", type=int, default=None)
+    parser.add_argument("--layer2-max-github-file-chars", type=int, default=None)
+    parser.add_argument("--layer2-max-homepage-chars", type=int, default=None)
+    parser.add_argument("--layer2-max-web-results", type=int, default=None)
+    parser.add_argument("--layer2-legacy-max-tool-calls", type=int, default=None)
+    parser.add_argument("--layer2-legacy-max-web-search-calls", type=int, default=None)
+    parser.add_argument("--layer2-legacy-max-repo-files", type=int, default=None)
+    parser.add_argument("--layer2-legacy-max-pages", type=int, default=None)
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_SECONDS)
     args = parser.parse_args()
 
@@ -829,10 +1318,31 @@ def main() -> int:
         run_layer2=args.run_layer2,
         layer2_scout_limit=args.layer2_scout_limit,
         layer2_scoring_limit=args.layer2_scoring_limit,
+        layer2_max_total_scoring_candidates=args.layer2_max_total_scoring_candidates,
         layer2_deepdive_limit=args.layer2_deepdive_limit,
         layer2_deepdive_min_l2_score=args.layer2_deepdive_min_l2_score,
+        layer2_brief_min_score=args.layer2_brief_min_score,
+        layer2_score_only_min_score=args.layer2_score_only_min_score,
+        layer2_brief_target_count=args.layer2_brief_target_count,
+        layer2_brief_max_count=args.layer2_brief_max_count,
+        layer2_known_paradigm_keys=args.layer2_known_paradigm_key,
+        layer2_enable_edge_scout=args.layer2_enable_edge_scout,
+        layer2_enable_briefs=args.layer2_enable_briefs,
+        layer2_enable_legacy_deepdive=args.layer2_enable_legacy_deepdive,
+        layer2_scout_provider=args.layer2_scout_provider,
         layer2_scout_model=args.layer2_scout_model,
+        layer2_scoring_provider=args.layer2_scoring_provider,
         layer2_scoring_model=args.layer2_scoring_model,
+        layer2_scoring_prompt_id=args.layer2_scoring_prompt_id,
+        layer2_scoring_prompt_version=args.layer2_scoring_prompt_version,
+        layer2_scoring_output_schema_version=args.layer2_scoring_output_schema_version,
+        layer2_scoring_context_policy_version=args.layer2_scoring_context_policy_version,
+        layer2_brief_provider=args.layer2_brief_provider,
+        layer2_brief_model=args.layer2_brief_model,
+        layer2_brief_prompt_id=args.layer2_brief_prompt_id,
+        layer2_brief_prompt_version=args.layer2_brief_prompt_version,
+        layer2_brief_output_schema_version=args.layer2_brief_output_schema_version,
+        layer2_deepdive_provider=args.layer2_deepdive_provider,
         layer2_deepdive_model=args.layer2_deepdive_model,
         layer2_enable_kimi_web_search=args.layer2_enable_kimi_web_search,
         layer2_max_tool_calls=args.layer2_max_tool_calls,
@@ -850,6 +1360,24 @@ def main() -> int:
         layer2_github_tool_rate_limit_per_second=args.layer2_github_tool_rate_limit_per_second,
         layer2_homepage_tool_rate_limit_per_second=args.layer2_homepage_tool_rate_limit_per_second,
         layer2_web_search_tool_rate_limit_per_second=args.layer2_web_search_tool_rate_limit_per_second,
+        layer2_scoring_timeout_seconds=args.layer2_scoring_timeout_seconds,
+        layer2_brief_timeout_seconds=args.layer2_brief_timeout_seconds,
+        layer2_scout_timeout_seconds=args.layer2_scout_timeout_seconds,
+        layer2_deepdive_timeout_seconds=args.layer2_deepdive_timeout_seconds,
+        layer2_web_search_timeout_seconds=args.layer2_web_search_timeout_seconds,
+        layer2_scoring_max_output_tokens=args.layer2_scoring_max_output_tokens,
+        layer2_brief_max_output_tokens=args.layer2_brief_max_output_tokens,
+        layer2_max_investigation_turns=args.layer2_max_investigation_turns,
+        layer2_max_scoring_attempts=args.layer2_max_scoring_attempts,
+        layer2_tool_registry_version=args.layer2_tool_registry_version,
+        layer2_max_evidence_rows_per_fetch=args.layer2_max_evidence_rows_per_fetch,
+        layer2_max_github_file_chars=args.layer2_max_github_file_chars,
+        layer2_max_homepage_chars=args.layer2_max_homepage_chars,
+        layer2_max_web_results=args.layer2_max_web_results,
+        layer2_legacy_max_tool_calls=args.layer2_legacy_max_tool_calls,
+        layer2_legacy_max_web_search_calls=args.layer2_legacy_max_web_search_calls,
+        layer2_legacy_max_repo_files=args.layer2_legacy_max_repo_files,
+        layer2_legacy_max_pages=args.layer2_legacy_max_pages,
         timeout=args.timeout,
         resume=args.resume,
     )

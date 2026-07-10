@@ -10,6 +10,7 @@ from typing import Any
 
 from pipeline.decision.cache import api_cache_key, get_api_cache, put_api_cache, stable_hash
 from pipeline.decision.bounded_parallel import bounded_parallel_map
+from pipeline.decision.candidate_context import approved_github_alias_key
 from pipeline.decision.rate_limit import RateLimitedClient
 
 
@@ -37,8 +38,8 @@ def github_repo_key_from_link(value: str | None) -> str | None:
         return None
     owner, name = repo.split("/", 1)
     owner = owner.strip().lower()
-    name = name.strip().lower()
-    if not owner or not name:
+    name = name.strip().lower().removesuffix(".git")
+    if not owner or not name or "/" in name:
         return None
     return f"{owner}/{name}"
 
@@ -127,23 +128,25 @@ def fetch_and_cache_readme_excerpt(
 def _candidate_repo_keys(conn: sqlite3.Connection, run_id: str) -> list[str]:
     rows = conn.execute(
         """
-        select e.canonical_key
+        select e.entity_id, e.canonical_key
         from potential_candidates pc
         join entities e on e.entity_id = pc.entity_id
         where pc.run_id = ?
         union
-        select e.canonical_key
+        select e.entity_id, e.canonical_key
         from edge_watch_candidates ew
         join entities e on e.entity_id = ew.entity_id
         where ew.run_id = ?
-        order by 1
+        order by 1, 2
         """,
         (run_id, run_id),
     ).fetchall()
     repo_keys: list[str] = []
     seen: set[str] = set()
     for row in rows:
-        repo_key = github_repo_key_from_link(row[0])
+        canonical_key = str(row[1] or "")
+        alias_key = approved_github_alias_key(conn, str(row[0]), canonical_key)
+        repo_key = github_repo_key_from_link(canonical_key) or github_repo_key_from_link(alias_key)
         if not repo_key or repo_key in seen:
             continue
         seen.add(repo_key)

@@ -337,6 +337,22 @@ class DashboardDataApiTest(unittest.TestCase):
                         "decision_io_rate_limit_per_second": 1.5,
                         "layer2_scoring_concurrency": 6,
                         "layer2_brief_concurrency": 4,
+                        "layer2_scoring_provider": "kimi",
+                        "layer2_scoring_model": "score-model",
+                        "layer2_brief_provider": "kimi",
+                        "layer2_brief_model": "brief-model",
+                        "layer2_scoring_timeout_seconds": 91,
+                        "layer2_brief_timeout_seconds": 61,
+                        "layer2_scoring_max_output_tokens": 1800,
+                        "layer2_brief_max_output_tokens": 1000,
+                        "layer2_brief_min_score": 72,
+                        "layer2_brief_target_count": 7,
+                        "layer2_scoring_prompt_version": "scorer-v1",
+                        "layer2_brief_prompt_version": "brief-v2",
+                        "layer2_known_paradigm_keys": ["github:owner/known"],
+                        "layer2_enable_edge_scout": True,
+                        "layer2_enable_briefs": False,
+                        "layer2_enable_legacy_deepdive": True,
                         "layer2_max_parallel_tool_calls": 3,
                         "layer2_github_tool_concurrency": 5,
                         "layer2_homepage_tool_concurrency": 4,
@@ -357,6 +373,9 @@ class DashboardDataApiTest(unittest.TestCase):
         self.assertIn("--layer2-deepdive-min-l2-score", command)
         self.assertIn("71", command)
         self.assertIn("--layer2-enable-kimi-web-search", command)
+        self.assertIn("--layer2-enable-edge-scout", command)
+        self.assertIn("--layer2-no-briefs", command)
+        self.assertIn("--layer2-enable-legacy-deepdive", command)
         self.assertIn("--layer2-max-web-search-calls", command)
         self.assertIn("3", command)
         self.assertEqual(command[command.index("--decision-io-concurrency") + 1], "7")
@@ -374,9 +393,25 @@ class DashboardDataApiTest(unittest.TestCase):
             "--layer2-github-tool-rate-limit-per-second": "1.5",
             "--layer2-homepage-tool-rate-limit-per-second": "1.25",
             "--layer2-web-search-tool-rate-limit-per-second": "0.75",
+            "--layer2-scoring-provider": "kimi",
+            "--layer2-scoring-model": "score-model",
+            "--layer2-brief-provider": "kimi",
+            "--layer2-brief-model": "brief-model",
+            "--layer2-scoring-timeout-seconds": "91",
+            "--layer2-brief-timeout-seconds": "61",
+            "--layer2-scoring-max-output-tokens": "1800",
+            "--layer2-brief-max-output-tokens": "1000",
+            "--layer2-brief-min-score": "72",
+            "--layer2-brief-target-count": "7",
+            "--layer2-scoring-prompt-version": "scorer-v1",
+            "--layer2-brief-prompt-version": "brief-v2",
         }
         for flag, value in expected.items():
             self.assertEqual(command[command.index(flag) + 1], value)
+        self.assertEqual(
+            command[command.index("--layer2-known-paradigm-key") + 1],
+            "github:owner/known",
+        )
 
 
 if __name__ == "__main__":

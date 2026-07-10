@@ -251,30 +251,104 @@
   },
   "layer2": {
     "enabled": true,
-    "enable_edge_scout": false,
-    "edge_scout_model": "kimi-k2.5",
-    "scoring_model": "kimi-k2.5",
-    "deepdive_model": "kimi-k2.6",
-    "max_edge_watch_scout": 50,
-    "max_scored_candidates": 0,
-    "max_deepdives_per_run": 10,
-    "deepdive_min_l2_score": 70,
-    "enable_kimi_web_search": true,
-    "max_tool_calls_per_candidate": 8,
-    "max_web_search_calls_per_candidate": 1,
-    "max_repo_files_per_candidate": 3,
-    "max_pages_per_candidate": 1,
-    "max_hn_thread_fetches_per_candidate": 3,
-    "max_x_context_fetches_per_candidate": 5,
-    "llm_concurrency": 4,
-    "scoring_concurrency": 5,
-    "brief_concurrency": 4,
-    "max_parallel_tool_calls_per_turn": 4,
-    "github_tool_concurrency": 5,
-    "homepage_tool_concurrency": 4,
-    "web_search_tool_concurrency": 2,
-    "github_tool_rate_limit_per_second": 2.0,
-    "homepage_tool_rate_limit_per_second": 2.0,
-    "web_search_tool_rate_limit_per_second": 1.0
+    "routing": {
+      "max_edge_watch_scout": 50,
+      "max_scored_candidates": 0,
+      "max_total_scoring_candidates": null,
+      "max_deepdives_per_run": 10,
+      "deepdive_min_l2_score": 70,
+      "brief_min_score": 70,
+      "brief_target_count": 8,
+      "brief_max_count": 10,
+      "score_only_min_score": 50,
+      "known_paradigm_keys": [
+        "github:nousresearch/hermes-agent"
+      ]
+    },
+    "scoring_agent": {
+      "provider": "kimi",
+      "model": "kimi-k2.5",
+      "prompt_id": "layer2_scoring_investigator",
+      "prompt_version": "layer2-scoring-investigator-v2",
+      "output_schema_version": "layer2-scoring-output-v2",
+      "context_policy_version": "layer2-scoring-context-v1",
+      "timeout_seconds": 90,
+      "max_output_tokens": 3000,
+      "concurrency": 5,
+      "max_investigation_turns": 3,
+      "max_scoring_attempts": 3,
+      "enable_direct_final": false,
+      "context_budget": {
+        "max_context_tokens": 32000,
+        "output_reserve": 3000,
+        "safety_margin": 500,
+        "identity_allocation": 800,
+        "evidence_summary_allocation": 800,
+        "top_evidence_allocation": 2400,
+        "previous_turn_allocation": 800,
+        "tool_observation_allocation": 2400,
+        "recent_raw_tool_result_count": 1
+      },
+      "tool_budget": {
+        "max_calls_per_candidate": 8,
+        "max_parallel_calls_per_turn": 4,
+        "max_web_search_calls_per_candidate": 1,
+        "max_github_file_calls_per_candidate": 3,
+        "max_homepage_calls_per_candidate": 1
+      }
+    },
+    "brief_writer": {
+      "enabled": true,
+      "provider": "kimi",
+      "model": "kimi-k2.5",
+      "prompt_id": "layer2_brief_writer",
+      "prompt_version": "layer2-scoring-investigator-brief-v2",
+      "output_schema_version": "layer2-brief-output-v1",
+      "context_policy_version": "layer2-brief-packet-v1",
+      "timeout_seconds": 90,
+      "max_output_tokens": 1000,
+      "concurrency": 4
+    },
+    "tool_runtime": {
+      "registry_version": "layer2-tools-v1",
+      "enable_kimi_web_search": true,
+      "web_search_timeout_seconds": null,
+      "max_evidence_rows_per_fetch": 80,
+      "max_github_file_chars": 6000,
+      "max_homepage_chars": 6000,
+      "max_web_results": 5,
+      "families": {
+        "github": {
+          "max_in_flight": 5,
+          "starts_per_second": 2.0
+        },
+        "homepage": {
+          "max_in_flight": 4,
+          "starts_per_second": 2.0
+        },
+        "web_search": {
+          "max_in_flight": 2,
+          "starts_per_second": 1.0
+        }
+      }
+    },
+    "edge_scout": {
+      "enabled": false,
+      "provider": "kimi",
+      "model": "kimi-k2.5",
+      "timeout_seconds": 90
+    },
+    "legacy_deepdive": {
+      "enabled": false,
+      "provider": "kimi",
+      "model": "kimi-k2.6",
+      "timeout_seconds": 90,
+      "max_tool_calls_per_candidate": 8,
+      "max_web_search_calls_per_candidate": 1,
+      "max_repo_files_per_candidate": 3,
+      "max_pages_per_candidate": 1,
+      "max_hn_thread_fetches_per_candidate": 3,
+      "max_x_context_fetches_per_candidate": 5
+    }
   }
 }
