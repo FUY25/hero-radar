@@ -32,6 +32,7 @@ MAJOR_COMPANY_OWNERS = {
     "openai": {"openai"},
     "google": {"google", "google-deepmind", "googledeepmind", "google-research", "googleapis"},
     "microsoft": {"microsoft", "microsoftresearch"},
+    "nvidia": {"nvidia", "nvlabs"},
 }
 
 MAJOR_COMPANY_DOMAINS = {
@@ -39,6 +40,7 @@ MAJOR_COMPANY_DOMAINS = {
     "openai": {"openai.com"},
     "google": {"google.com", "deepmind.google", "ai.google"},
     "microsoft": {"microsoft.com", "azure.microsoft.com"},
+    "nvidia": {"nvidia.com", "developer.nvidia.com", "research.nvidia.com"},
 }
 
 MAJOR_COMPANY_LABELS = {
@@ -46,6 +48,7 @@ MAJOR_COMPANY_LABELS = {
     "openai": "OpenAI",
     "google": "Google",
     "microsoft": "Microsoft",
+    "nvidia": "NVIDIA",
 }
 
 

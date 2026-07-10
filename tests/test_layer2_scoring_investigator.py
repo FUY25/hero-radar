@@ -435,6 +435,14 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
                     canonical_link="https://github.com/openai/codex",
                     should_print=True,
                 ),
+                scored_row(
+                    score=87,
+                    group_id="nvidia",
+                    canonical_name="NVlabs/Sana",
+                    canonical_key="github:nvlabs/sana",
+                    canonical_link="https://github.com/NVlabs/Sana",
+                    should_print=True,
+                ),
                 scored_row(score=86, group_id="indie", should_print=True),
             ],
             min_score=70,
@@ -454,6 +462,18 @@ class Layer2ScoringInvestigatorTest(unittest.TestCase):
                 )
             ),
             "Anthropic",
+        )
+        self.assertEqual(
+            major_company_label_for_row(
+                scored_row(
+                    score=87,
+                    group_id="nvidia",
+                    canonical_name="NVlabs/Sana",
+                    canonical_key="github:nvlabs/sana",
+                    canonical_link="https://github.com/NVlabs/Sana",
+                )
+            ),
+            "NVIDIA",
         )
 
     def test_classifies_scoring_to_deepdive_routes(self):
