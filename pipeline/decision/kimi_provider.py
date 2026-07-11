@@ -39,9 +39,11 @@ def load_local_kimi_config(path: Path | None = None) -> dict[str, str]:
     }
 
 
-def kimi_temperature(model: str, requested: float) -> float:
+def kimi_temperature(
+    model: str, requested: float, *, thinking_type: str | None = None
+) -> float:
     if str(model or "").lower().startswith("kimi-k2"):
-        return 1
+        return 0.6 if thinking_type == "disabled" else 1
     return requested
 
 
@@ -100,7 +102,9 @@ class KimiProvider:
 
     @property
     def actual_temperature(self) -> float:
-        return kimi_temperature(self.model, 0)
+        return kimi_temperature(
+            self.model, 0, thinking_type=self.thinking_type
+        )
 
     @property
     def response_format(self) -> dict[str, str]:
@@ -184,7 +188,11 @@ class KimiProvider:
                     ),
                 },
             ],
-            "temperature": kimi_temperature(self.model, temperature),
+            "temperature": kimi_temperature(
+                self.model,
+                temperature,
+                thinking_type=self.thinking_type,
+            ),
         }
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
@@ -259,6 +267,12 @@ class KimiProvider:
                         f"reasoning_chars={len(str(reasoning_content or ''))})"
                     )
                 return json.loads(content)
+            except urllib.error.HTTPError as exc:
+                self.last_response_diagnostics = {
+                    "http_status": exc.code,
+                    **_http_error_diagnostics(exc),
+                }
+                last_error = exc
             except (
                 TimeoutError,
                 urllib.error.URLError,
@@ -269,6 +283,21 @@ class KimiProvider:
             ) as exc:
                 last_error = exc
         raise last_error or RuntimeError("Kimi request failed")
+
+
+def _http_error_diagnostics(exc: urllib.error.HTTPError) -> dict[str, Any]:
+    try:
+        payload = json.loads(exc.read().decode("utf-8", "replace"))
+    except (OSError, TypeError, ValueError):
+        return {"error_type": "HTTPError", "error_message": str(exc.reason)[:500]}
+    error = payload.get("error") if isinstance(payload, dict) else None
+    if not isinstance(error, dict):
+        return {"error_type": "HTTPError", "error_message": "API request rejected"}
+    return {
+        "error_type": str(error.get("type") or "HTTPError")[:120],
+        "error_code": str(error.get("code") or "")[:120],
+        "error_message": str(error.get("message") or "")[:500],
+    }
 
 
 class KimiWebSearchClient:

@@ -37,10 +37,11 @@ class KimiProviderTest(unittest.TestCase):
         )
 
         self.assertEqual(provider.max_output_tokens, 1000)
-        self.assertEqual(provider.actual_temperature, 1)
+        self.assertEqual(provider.actual_temperature, 0.6)
         self.assertEqual(provider.response_format, {"type": "json_object"})
         self.assertEqual(payload["max_tokens"], 1000)
         self.assertEqual(payload["thinking"], {"type": "disabled"})
+        self.assertEqual(payload["temperature"], 0.6)
         self.assertEqual(
             provider.request_options,
             {"thinking": {"type": "disabled"}},
