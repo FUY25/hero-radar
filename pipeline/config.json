@@ -274,6 +274,7 @@
       "context_policy_version": "layer2-scoring-context-v1",
       "timeout_seconds": 90,
       "max_output_tokens": 3000,
+      "thinking_type": "disabled",
       "concurrency": 5,
       "max_investigation_turns": 3,
       "max_scoring_attempts": 3,
@@ -307,6 +308,7 @@
       "context_policy_version": "layer2-brief-packet-v1",
       "timeout_seconds": 90,
       "max_output_tokens": 3000,
+      "thinking_type": "disabled",
       "concurrency": 4
     },
     "tool_runtime": {

@@ -27,6 +27,7 @@ class RateLimitedKimiEvalProvider:
         max_retries: int = 2,
         retry_backoff_seconds: float = 1.0,
         max_output_tokens: int = 3000,
+        thinking_type: str = "disabled",
         input_cost_per_million: float | None = None,
         cached_input_cost_per_million: float | None = None,
         output_cost_per_million: float | None = None,
@@ -44,6 +45,7 @@ class RateLimitedKimiEvalProvider:
             timeout=timeout,
             max_retries=0,
             max_output_tokens=max_output_tokens,
+            thinking_type=thinking_type,
         )
         self._limiter = limiter
         self._max_retries = max(0, int(max_retries))
@@ -88,6 +90,14 @@ class RateLimitedKimiEvalProvider:
     @property
     def response_format(self) -> dict[str, str]:
         return self._provider.response_format
+
+    @property
+    def request_options(self) -> dict[str, Any]:
+        return self._provider.request_options
+
+    @property
+    def thinking_type(self) -> str | None:
+        return self._provider.thinking_type
 
     def handshake(self) -> dict[str, Any]:
         return self._provider.handshake()

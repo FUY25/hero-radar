@@ -114,6 +114,7 @@ class LLMRequestContract:
     actual_temperature: float
     max_output_tokens: int | None
     response_format: Any
+    provider_options: Any = ()
     active_tool_versions: tuple[str, ...] = ()
     prompt_version: str = ""
     output_schema_version: str = ""
@@ -150,6 +151,11 @@ class LLMRequestContract:
         )
         object.__setattr__(
             self,
+            "provider_options",
+            freeze_json(sanitize_contract_value(self.provider_options)),
+        )
+        object.__setattr__(
+            self,
             "active_tool_versions",
             tuple(str(value) for value in self.active_tool_versions),
         )
@@ -174,6 +180,7 @@ class LLMRequestContract:
         actual_temperature: float,
         max_output_tokens: int | None,
         response_format: Mapping[str, Any] | str | None,
+        provider_options: Mapping[str, Any] | None = None,
         prompt_version: str = "",
         output_schema_version: str = "",
         tool_registry_version: str = "",
@@ -191,6 +198,7 @@ class LLMRequestContract:
             actual_temperature=actual_temperature,
             max_output_tokens=max_output_tokens,
             response_format=response_format or {},
+            provider_options=provider_options or {},
             active_tool_versions=tuple(active_tool_versions),
             prompt_version=str(prompt_version),
             output_schema_version=str(output_schema_version),
@@ -241,6 +249,7 @@ class LLMRequestContract:
                 if response_format is None
                 else response_format
             ),
+            provider_options=provider_defaults["provider_options"],
             prompt_version=prompt_version,
             output_schema_version=output_schema_version,
             tool_registry_version=tool_registry_version,
@@ -285,6 +294,7 @@ class LLMRequestContract:
             "actual_temperature": self.actual_temperature,
             "max_output_tokens": self.max_output_tokens,
             "response_format": thaw_json(self.response_format),
+            "provider_options": thaw_json(self.provider_options),
         }
 
     def fingerprint(self) -> str:
@@ -310,6 +320,7 @@ class LLMRequestContract:
             "actual_temperature": self.actual_temperature,
             "max_output_tokens": self.max_output_tokens,
             "response_format": thaw_json(self.response_format),
+            "provider_options": thaw_json(self.provider_options),
             "request_fingerprint": self.fingerprint(),
         }
 
@@ -348,6 +359,7 @@ def _provider_request_defaults(provider: Any) -> dict[str, Any]:
         "response_format": getattr(
             provider, "response_format", {"type": "json_object"}
         ),
+        "provider_options": getattr(provider, "request_options", {}),
     }
     build_payload = getattr(provider, "build_payload", None)
     if not callable(build_payload):
@@ -373,4 +385,5 @@ def _provider_request_defaults(provider: Any) -> dict[str, Any]:
         "response_format": payload.get(
             "response_format", defaults["response_format"]
         ),
+        "provider_options": defaults["provider_options"],
     }

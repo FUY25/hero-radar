@@ -57,6 +57,7 @@ class KimiProvider:
         timeout: int = 90,
         max_retries: int = 2,
         max_output_tokens: int | None = None,
+        thinking_type: str | None = None,
     ) -> None:
         local_config = load_local_kimi_config()
         self.api_key = (
@@ -83,6 +84,10 @@ class KimiProvider:
         self.max_output_tokens = (
             None if max_output_tokens is None else max(1, int(max_output_tokens))
         )
+        normalized_thinking = str(thinking_type or "").strip().lower()
+        if normalized_thinking not in {"", "enabled", "disabled"}:
+            raise ValueError("thinking_type must be enabled, disabled, or omitted")
+        self.thinking_type = normalized_thinking or None
         self.last_usage: dict[str, Any] | None = None
         self.last_cost: dict[str, Any] | float | None = None
         self.last_response_diagnostics: dict[str, Any] | None = None
@@ -100,6 +105,14 @@ class KimiProvider:
     @property
     def response_format(self) -> dict[str, str]:
         return {"type": "json_object"}
+
+    @property
+    def request_options(self) -> dict[str, Any]:
+        return (
+            {"thinking": {"type": self.thinking_type}}
+            if self.thinking_type
+            else {}
+        )
 
     def handshake(self) -> dict[str, Any]:
         host = urlparse(self.base_url).netloc
@@ -175,6 +188,8 @@ class KimiProvider:
         }
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
+        if self.thinking_type:
+            payload["thinking"] = {"type": self.thinking_type}
         active_max_tokens = (
             self.max_output_tokens if max_tokens is None else max(1, int(max_tokens))
         )

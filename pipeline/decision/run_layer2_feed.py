@@ -121,6 +121,7 @@ def _kimi_provider_factory(
     max_output_tokens = component_cfg.get(
         "max_output_tokens", default_max_output_tokens
     )
+    thinking_type = component_cfg.get("thinking_type")
 
     return lambda: KimiProvider(
         model=model,
@@ -128,6 +129,7 @@ def _kimi_provider_factory(
         max_output_tokens=(
             None if max_output_tokens is None else int(max_output_tokens)
         ),
+        thinking_type=(None if thinking_type is None else str(thinking_type)),
     )
 
 
@@ -364,6 +366,16 @@ def run_layer2_feed(
                 brief_profile_provider,
                 "max_output_tokens",
                 brief_cfg.get("max_output_tokens"),
+            ),
+            "scoring_thinking_type": getattr(
+                scoring_provider,
+                "thinking_type",
+                scoring_cfg.get("thinking_type"),
+            ),
+            "brief_thinking_type": getattr(
+                brief_profile_provider,
+                "thinking_type",
+                brief_cfg.get("thinking_type"),
             ),
             "scoring_prompt_version": str(
                 scoring_cfg.get("prompt_version")
@@ -1395,6 +1407,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--scout-model", default=DEFAULT_KIMI_SCORING_MODEL)
     parser.add_argument("--scoring-provider", default="kimi")
     parser.add_argument("--scoring-model", default=DEFAULT_KIMI_SCORING_MODEL)
+    parser.add_argument(
+        "--scoring-thinking-type",
+        choices=("enabled", "disabled"),
+        default="disabled",
+    )
     parser.add_argument("--scoring-prompt-id", default="layer2_scoring_investigator")
     parser.add_argument(
         "--scoring-prompt-version", default=DEFAULT_INVESTIGATOR_PROMPT_VERSION
@@ -1407,6 +1424,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--brief-provider", default="kimi")
     parser.add_argument("--brief-model", default=DEFAULT_KIMI_SCORING_MODEL)
+    parser.add_argument(
+        "--brief-thinking-type",
+        choices=("enabled", "disabled"),
+        default="disabled",
+    )
     parser.add_argument("--brief-prompt-id", default="layer2_brief_writer")
     parser.add_argument(
         "--brief-prompt-version", default=DEFAULT_BRIEF_PROMPT_VERSION
@@ -1495,6 +1517,7 @@ def config_from_args(args: argparse.Namespace) -> dict[str, Any]:
             "context_policy_version": args.scoring_context_policy_version,
             "timeout_seconds": args.scoring_timeout_seconds,
             "max_output_tokens": args.scoring_max_output_tokens,
+            "thinking_type": args.scoring_thinking_type,
             "concurrency": args.scoring_concurrency,
             "max_investigation_turns": args.max_investigation_turns,
             "max_scoring_attempts": args.max_scoring_attempts,
@@ -1527,6 +1550,7 @@ def config_from_args(args: argparse.Namespace) -> dict[str, Any]:
             "output_schema_version": args.brief_output_schema_version,
             "timeout_seconds": args.brief_timeout_seconds,
             "max_output_tokens": args.brief_max_output_tokens,
+            "thinking_type": args.brief_thinking_type,
             "concurrency": args.brief_concurrency,
         },
         "tool_runtime": {

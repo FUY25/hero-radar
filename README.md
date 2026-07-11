@@ -92,7 +92,7 @@ python3 -m pipeline.decision.run_layer2_component_eval --validate-only
 
 真实 Kimi eval 默认对每个 case 执行 3 个隔离、uncached trials，并通过内建 `--live-kimi` 路径标记真实 provider provenance。每个 case/trial 独立失败、独立落盘；一个模型错误、无效 final 或 tool failure 不会中断其他 case。Runner 在每个完成单元后写 checkpoint，同一 output directory 可以安全 resume，已经完成且 fingerprint 一致的 trial 不会重复调用。
 
-真实运行直接读取 production `pipeline/config.json`。如果凭据不在当前 worktree，可用 `--secrets-file` 指向现有的 0600 local secret；CLI 只记录脱敏 endpoint identity，不复制或输出 key。Kimi eval provider 为每个 trial 返回新实例并声明 `eval_cache_mode = "disabled"`，每个 HTTP retry 也经过共享限速器并进入 attempt telemetry。
+真实运行直接读取 production `pipeline/config.json`。Scorer 与 Brief Writer 对 Kimi K2.5 显式设置 `thinking_type=disabled`：官方文档说明 reasoning 与 JSON 正文共享 `max_tokens`，关闭 thinking 可避免结构化输出在 3,000-token cap 下只生成 reasoning、正文为空；该参数同时进入 request fingerprint 和 model profile。如果凭据不在当前 worktree，可用 `--secrets-file` 指向现有的 0600 local secret；CLI 只记录脱敏 endpoint identity，不复制或输出 key。Kimi eval provider 为每个 trial 返回新实例并声明 `eval_cache_mode = "disabled"`，每个 HTTP retry 也经过共享限速器并进入 attempt telemetry。
 
 ```bash
 python3 -m pipeline.decision.run_layer2_component_eval \

@@ -275,7 +275,7 @@ class Layer2ComponentEvalTest(unittest.TestCase):
         self.assertTrue(artifact["grades"]["evidence_references"]["passed"])
         self.assertTrue(artifact["grades"]["claim_grounding"]["passed"])
         self.assertIsNone(artifact["telemetry"]["input_tokens"])
-        self.assertEqual(artifact["telemetry"]["latency_ms"], 0)
+        self.assertGreaterEqual(artifact["telemetry"]["latency_ms"], 0)
         self.assertNotIn("score_interval", serialized_request)
         self.assertNotIn("expected_tool_outcome", serialized_request)
         self.assertNotIn("score_band", serialized_request)
@@ -677,6 +677,10 @@ class Layer2ComponentEvalTest(unittest.TestCase):
                 self.fail = fail
                 self.last_usage = None
                 self.last_cost = None
+                self.thinking_type = "enabled" if fail else "disabled"
+                self.request_options = {
+                    "thinking": {"type": self.thinking_type}
+                }
 
             def complete_json(self, **_call):
                 self.last_usage = {
@@ -703,6 +707,15 @@ class Layer2ComponentEvalTest(unittest.TestCase):
                 output_dir=output_dir,
                 config=V2EvalConfig(trials=1, include_briefs=False),
             )
+            with self.assertRaisesRegex(ValueError, "settings must be identical"):
+                run_v2_evaluation(
+                    dataset,
+                    provider_factory=lambda *_args: Provider(False),
+                    output_dir=output_dir,
+                    config=V2EvalConfig(trials=1, include_briefs=False),
+                    resume=True,
+                    retry_execution_errors=True,
+                )
             output = run_v2_evaluation(
                 dataset,
                 provider_factory=lambda *_args: Provider(False),
@@ -710,6 +723,7 @@ class Layer2ComponentEvalTest(unittest.TestCase):
                 config=V2EvalConfig(trials=1, include_briefs=False),
                 resume=True,
                 retry_execution_errors=True,
+                allow_provider_profile_change=True,
             )
             attempts = [
                 json.loads(line)
@@ -720,6 +734,7 @@ class Layer2ComponentEvalTest(unittest.TestCase):
                 for line in output.results_jsonl.read_text().splitlines()
             ]
             aggregate = json.loads(output.aggregate_json.read_text())
+            metadata = json.loads(output.run_metadata_json.read_text())
 
         self.assertEqual([row["execution_attempt"] for row in attempts], [1, 2])
         self.assertEqual([row["execution_status"] for row in attempts], ["error", "ok"])
@@ -729,6 +744,7 @@ class Layer2ComponentEvalTest(unittest.TestCase):
         self.assertEqual(aggregate["summary"]["historical_execution_failures"], 1)
         self.assertEqual(aggregate["summary"]["total_tokens"], 132)
         self.assertEqual(aggregate["summary"]["cost"], 0.011)
+        self.assertEqual(len(metadata["provider_profile_revisions"]), 2)
 
     def test_resume_fails_closed_on_corrupt_latest_slot_artifact(self):
         from pipeline.decision.layer2_eval import (

@@ -83,6 +83,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Audit and record an intentional bug-fix code revision during resume.",
     )
+    parser.add_argument(
+        "--allow-provider-profile-change-on-resume",
+        action="store_true",
+        help="Audit and record an intentional provider-profile revision during resume.",
+    )
     parser.add_argument("--skip-handshake", action="store_true")
     parser.add_argument("--validate-only", action="store_true")
     return parser
@@ -104,6 +109,7 @@ def main(argv: list[str] | None = None) -> int:
             tool_registry_version=production["tool_registry_version"],
         )
         args.model = args.model or production["model"]
+        args.thinking_type = production["thinking_type"]
         args.timeout_seconds = (
             production["timeout_seconds"]
             if args.timeout_seconds is None
@@ -168,6 +174,9 @@ def main(argv: list[str] | None = None) -> int:
             resume=args.resume,
             retry_execution_errors=args.retry_execution_errors,
             allow_code_change=args.allow_code_change_on_resume,
+            allow_provider_profile_change=(
+                args.allow_provider_profile_change_on_resume
+            ),
             provider_execution="real_kimi" if args.live_kimi else "test_provider",
         )
         aggregate = json.loads(paths.aggregate_json.read_text(encoding="utf-8"))
@@ -221,6 +230,7 @@ def _live_kimi_factory(
             max_retries=args.max_retries,
             retry_backoff_seconds=args.retry_backoff_seconds,
             max_output_tokens=args.max_output_tokens,
+            thinking_type=args.thinking_type,
             input_cost_per_million=args.input_cost_per_million,
             cached_input_cost_per_million=args.cached_input_cost_per_million,
             output_cost_per_million=args.output_cost_per_million,
@@ -256,6 +266,10 @@ def _production_eval_config(path: Path) -> dict[str, Any]:
         brief.get("max_output_tokens") or 0
     ):
         raise ValueError("real eval requires scorer and Brief Writer output parity")
+    if scoring.get("thinking_type") != brief.get("thinking_type"):
+        raise ValueError("real eval requires scorer and Brief Writer thinking parity")
+    if scoring.get("thinking_type") != "disabled":
+        raise ValueError("structured V2 eval requires thinking_type=disabled")
     expected_versions = {
         "scoring_agent.context_policy_version": (
             scoring.get("context_policy_version"),
@@ -290,6 +304,7 @@ def _production_eval_config(path: Path) -> dict[str, Any]:
         "direct_final_enabled": bool(scoring.get("enable_direct_final")),
         "timeout_seconds": int(scoring.get("timeout_seconds") or 0),
         "max_output_tokens": int(scoring.get("max_output_tokens") or 0),
+        "thinking_type": str(scoring.get("thinking_type") or ""),
         "limits": InvestigatorLimits(
             max_investigation_turns=int(scoring.get("max_investigation_turns") or 0),
             max_scoring_attempts=int(scoring.get("max_scoring_attempts") or 0),

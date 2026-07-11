@@ -183,6 +183,7 @@ class Layer2RunnerTest(unittest.TestCase):
                 "model": "score-model",
                 "timeout_seconds": 91,
                 "max_output_tokens": 1800,
+                "thinking_type": "disabled",
             },
             component="scoring_agent",
             default_model="default-score",
@@ -193,6 +194,7 @@ class Layer2RunnerTest(unittest.TestCase):
                 "model": "brief-model",
                 "timeout_seconds": 61,
                 "max_output_tokens": 1000,
+                "thinking_type": "enabled",
             },
             component="brief_writer",
             default_model="default-brief",
@@ -200,6 +202,8 @@ class Layer2RunnerTest(unittest.TestCase):
 
         self.assertEqual((scoring.model, scoring.timeout, scoring.max_output_tokens), ("score-model", 91, 1800))
         self.assertEqual((brief.model, brief.timeout, brief.max_output_tokens), ("brief-model", 61, 1000))
+        self.assertEqual(scoring.thinking_type, "disabled")
+        self.assertEqual(brief.thinking_type, "enabled")
 
     def test_scoring_and_brief_factories_have_independent_runtime_identity(self):
         from pipeline.decision.run_layer2_feed import run_layer2_feed
@@ -1444,6 +1448,8 @@ class Layer2RunnerTest(unittest.TestCase):
         )
         self.assertEqual(default_config["scoring_agent"]["max_output_tokens"], 3000)
         self.assertEqual(default_config["brief_writer"]["max_output_tokens"], 3000)
+        self.assertEqual(default_config["scoring_agent"]["thinking_type"], "disabled")
+        self.assertEqual(default_config["brief_writer"]["thinking_type"], "disabled")
         self.assertEqual(
             default_config["scoring_agent"]["prompt_version"],
             "layer2-scoring-investigator-v2",

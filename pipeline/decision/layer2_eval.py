@@ -531,6 +531,7 @@ def run_v2_evaluation(
     resume: bool = False,
     retry_execution_errors: bool = False,
     allow_code_change: bool = False,
+    allow_provider_profile_change: bool = False,
     provider_execution: str = "test_provider",
 ) -> EvalOutputPaths:
     root = Path(output_dir)
@@ -545,6 +546,7 @@ def run_v2_evaluation(
             resume=resume,
             retry_execution_errors=retry_execution_errors,
             allow_code_change=allow_code_change,
+            allow_provider_profile_change=allow_provider_profile_change,
             provider_execution=provider_execution,
         )
 
@@ -558,6 +560,7 @@ def _run_v2_evaluation_locked(
     resume: bool = False,
     retry_execution_errors: bool = False,
     allow_code_change: bool = False,
+    allow_provider_profile_change: bool = False,
     provider_execution: str = "test_provider",
 ) -> EvalOutputPaths:
     """Run the V2 production component profile with per-slot checkpoints.
@@ -725,6 +728,9 @@ def _run_v2_evaluation_locked(
         "run_scope": run_scope,
         "release_eligible": release_eligible,
         "provider_profile": existing_metadata.get("provider_profile"),
+        "provider_profile_revisions": list(
+            existing_metadata.get("provider_profile_revisions") or []
+        ),
     }
     _atomic_write_json(paths.run_metadata_json, metadata)
     provider_instances: list[Any] = []
@@ -782,9 +788,29 @@ def _run_v2_evaluation_locked(
                 if expected_provider_profile is None:
                     expected_provider_profile = provider_profile
                 elif provider_profile != expected_provider_profile:
-                    raise ValueError(
-                        "V2 evaluation provider/model/output settings must be identical"
-                    )
+                    if resume and allow_provider_profile_change:
+                        revisions = list(metadata["provider_profile_revisions"])
+                        if not revisions:
+                            revisions.append(
+                                {
+                                    "provider_profile": expected_provider_profile,
+                                    "recorded_at": run_started,
+                                    "reason": "initial_run",
+                                }
+                            )
+                        revisions.append(
+                            {
+                                "provider_profile": provider_profile,
+                                "recorded_at": datetime.now(timezone.utc).isoformat(),
+                                "reason": "audited_bug_fix_resume",
+                            }
+                        )
+                        metadata["provider_profile_revisions"] = revisions
+                        expected_provider_profile = provider_profile
+                    else:
+                        raise ValueError(
+                            "V2 evaluation provider/model/output settings must be identical"
+                        )
                 metadata["provider_profile"] = expected_provider_profile
                 _atomic_write_json(paths.run_metadata_json, metadata)
                 try:
@@ -1075,6 +1101,12 @@ def _validate_resume_artifacts(
     by_case = {case.case_id: case for case in dataset.cases}
     run_id = str(metadata.get("run_id") or "")
     provider_profile = metadata.get("provider_profile")
+    allowed_provider_profiles = [provider_profile]
+    allowed_provider_profiles.extend(
+        row.get("provider_profile")
+        for row in metadata.get("provider_profile_revisions", [])
+        if isinstance(row, Mapping)
+    )
     allowed_code_fingerprints = {
         str(row.get("code_fingerprint") or "")
         for row in metadata.get("code_revisions", [])
@@ -1111,7 +1143,7 @@ def _validate_resume_artifacts(
         row_error = row.get("error") if isinstance(row.get("error"), Mapping) else {}
         if (
             provider_profile is not None
-            and row.get("provider_profile") != provider_profile
+            and row.get("provider_profile") not in allowed_provider_profiles
             and row_error.get("stage") != "provider_factory"
         ):
             raise ValueError(f"{location}: mismatched provider profile")
@@ -2055,6 +2087,8 @@ def _provider_profile(provider: Any) -> dict[str, Any]:
             "actual_temperature": getattr(provider, "actual_temperature", None),
             "max_output_tokens": getattr(provider, "max_output_tokens", None),
             "response_format": getattr(provider, "response_format", None),
+            "request_options": getattr(provider, "request_options", None),
+            "thinking_type": getattr(provider, "thinking_type", None),
             "timeout_seconds": getattr(provider, "timeout", None),
             "max_retries": getattr(provider, "max_retries", None),
             "retry_backoff_seconds": getattr(

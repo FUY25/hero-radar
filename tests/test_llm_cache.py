@@ -126,6 +126,7 @@ class LlmCacheTest(unittest.TestCase):
             actual_temperature=1,
             max_output_tokens=1800,
             response_format={"type": "json_object"},
+            provider_options={"thinking": {"type": "disabled"}},
             prompt_version="scoring-v1",
             output_schema_version="score-v1",
             tool_registry_version="tools-v1",
@@ -157,6 +158,7 @@ class LlmCacheTest(unittest.TestCase):
             replace(base, actual_temperature=0),
             replace(base, max_output_tokens=1600),
             replace(base, response_format={"type": "json_schema"}),
+            replace(base, provider_options={"thinking": {"type": "enabled"}}),
             replace(base, active_tool_versions=("fetch_github_file@2",)),
             replace(base, model="kimi-k2.6"),
             replace(base, task="layer2_brief_writer"),
@@ -183,6 +185,7 @@ class LlmCacheTest(unittest.TestCase):
                 "actual_temperature",
                 "max_output_tokens",
                 "response_format",
+                "provider_options",
             },
         )
 
