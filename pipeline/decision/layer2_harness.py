@@ -459,7 +459,9 @@ class TelemetryLLMProvider:
                 error=exc,
                 request_contract=request_contract,
                 call_context=call_context,
-                collect_usage=False,
+                collect_usage=bool(
+                    getattr(self._provider, "collect_usage_on_error", False)
+                ),
             )
             self._conn.commit()
             raise

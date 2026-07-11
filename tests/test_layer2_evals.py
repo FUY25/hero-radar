@@ -274,12 +274,12 @@ class Layer2EvalTest(unittest.TestCase):
 
     def test_default_eval_cases_cover_scoring_investigator_alignment(self) -> None:
         from pipeline.decision.run_layer2_evals import (
-            default_scoring_investigator_eval_cases,
-            evaluate_scoring_investigator_cases,
+            default_scoring_schema_smoke_cases,
+            run_scoring_schema_smoke,
         )
 
-        result = evaluate_scoring_investigator_cases(
-            default_scoring_investigator_eval_cases()
+        result = run_scoring_schema_smoke(
+            default_scoring_schema_smoke_cases()
         )
         names_by_expectation = {
             row["name"]: row["expected_band"] for row in result["cases"]
@@ -300,10 +300,10 @@ class Layer2EvalTest(unittest.TestCase):
     def test_static_scoring_cases_use_the_production_v2_output_contract(self) -> None:
         from pipeline.decision.layer2_contracts import validate_scoring_turn_v2
         from pipeline.decision.run_layer2_evals import (
-            default_scoring_investigator_eval_cases,
+            default_scoring_schema_smoke_cases,
         )
 
-        for case in default_scoring_investigator_eval_cases():
+        for case in default_scoring_schema_smoke_cases():
             with self.subTest(case=case["name"]):
                 validate_scoring_turn_v2(case["response"])
 
@@ -311,10 +311,10 @@ class Layer2EvalTest(unittest.TestCase):
         self,
     ) -> None:
         from pipeline.decision.run_layer2_evals import (
-            default_scoring_investigator_eval_cases,
+            default_scoring_schema_smoke_cases,
         )
 
-        cases = default_scoring_investigator_eval_cases()
+        cases = default_scoring_schema_smoke_cases()
         tags = {
             tag
             for case in cases
@@ -349,10 +349,10 @@ class Layer2EvalTest(unittest.TestCase):
         self,
     ) -> None:
         from pipeline.decision.run_layer2_evals import (
-            default_scoring_investigator_eval_cases,
+            default_scoring_schema_smoke_cases,
         )
 
-        for case in default_scoring_investigator_eval_cases():
+        for case in default_scoring_schema_smoke_cases():
             with self.subTest(case=case["name"]):
                 self.assertIn(case["expected_band"], {"high", "medium", "low"})
                 self.assertIn(
@@ -375,12 +375,12 @@ class Layer2EvalTest(unittest.TestCase):
 
     def test_scoring_eval_metrics_report_comparable_corpus_coverage(self) -> None:
         from pipeline.decision.run_layer2_evals import (
-            default_scoring_investigator_eval_cases,
-            evaluate_scoring_investigator_cases,
+            default_scoring_schema_smoke_cases,
+            run_scoring_schema_smoke,
         )
 
-        result = evaluate_scoring_investigator_cases(
-            default_scoring_investigator_eval_cases()
+        result = run_scoring_schema_smoke(
+            default_scoring_schema_smoke_cases()
         )
         metrics = result["metrics"]
 
@@ -392,8 +392,8 @@ class Layer2EvalTest(unittest.TestCase):
                 "low": metrics["low_expected"],
             },
         )
-        self.assertGreaterEqual(metrics["route_coverage"]["score_from_context"], 1)
-        self.assertGreaterEqual(metrics["route_coverage"]["investigate"], 1)
+        self.assertEqual(metrics["route_coverage"]["score_from_context"], 0)
+        self.assertEqual(metrics["route_coverage"]["investigate"], 19)
         self.assertGreaterEqual(metrics["route_coverage"]["cannot_score"], 1)
         self.assertGreaterEqual(metrics["tool_need_coverage"]["none"], 1)
         self.assertGreaterEqual(
@@ -430,12 +430,12 @@ class Layer2EvalTest(unittest.TestCase):
         import json
 
         from pipeline.decision.run_layer2_evals import (
-            default_scoring_investigator_eval_cases,
+            default_scoring_schema_smoke_cases,
         )
 
         openclaw = next(
             case
-            for case in default_scoring_investigator_eval_cases()
+            for case in default_scoring_schema_smoke_cases()
             if case["name"] == "OpenClaw"
         )
         context = json.dumps(openclaw["candidate"], sort_keys=True)
@@ -450,12 +450,12 @@ class Layer2EvalTest(unittest.TestCase):
         import json
 
         from pipeline.decision.run_layer2_evals import (
-            default_scoring_investigator_eval_cases,
+            default_scoring_schema_smoke_cases,
         )
 
         cases = {
             case["name"]: json.dumps(case["candidate"], sort_keys=True)
-            for case in default_scoring_investigator_eval_cases()
+            for case in default_scoring_schema_smoke_cases()
         }
 
         hermes = cases["Hermes Agent"].lower()
@@ -480,12 +480,12 @@ class Layer2EvalTest(unittest.TestCase):
 
     def test_gray_zone_utility_needs_explicit_workflow_unlock(self) -> None:
         from pipeline.decision.run_layer2_evals import (
-            default_scoring_investigator_eval_cases,
-            evaluate_scoring_investigator_cases,
+            default_scoring_schema_smoke_cases,
+            run_scoring_schema_smoke,
         )
 
-        result = evaluate_scoring_investigator_cases(
-            default_scoring_investigator_eval_cases()
+        result = run_scoring_schema_smoke(
+            default_scoring_schema_smoke_cases()
         )
         scores = {row["name"]: row["l2_score"] for row in result["cases"]}
 
@@ -496,8 +496,8 @@ class Layer2EvalTest(unittest.TestCase):
             scores["Ordinary dashboard utility"] + 15,
         )
 
-    def test_run_scoring_investigator_kimi_eval_uses_provider(self) -> None:
-        from pipeline.decision.run_layer2_evals import run_scoring_investigator_kimi_eval
+    def test_run_scoring_provider_smoke_uses_provider(self) -> None:
+        from pipeline.decision.run_layer2_evals import run_scoring_provider_smoke
 
         class Provider:
             provider_name = "kimi"
@@ -571,7 +571,7 @@ class Layer2EvalTest(unittest.TestCase):
         ]
         provider = Provider()
 
-        result = run_scoring_investigator_kimi_eval(
+        result = run_scoring_provider_smoke(
             provider=provider, cases=cases, limit=2
         )
 
@@ -579,7 +579,7 @@ class Layer2EvalTest(unittest.TestCase):
         self.assertFalse(result["skipped"])
         self.assertEqual(result["mismatches"], [])
         self.assertEqual(len(provider.calls), 2)
-        self.assertEqual(provider.calls[0]["task"], "layer2_scoring_investigator_eval")
+        self.assertEqual(provider.calls[0]["task"], "layer2_scoring_provider_smoke")
         self.assertIn(
             "Layer 2 Scoring Investigator", provider.calls[0]["system_prompt"]
         )
@@ -610,15 +610,15 @@ class Layer2EvalTest(unittest.TestCase):
             provider.calls[0]["input_payload"]["instruction"],
         )
 
-    def test_run_scoring_investigator_kimi_eval_rejects_legacy_response_shape(
+    def test_run_scoring_provider_smoke_rejects_legacy_response_shape(
         self,
     ) -> None:
         from pipeline.decision.run_layer2_evals import (
-            default_scoring_investigator_eval_cases,
-            run_scoring_investigator_kimi_eval,
+            default_scoring_schema_smoke_cases,
+            run_scoring_provider_smoke,
         )
 
-        case = default_scoring_investigator_eval_cases()[0]
+        case = default_scoring_schema_smoke_cases()[0]
         legacy_response = {
             "action": "final",
             "score": {
@@ -635,7 +635,7 @@ class Layer2EvalTest(unittest.TestCase):
             def complete_json(self, **kwargs):
                 return legacy_response
 
-        result = run_scoring_investigator_kimi_eval(
+        result = run_scoring_provider_smoke(
             provider=Provider(),
             cases=[case],
             limit=1,
@@ -647,15 +647,15 @@ class Layer2EvalTest(unittest.TestCase):
         self.assertEqual(result["cases"][0]["error"], "ValueError")
         self.assertIn("information_sufficiency", result["cases"][0]["reason"])
 
-    def test_run_scoring_investigator_kimi_eval_rejects_unknown_evidence_ref(
+    def test_run_scoring_provider_smoke_rejects_unknown_evidence_ref(
         self,
     ) -> None:
         from pipeline.decision.run_layer2_evals import (
-            default_scoring_investigator_eval_cases,
-            run_scoring_investigator_kimi_eval,
+            default_scoring_schema_smoke_cases,
+            run_scoring_provider_smoke,
         )
 
-        case = default_scoring_investigator_eval_cases()[0]
+        case = default_scoring_schema_smoke_cases()[0]
         supporting_claim = case["response"]["score"]["supporting_evidence"][0]
         response = {
             **case["response"],
@@ -675,7 +675,7 @@ class Layer2EvalTest(unittest.TestCase):
             def complete_json(self, **kwargs):
                 return response
 
-        result = run_scoring_investigator_kimi_eval(
+        result = run_scoring_provider_smoke(
             provider=Provider(),
             cases=[case],
             limit=1,
@@ -685,21 +685,21 @@ class Layer2EvalTest(unittest.TestCase):
         self.assertEqual(result["cases"][0]["error"], "EvidenceReferenceError")
         self.assertIn("unknown evidence_ref", result["cases"][0]["reason"])
 
-    def test_run_scoring_investigator_kimi_eval_skips_without_key(self) -> None:
-        from pipeline.decision.run_layer2_evals import run_scoring_investigator_kimi_eval
+    def test_run_scoring_provider_smoke_skips_without_key(self) -> None:
+        from pipeline.decision.run_layer2_evals import run_scoring_provider_smoke
 
         class Provider:
             api_key = ""
 
-        result = run_scoring_investigator_kimi_eval(provider=Provider(), cases=[])
+        result = run_scoring_provider_smoke(provider=Provider(), cases=[])
 
         self.assertFalse(result["ok"])
         self.assertTrue(result["skipped"])
 
-    def test_run_scoring_investigator_kimi_eval_defaults_to_small_high_low_smoke(
+    def test_run_scoring_provider_smoke_defaults_to_small_high_low_smoke(
         self,
     ) -> None:
-        from pipeline.decision.run_layer2_evals import run_scoring_investigator_kimi_eval
+        from pipeline.decision.run_layer2_evals import run_scoring_provider_smoke
 
         class Provider:
             provider_name = "kimi"
@@ -737,7 +737,7 @@ class Layer2EvalTest(unittest.TestCase):
 
         provider = Provider()
 
-        result = run_scoring_investigator_kimi_eval(provider=provider)
+        result = run_scoring_provider_smoke(provider=provider)
 
         self.assertTrue(result["ok"])
         self.assertEqual(

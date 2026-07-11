@@ -9,7 +9,53 @@ from pathlib import Path
 DATASET = Path("evals/layer2/datasets/scoring_cases.v1.jsonl")
 
 
+def _valid_low_final_response():
+    return {
+        "action": "final",
+        "information_sufficiency": {
+            "identity": "strong",
+            "workflow_shift": "weak",
+            "technical_substance": "weak",
+            "product_market_fit": "medium",
+            "momentum": "weak",
+        },
+        "score": {
+            "object_type": "product",
+            "is_product_or_repo": True,
+            "axes": {
+                "workflow_shift": 32,
+                "technical_substance": 28,
+                "product_market_fit": 42,
+                "momentum": 35,
+                "confidence": 76,
+                "risk_penalty": 2,
+                "derivative_news_penalty": 8,
+            },
+            "supporting_evidence": [],
+            "negative_evidence": [],
+            "known_gaps": [],
+            "primary_reason": "Generic wrapper",
+            "rationale_short": "No distinctive workflow is documented.",
+            "topic_tags": [],
+            "caveats": [],
+            "should_print": False,
+        },
+    }
+
+
 class Layer2ComponentEvalTest(unittest.TestCase):
+    def test_v2_eval_config_matches_the_production_prompt_and_direct_final_profile(self):
+        from pipeline.decision.layer2_eval import V2EvalConfig
+
+        config = V2EvalConfig()
+
+        self.assertEqual(
+            config.prompt_version,
+            "layer2-scoring-investigator-v2",
+        )
+        self.assertFalse(config.direct_final_enabled)
+        self.assertEqual(config.trials, 3)
+
     def test_versioned_dataset_has_twenty_strict_cases_and_keeps_gold_out_of_model_input(self):
         from pipeline.decision.layer2_eval import load_eval_dataset
 
@@ -18,6 +64,14 @@ class Layer2ComponentEvalTest(unittest.TestCase):
         self.assertEqual(dataset.version, "layer2-scoring-cases-v1")
         self.assertEqual(len(dataset.cases), 20)
         self.assertEqual(len({case.case_id for case in dataset.cases}), 20)
+        self.assertEqual(
+            sum(case.gold["preflight_mode"] == "investigate" for case in dataset.cases),
+            19,
+        )
+        self.assertEqual(
+            sum(case.gold["preflight_mode"] == "cannot_score" for case in dataset.cases),
+            1,
+        )
         for case in dataset.cases:
             serialized_input = json.dumps(case.model_input, sort_keys=True)
             self.assertNotIn("expected_", serialized_input)
@@ -92,6 +146,28 @@ class Layer2ComponentEvalTest(unittest.TestCase):
                 "web_search",
             ],
         )
+
+    def test_web_search_replay_accepts_candidate_bound_query_without_exact_string_match(self):
+        from pipeline.decision.layer2_eval import ReplayToolRegistry, load_eval_dataset
+
+        case = next(
+            case
+            for case in load_eval_dataset(DATASET).cases
+            if case.case_id == "independent-adoption-evidence-needed"
+        )
+        replay = ReplayToolRegistry(case)
+
+        result = replay.tools["web_search"](
+            {"query": "independent adoption evidence for approval queue agent workflows"}
+        )
+        unrelated = replay.tools["web_search"](
+            {"query": "weather forecast and sports scores"}
+        )
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["results"][0]["title"], "Independent workflow review")
+        self.assertEqual(unrelated["status"], "unavailable")
+        self.assertEqual(unrelated["error"], "recording_not_found")
 
     def test_component_case_exercises_production_scorer_without_label_leakage(self):
         from pipeline.decision.layer2_eval import load_eval_dataset, run_eval_case
@@ -290,13 +366,15 @@ class Layer2ComponentEvalTest(unittest.TestCase):
             "layer2_scoring_investigator_brief",
             [row["task"] for row in artifact["model_calls"]],
         )
+        self.assertEqual(artifact["preflight_mode"], "investigate")
+        self.assertFalse(provider.calls[0]["input_payload"]["task"]["must_finalize"])
 
-    def test_paired_runner_uses_three_isolated_trials_and_writes_inspectable_artifacts(self):
+    def test_v2_runner_uses_three_isolated_trials_and_writes_inspectable_artifacts(self):
         from pipeline.decision.layer2_eval import (
             Layer2EvalDataset,
-            PairedEvalConfig,
+            V2EvalConfig,
             load_eval_dataset,
-            run_paired_evaluation,
+            run_v2_evaluation,
         )
 
         created_providers = []
@@ -342,7 +420,7 @@ class Layer2ComponentEvalTest(unittest.TestCase):
                     },
                 }
 
-        def provider_factory(_version, _trial, _case):
+        def provider_factory(_trial, _case):
             provider = LowScoreProvider()
             created_providers.append(provider)
             return provider
@@ -352,18 +430,22 @@ class Layer2ComponentEvalTest(unittest.TestCase):
             version="layer2-scoring-cases-v1", cases=(generic,)
         )
         with tempfile.TemporaryDirectory() as directory:
-            output = run_paired_evaluation(
+            output = run_v2_evaluation(
                 dataset,
                 provider_factory=provider_factory,
                 output_dir=Path(directory),
-                config=PairedEvalConfig(trials=3, include_briefs=False),
+                config=V2EvalConfig(trials=3, include_briefs=False),
             )
 
             results = [json.loads(line) for line in output.results_jsonl.read_text().splitlines()]
             report = output.report_markdown.read_text(encoding="utf-8")
-            self.assertEqual(len(results), 6)
-            self.assertEqual(len({id(provider) for provider in created_providers}), 6)
+            self.assertEqual(len(results), 3)
+            self.assertEqual(len({id(provider) for provider in created_providers}), 3)
             self.assertEqual({row["trial"] for row in results}, {1, 2, 3})
+            self.assertEqual(
+                {row["prompt_version"] for row in results},
+                {"layer2-scoring-investigator-v2"},
+            )
             self.assertEqual(
                 {row["case_input_fingerprint"] for row in results},
                 {results[0]["case_input_fingerprint"]},
@@ -373,14 +455,19 @@ class Layer2ComponentEvalTest(unittest.TestCase):
                 {"disabled"},
             )
             self.assertEqual(len({row["run_id"] for row in results}), 1)
-            self.assertIn("v1 / v2 case and trial comparison", report)
+            self.assertIn("V2 case and trial results", report)
+            self.assertNotIn("v1 / v2", report.lower())
             self.assertIn("missing", report)
-            self.assertIn("route v1 / v2", report)
+            self.assertIn("Route", report)
             aggregate = json.loads(output.aggregate_json.read_text())
+            metadata = json.loads(output.run_metadata_json.read_text())
             self.assertIn("by_case", aggregate)
             self.assertIn("by_grader", aggregate)
             self.assertIn("by_tool_family", aggregate)
             self.assertIn("by_failure_type", aggregate)
+            self.assertEqual(metadata["provider_execution"], "test_provider")
+            self.assertEqual(metadata["run_scope"], "test")
+            self.assertFalse(metadata["release_eligible"])
             self.assertTrue(output.aggregate_json.exists())
             self.assertTrue(output.run_metadata_json.exists())
 
@@ -389,12 +476,365 @@ class Layer2ComponentEvalTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaisesRegex(ValueError, "eval_cache_mode"):
-                run_paired_evaluation(
+                run_v2_evaluation(
                     dataset,
                     provider_factory=lambda *_args: UndeclaredCacheProvider(),
                     output_dir=Path(directory),
-                    config=PairedEvalConfig(trials=3, include_briefs=False),
+                    config=V2EvalConfig(trials=3, include_briefs=False),
                 )
+
+    def test_v2_runner_persists_case_failure_and_continues_remaining_cases(self):
+        from pipeline.decision.layer2_eval import (
+            Layer2EvalDataset,
+            V2EvalConfig,
+            load_eval_dataset,
+            run_v2_evaluation,
+        )
+
+        class FailingProvider:
+            provider_name = "offline-behavior"
+            model = "recorded-model"
+            actual_temperature = 0
+            max_output_tokens = 3000
+            response_format = {"type": "json_object"}
+            eval_cache_mode = "disabled"
+            collect_usage_on_error = True
+
+            def complete_json(self, **_call):
+                self.last_usage = {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 20,
+                    "total_tokens": 120,
+                }
+                self.last_cost = {
+                    "amount": 0.001,
+                    "currency": "USD",
+                    "source": "configured_rate_estimate",
+                }
+                raise RuntimeError("simulated invalid final output")
+
+        class ValidLowProvider(FailingProvider):
+            def complete_json(self, **_call):
+                return {
+                    "action": "final",
+                    "information_sufficiency": {
+                        "identity": "strong",
+                        "workflow_shift": "weak",
+                        "technical_substance": "weak",
+                        "product_market_fit": "medium",
+                        "momentum": "weak",
+                    },
+                    "score": {
+                        "object_type": "product",
+                        "is_product_or_repo": True,
+                        "axes": {
+                            "workflow_shift": 32,
+                            "technical_substance": 28,
+                            "product_market_fit": 42,
+                            "momentum": 35,
+                            "confidence": 76,
+                            "risk_penalty": 2,
+                            "derivative_news_penalty": 8,
+                        },
+                        "supporting_evidence": [],
+                        "negative_evidence": [],
+                        "known_gaps": [],
+                        "primary_reason": "Generic wrapper",
+                        "rationale_short": "No distinctive workflow is documented.",
+                        "topic_tags": [],
+                        "caveats": [],
+                        "should_print": False,
+                    },
+                }
+
+        cases = load_eval_dataset(DATASET).cases[3:5]
+        dataset = Layer2EvalDataset(
+            version="layer2-scoring-cases-v1",
+            cases=tuple(cases),
+        )
+
+        def provider_factory(_trial, case):
+            return FailingProvider() if case.case_id == cases[0].case_id else ValidLowProvider()
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = run_v2_evaluation(
+                dataset,
+                provider_factory=provider_factory,
+                output_dir=Path(directory),
+                config=V2EvalConfig(trials=1, include_briefs=False),
+            )
+            results = [
+                json.loads(line)
+                for line in output.results_jsonl.read_text(encoding="utf-8").splitlines()
+            ]
+            aggregate = json.loads(output.aggregate_json.read_text(encoding="utf-8"))
+
+        self.assertEqual(len(results), 2)
+        failed, completed = results
+        self.assertFalse(failed["final_output_valid"])
+        self.assertFalse(failed["passed"])
+        self.assertEqual(failed["error"]["stage"], "scoring")
+        self.assertEqual(failed["error"]["type"], "RuntimeError")
+        self.assertEqual(failed["telemetry"]["total_tokens"], 120)
+        self.assertEqual(failed["telemetry"]["cost"]["amount"], 0.001)
+        self.assertTrue(completed["final_output_valid"])
+        self.assertIsNone(completed["error"])
+        self.assertFalse(aggregate["all_passed"])
+        self.assertEqual(aggregate["execution_failures"], 1)
+
+    def test_v2_runner_checkpoints_before_interrupt_and_resumes_missing_slots(self):
+        from pipeline.decision.layer2_eval import (
+            Layer2EvalDataset,
+            V2EvalConfig,
+            load_eval_dataset,
+            run_v2_evaluation,
+        )
+
+        class Provider:
+            provider_name = "offline-behavior"
+            model = "recorded-model"
+            actual_temperature = 0
+            max_output_tokens = 3000
+            response_format = {"type": "json_object"}
+            eval_cache_mode = "disabled"
+
+            def complete_json(self, **_call):
+                return _valid_low_final_response()
+
+        case = load_eval_dataset(DATASET).cases[3]
+        dataset = Layer2EvalDataset(
+            version="layer2-scoring-cases-v1",
+            cases=(case,),
+        )
+        starts = 0
+
+        def interrupted_factory(_trial, _case):
+            nonlocal starts
+            starts += 1
+            if starts == 2:
+                raise KeyboardInterrupt("simulated operator interrupt")
+            return Provider()
+
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory)
+            with self.assertRaises(KeyboardInterrupt):
+                run_v2_evaluation(
+                    dataset,
+                    provider_factory=interrupted_factory,
+                    output_dir=output_dir,
+                    config=V2EvalConfig(trials=2, include_briefs=False),
+                )
+            checkpoint = [
+                json.loads(line)
+                for line in (output_dir / "results.v1.jsonl").read_text().splitlines()
+            ]
+            running_metadata = json.loads(
+                (output_dir / "run-metadata.v1.json").read_text()
+            )
+            self.assertEqual(len(checkpoint), 1)
+            self.assertEqual(running_metadata["status"], "running")
+            self.assertEqual(running_metadata["completed_slots"], 1)
+
+            resumed_calls = []
+            output = run_v2_evaluation(
+                dataset,
+                provider_factory=lambda trial, _case: (
+                    resumed_calls.append(trial) or Provider()
+                ),
+                output_dir=output_dir,
+                config=V2EvalConfig(trials=2, include_briefs=False),
+                resume=True,
+            )
+            results = [
+                json.loads(line)
+                for line in output.results_jsonl.read_text().splitlines()
+            ]
+            completed_metadata = json.loads(output.run_metadata_json.read_text())
+
+        self.assertEqual(resumed_calls, [2])
+        self.assertEqual(len(results), 2)
+        self.assertEqual(completed_metadata["status"], "complete")
+        self.assertEqual(completed_metadata["completed_slots"], 2)
+
+    def test_v2_retry_keeps_append_only_attempt_spend_and_latest_slot_result(self):
+        from pipeline.decision.layer2_eval import (
+            Layer2EvalDataset,
+            V2EvalConfig,
+            load_eval_dataset,
+            run_v2_evaluation,
+        )
+
+        class Provider:
+            provider_name = "offline-behavior"
+            model = "recorded-model"
+            actual_temperature = 0
+            max_output_tokens = 3000
+            response_format = {"type": "json_object"}
+            eval_cache_mode = "disabled"
+            collect_usage_on_error = True
+
+            def __init__(self, fail):
+                self.fail = fail
+                self.last_usage = None
+                self.last_cost = None
+
+            def complete_json(self, **_call):
+                self.last_usage = {
+                    "prompt_tokens": 100 if self.fail else 10,
+                    "completion_tokens": 20 if self.fail else 2,
+                    "total_tokens": 120 if self.fail else 12,
+                }
+                self.last_cost = {
+                    "amount": 0.01 if self.fail else 0.001,
+                    "currency": "USD",
+                    "source": "configured_rate_estimate",
+                }
+                if self.fail:
+                    raise RuntimeError("retryable slot failure")
+                return _valid_low_final_response()
+
+        case = load_eval_dataset(DATASET).cases[3]
+        dataset = Layer2EvalDataset("layer2-scoring-cases-v1", (case,))
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory)
+            run_v2_evaluation(
+                dataset,
+                provider_factory=lambda *_args: Provider(True),
+                output_dir=output_dir,
+                config=V2EvalConfig(trials=1, include_briefs=False),
+            )
+            output = run_v2_evaluation(
+                dataset,
+                provider_factory=lambda *_args: Provider(False),
+                output_dir=output_dir,
+                config=V2EvalConfig(trials=1, include_briefs=False),
+                resume=True,
+                retry_execution_errors=True,
+            )
+            attempts = [
+                json.loads(line)
+                for line in output.attempts_jsonl.read_text().splitlines()
+            ]
+            results = [
+                json.loads(line)
+                for line in output.results_jsonl.read_text().splitlines()
+            ]
+            aggregate = json.loads(output.aggregate_json.read_text())
+
+        self.assertEqual([row["execution_attempt"] for row in attempts], [1, 2])
+        self.assertEqual([row["execution_status"] for row in attempts], ["error", "ok"])
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["execution_attempt"], 2)
+        self.assertEqual(aggregate["summary"]["attempt_count"], 2)
+        self.assertEqual(aggregate["summary"]["historical_execution_failures"], 1)
+        self.assertEqual(aggregate["summary"]["total_tokens"], 132)
+        self.assertEqual(aggregate["summary"]["cost"], 0.011)
+
+    def test_resume_fails_closed_on_corrupt_latest_slot_artifact(self):
+        from pipeline.decision.layer2_eval import (
+            Layer2EvalDataset,
+            V2EvalConfig,
+            load_eval_dataset,
+            run_v2_evaluation,
+        )
+
+        class Provider:
+            provider_name = "offline-behavior"
+            model = "recorded-model"
+            actual_temperature = 0
+            max_output_tokens = 3000
+            response_format = {"type": "json_object"}
+            eval_cache_mode = "disabled"
+
+            def complete_json(self, **_call):
+                return _valid_low_final_response()
+
+        case = load_eval_dataset(DATASET).cases[3]
+        dataset = Layer2EvalDataset("layer2-scoring-cases-v1", (case,))
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory)
+            output = run_v2_evaluation(
+                dataset,
+                provider_factory=lambda *_args: Provider(),
+                output_dir=output_dir,
+                config=V2EvalConfig(trials=1, include_briefs=False),
+            )
+            row = json.loads(output.results_jsonl.read_text())
+            row["prompt_version"] = "corrupted-prompt"
+            output.results_jsonl.write_text(json.dumps(row) + "\n")
+
+            with self.assertRaisesRegex(ValueError, "mismatched prompt_version"):
+                run_v2_evaluation(
+                    dataset,
+                    provider_factory=lambda *_args: Provider(),
+                    output_dir=output_dir,
+                    config=V2EvalConfig(trials=1, include_briefs=False),
+                    resume=True,
+                )
+
+    def test_cannot_score_case_records_measured_zero_model_calls(self):
+        from pipeline.decision.layer2_eval import load_eval_dataset, run_eval_case
+
+        class NeverCalledProvider:
+            provider_name = "offline-behavior"
+            model = "recorded-model"
+
+            def complete_json(self, **_call):
+                raise AssertionError("cannot_score must not call the provider")
+
+        case = next(
+            case
+            for case in load_eval_dataset(DATASET).cases
+            if case.case_id == "unresolved-project-atlas"
+        )
+        artifact = run_eval_case(
+            case,
+            provider=NeverCalledProvider(),
+            prompt_version="layer2-scoring-investigator-v2",
+            trial=1,
+            include_brief=False,
+        )
+
+        self.assertEqual(artifact["preflight_mode"], "cannot_score")
+        self.assertEqual(artifact["telemetry"]["logical_call_count"], 0)
+        self.assertEqual(artifact["telemetry"]["total_tokens"], 0)
+        self.assertEqual(artifact["telemetry"]["cost"]["amount"], 0.0)
+        self.assertEqual(
+            artifact["telemetry"]["cost"]["source"],
+            "measured_no_model_calls",
+        )
+
+    def test_blind_brief_packet_uses_only_opaque_id_and_content(self):
+        from types import SimpleNamespace
+
+        from pipeline.decision.layer2_eval_reporting import write_blind_briefs
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = SimpleNamespace(
+                blind_briefs_jsonl=root / "briefs.jsonl",
+                blind_mapping_json=root / "mapping.json",
+            )
+            write_blind_briefs(
+                paths,
+                [
+                    {
+                        "run_id": "run-1",
+                        "case_id": "secret-case",
+                        "trial": 2,
+                        "prompt_version": "layer2-scoring-investigator-v2",
+                        "request_fingerprints": ["fingerprint"],
+                        "brief": {"output_valid": True, "output": {"headline": "中文标题"}},
+                    }
+                ],
+            )
+            packet = json.loads(paths.blind_briefs_jsonl.read_text())
+            mapping = json.loads(paths.blind_mapping_json.read_text())
+
+        self.assertEqual(set(packet), {"blind_id", "brief"})
+        self.assertTrue(packet["blind_id"].startswith("brief-"))
+        self.assertNotIn("secret-case", packet["blind_id"])
+        self.assertEqual(mapping[packet["blind_id"]]["case_id"], "secret-case")
 
     def test_cli_has_distinct_validation_and_missing_provider_exit_codes(self):
         from pipeline.decision.run_layer2_component_eval import (
@@ -405,6 +845,28 @@ class Layer2ComponentEvalTest(unittest.TestCase):
 
         self.assertEqual(main(["--dataset", str(DATASET), "--validate-only"]), EXIT_OK)
         self.assertEqual(main(["--dataset", str(DATASET)]), EXIT_CONFIG)
+
+    def test_cli_rejects_non_positive_or_non_finite_live_numeric_settings(self):
+        from pipeline.decision.run_layer2_component_eval import EXIT_CONFIG, main
+
+        self.assertEqual(
+            main(["--dataset", str(DATASET), "--starts-per-second", "0", "--validate-only"]),
+            EXIT_CONFIG,
+        )
+        self.assertEqual(
+            main(
+                [
+                    "--dataset",
+                    str(DATASET),
+                    "--input-cost-per-million",
+                    "nan",
+                    "--output-cost-per-million",
+                    "1",
+                    "--validate-only",
+                ]
+            ),
+            EXIT_CONFIG,
+        )
 
     def test_all_twenty_externalized_cases_execute_through_production_scorer(self):
         from pipeline.decision.layer2_eval import load_eval_dataset, run_eval_case

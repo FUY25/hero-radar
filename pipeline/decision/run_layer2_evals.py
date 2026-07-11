@@ -400,7 +400,7 @@ def evaluate_scout_v2_cases(cases: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def default_scoring_investigator_eval_cases() -> list[dict[str, Any]]:
+def default_scoring_schema_smoke_cases() -> list[dict[str, Any]]:
     """Authored-response compatibility smoke loaded from the versioned dataset."""
     from pathlib import Path
 
@@ -431,10 +431,10 @@ def _evidence_expectations(
     }
 
 
-def _default_scoring_investigator_smoke_cases() -> list[dict[str, Any]]:
+def _default_scoring_provider_smoke_cases() -> list[dict[str, Any]]:
     cases_by_name = {
         str(case.get("name") or ""): case
-        for case in default_scoring_investigator_eval_cases()
+        for case in default_scoring_schema_smoke_cases()
     }
     return [
         cases_by_name["OpenClaw"],
@@ -446,7 +446,7 @@ def _default_scoring_investigator_smoke_cases() -> list[dict[str, Any]]:
     ]
 
 
-def evaluate_scoring_investigator_cases(cases: list[dict[str, Any]]) -> dict[str, Any]:
+def run_scoring_schema_smoke(cases: list[dict[str, Any]]) -> dict[str, Any]:
     evaluated: list[dict[str, Any]] = []
     mismatches: list[dict[str, Any]] = []
     for case in cases:
@@ -556,7 +556,7 @@ def run_wide_scout_kimi_eval(
     }
 
 
-def run_scoring_investigator_kimi_eval(
+def run_scoring_provider_smoke(
     *,
     provider: Any | None = None,
     model: str = "kimi-k2.5",
@@ -569,7 +569,7 @@ def run_scoring_investigator_kimi_eval(
     versioned_system_prompt = scoring_prompt_for_version(prompt_version)
     if not getattr(active_provider, "api_key", ""):
         return {"ok": False, "skipped": True, "reason": "Kimi key not configured"}
-    active_cases = cases if cases is not None else _default_scoring_investigator_smoke_cases()
+    active_cases = cases if cases is not None else _default_scoring_provider_smoke_cases()
     active_limit = max(1, int(limit or 1))
     evaluated: list[dict[str, Any]] = []
     mismatches: list[dict[str, Any]] = []
@@ -584,7 +584,7 @@ def run_scoring_investigator_kimi_eval(
         candidate["evidence_ref"] = SCORING_EVAL_CANDIDATE_EVIDENCE_REF
         try:
             response = active_provider.complete_json(
-                task="layer2_scoring_investigator_eval",
+                task="layer2_scoring_provider_smoke",
                 prompt_version=prompt_version,
                 system_prompt=system_prompt,
                 input_payload={
@@ -1143,12 +1143,12 @@ def main() -> int:
     parser.add_argument("--handshake", action="store_true")
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument(
-        "--scoring-investigator-eval",
+        "--scoring-schema-smoke",
         action="store_true",
         help="authored-response schema smoke; not a production-equivalent Agent eval",
     )
     parser.add_argument(
-        "--scoring-investigator-kimi-eval",
+        "--scoring-provider-smoke",
         action="store_true",
         help="small live-provider smoke with tools disabled; not release-quality eval",
     )
@@ -1161,12 +1161,12 @@ def main() -> int:
         result = run_handshake(model=args.model)
     elif args.smoke:
         result = run_smoke(args.model)
-    elif args.scoring_investigator_eval:
-        result = evaluate_scoring_investigator_cases(
-            default_scoring_investigator_eval_cases()
+    elif args.scoring_schema_smoke:
+        result = run_scoring_schema_smoke(
+            default_scoring_schema_smoke_cases()
         )
-    elif args.scoring_investigator_kimi_eval:
-        result = run_scoring_investigator_kimi_eval(
+    elif args.scoring_provider_smoke:
+        result = run_scoring_provider_smoke(
             model=args.model,
             limit=args.limit,
         )
@@ -1175,8 +1175,8 @@ def main() -> int:
     else:
         result = rank_eval_cases(default_eval_cases())
         wide_scout = evaluate_wide_scout_cases(default_wide_scout_eval_cases())
-        scoring = evaluate_scoring_investigator_cases(
-            default_scoring_investigator_eval_cases()
+        scoring = run_scoring_schema_smoke(
+            default_scoring_schema_smoke_cases()
         )
         result = {
             **result,
@@ -1186,7 +1186,7 @@ def main() -> int:
                 and bool(scoring.get("ok"))
             ),
             "wide_scout": wide_scout,
-            "scoring_investigator": scoring,
+            "scoring_schema_smoke": scoring,
         }
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0 if result.get("ok") or result.get("skipped") else 1

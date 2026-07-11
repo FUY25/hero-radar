@@ -94,6 +94,135 @@ class KimiProviderTest(unittest.TestCase):
         self.assertEqual(result, {"ok": True})
         self.assertEqual(len(calls), 2)
 
+    def test_kimi_provider_exposes_response_usage_for_eval_telemetry(self):
+        from pipeline.decision.kimi_provider import KimiProvider
+
+        provider = KimiProvider(api_key="secret", timeout=1, max_retries=0)
+        response = FakeHttpResponse(
+            {
+                "choices": [{"message": {"content": json.dumps({"ok": True})}}],
+                "usage": {
+                    "prompt_tokens": 120,
+                    "completion_tokens": 30,
+                    "total_tokens": 150,
+                },
+            }
+        )
+
+        with mock.patch("urllib.request.urlopen", return_value=response):
+            provider.complete_json(
+                task="layer2_eval",
+                prompt_version="layer2-scoring-investigator-v2",
+                input_payload={"candidate": "repo"},
+            )
+
+        self.assertEqual(
+            provider.last_usage,
+            {
+                "prompt_tokens": 120,
+                "completion_tokens": 30,
+                "total_tokens": 150,
+            },
+        )
+
+    def test_eval_provider_estimates_cost_only_from_explicit_configured_rates(self):
+        from pipeline.decision.layer2_eval_provider import RateLimitedKimiEvalProvider
+        from pipeline.decision.rate_limit import StartRateLimiter
+
+        class InnerProvider:
+            model = "kimi-k2.5"
+            base_url = "https://api.moonshot.ai/v1"
+            api_key = "configured"
+            timeout = 90
+            max_retries = 2
+            max_output_tokens = 3000
+            actual_temperature = 1
+            response_format = {"type": "json_object"}
+            last_usage = None
+            last_cost = None
+
+            def complete_json(self, **_call):
+                self.last_usage = {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 50,
+                    "total_tokens": 150,
+                    "prompt_tokens_details": {"cached_tokens": 20},
+                }
+                self.last_cost = None
+                return {"ok": True}
+
+        provider = RateLimitedKimiEvalProvider(
+            limiter=StartRateLimiter(0),
+            api_key="configured",
+            input_cost_per_million=1.0,
+            cached_input_cost_per_million=0.1,
+            output_cost_per_million=2.0,
+        )
+        provider._provider = InnerProvider()
+
+        provider.complete_json(
+            task="layer2_eval",
+            prompt_version="layer2-scoring-investigator-v2",
+            input_payload={"candidate": "repo"},
+        )
+
+        self.assertEqual(provider.last_cost["amount"], 0.000182)
+        self.assertEqual(provider.last_cost["source"], "configured_rate_estimate")
+
+    def test_eval_provider_rate_limits_and_accumulates_retry_attempt_usage(self):
+        from pipeline.decision.layer2_eval_provider import RateLimitedKimiEvalProvider
+        from pipeline.decision.rate_limit import StartRateLimiter
+
+        class RetryingInner:
+            model = "kimi-k2.5"
+            base_url = "https://api.moonshot.ai/v1"
+            api_key = "configured"
+            timeout = 90
+            max_retries = 0
+            max_output_tokens = 3000
+            actual_temperature = 1
+            response_format = {"type": "json_object"}
+            last_usage = None
+            last_cost = None
+
+            def __init__(self):
+                self.calls = 0
+
+            def complete_json(self, **_call):
+                self.calls += 1
+                self.last_usage = {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 10,
+                    "total_tokens": 110,
+                }
+                self.last_cost = None
+                if self.calls == 1:
+                    raise RuntimeError("first attempt failed after response")
+                return {"ok": True}
+
+        waits = []
+        provider = RateLimitedKimiEvalProvider(
+            limiter=StartRateLimiter(1, clock=lambda: 0, sleeper=waits.append),
+            api_key="configured",
+            max_retries=1,
+            retry_backoff_seconds=0,
+            input_cost_per_million=1.0,
+            output_cost_per_million=2.0,
+        )
+        provider._provider = RetryingInner()
+
+        result = provider.complete_json(
+            task="layer2_eval",
+            prompt_version="layer2-scoring-investigator-v2",
+            input_payload={"candidate": "repo"},
+        )
+
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(provider.last_usage["total_tokens"], 220)
+        self.assertEqual(provider.last_cost["amount"], 0.00024)
+        self.assertEqual([row["status"] for row in provider.last_attempts], ["error", "ok"])
+        self.assertEqual(waits, [1.0])
+
     def test_kimi_web_search_client_uses_builtin_tool_without_json_mode(self):
         from pipeline.decision.kimi_provider import KimiProvider, KimiWebSearchClient
 

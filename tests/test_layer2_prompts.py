@@ -114,7 +114,7 @@ class Layer2ScoringPromptTest(unittest.TestCase):
 
     def test_real_eval_runtime_rejects_unknown_prompt_version(self) -> None:
         from pipeline.decision.run_layer2_evals import (
-            run_scoring_investigator_kimi_eval,
+            run_scoring_provider_smoke,
         )
 
         class Provider:
@@ -124,7 +124,7 @@ class Layer2ScoringPromptTest(unittest.TestCase):
             ValueError,
             "unsupported scoring prompt version: foo",
         ):
-            run_scoring_investigator_kimi_eval(
+            run_scoring_provider_smoke(
                 provider=Provider(),
                 cases=[],
                 prompt_version="foo",

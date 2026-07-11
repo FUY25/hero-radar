@@ -6,6 +6,7 @@ data/backups/
 data/logs/
 data/raw/
 data/exports/
+evals/layer2/results/
 tmp/
 __pycache__/
 *.pyc

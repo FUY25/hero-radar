@@ -79,6 +79,8 @@ class KimiProvider:
         self.max_output_tokens = (
             None if max_output_tokens is None else max(1, int(max_output_tokens))
         )
+        self.last_usage: dict[str, Any] | None = None
+        self.last_cost: dict[str, Any] | float | None = None
 
     def __repr__(self) -> str:
         return (
@@ -187,6 +189,8 @@ class KimiProvider:
     ) -> dict[str, Any]:
         if not self.api_key:
             raise RuntimeError("KIMI_API_KEY or MOONSHOT_API_KEY is not configured")
+        self.last_usage = None
+        self.last_cost = None
         payload = self.build_payload(
             system_prompt=system_prompt,
             user_payload=input_payload,
@@ -207,6 +211,17 @@ class KimiProvider:
             try:
                 with urllib.request.urlopen(request, timeout=self.timeout) as response:
                     body = json.loads(response.read().decode("utf-8"))
+                usage = body.get("usage") if isinstance(body, dict) else None
+                self.last_usage = dict(usage) if isinstance(usage, dict) else None
+                reported_cost = body.get("cost") if isinstance(body, dict) else None
+                self.last_cost = (
+                    dict(reported_cost)
+                    if isinstance(reported_cost, dict)
+                    else reported_cost
+                    if isinstance(reported_cost, (int, float))
+                    and not isinstance(reported_cost, bool)
+                    else None
+                )
                 content = body["choices"][0]["message"]["content"]
                 if not content:
                     raise RuntimeError("Kimi returned empty JSON content")

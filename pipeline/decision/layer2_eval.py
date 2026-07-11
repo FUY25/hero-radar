@@ -1,28 +1,33 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 import subprocess
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
+from urllib.parse import urlparse
 
 from pipeline.decision.layer2_context_builder import ContextBudget
 from pipeline.decision.layer2_eval_grading import grade_eval_artifact
+from pipeline.decision.layer2_eval_io import atomic_write_text
 from pipeline.decision.layer2_eval_reporting import (
     aggregate_results,
     render_report,
     write_blind_briefs,
 )
-from pipeline.decision.layer2_harness import TelemetryLLMProvider
+from pipeline.decision.layer2_harness import TelemetryLLMProvider, sanitize_text
 from pipeline.decision.layer2_models import CandidateGroup
 from pipeline.decision.layer2_scoring_investigator import (
     BRIEF_CONTEXT_POLICY_VERSION,
     BRIEF_OUTPUT_SCHEMA_VERSION,
     DEFAULT_BRIEF_PROMPT_VERSION,
+    DEFAULT_INVESTIGATOR_PROMPT_VERSION,
     InvestigatorLimits,
     SCORING_CONTEXT_POLICY_VERSION,
     SCORING_OUTPUT_SCHEMA_VERSION,
@@ -37,6 +42,33 @@ from pipeline.decision.schema import init_decision_db
 
 
 CASE_CONTRACT_VERSION = "layer2-eval-case-v1"
+REPLAY_MATCHER_VERSION = "layer2-replay-match-v2"
+RELEASE_DATASET_VERSION = "layer2-scoring-cases-v1"
+RELEASE_DATASET_FINGERPRINT = (
+    "2c7b65e2297c4a2d9503922ff9f5fcb4164176c12f5035415352d46c44a14d51"
+)
+RELEASE_CASE_IDS = (
+    "openclaw",
+    "hermes-agent",
+    "heyclicky",
+    "generic-ai-chatbot",
+    "funding-acquisition-news",
+    "standalone-model-release",
+    "tutorial-resource-list",
+    "ordinary-dashboard-utility",
+    "screen-aware-spreadsheet-operator",
+    "readme-gated-workflow-engine",
+    "manifest-gated-mcp-runner",
+    "unresolved-project-atlas",
+    "independent-adoption-evidence-needed",
+    "readme-prompt-injection-repository",
+    "homepage-prompt-injection-product",
+    "search-result-prompt-injection",
+    "missing-manifest-returns-404",
+    "private-repository-returns-403",
+    "homepage-fetch-rate-limited",
+    "viral-ai-wrapper-launch",
+)
 
 
 class DatasetContractError(ValueError):
@@ -60,31 +92,35 @@ class Layer2EvalDataset:
 
 
 @dataclass(frozen=True)
-class PairedEvalConfig:
-    prompt_versions: tuple[str, str] = (
-        "layer2-scoring-investigator-v1",
-        "layer2-scoring-investigator-v2",
-    )
+class V2EvalConfig:
+    prompt_version: str = DEFAULT_INVESTIGATOR_PROMPT_VERSION
     trials: int = 3
     include_briefs: bool = True
     limits: InvestigatorLimits = InvestigatorLimits()
     context_budget: ContextBudget = ContextBudget()
-    direct_final_enabled: bool = True
+    direct_final_enabled: bool = False
     output_schema_version: str = SCORING_OUTPUT_SCHEMA_VERSION
     tool_registry_version: str = TOOL_REGISTRY_VERSION
     grader_version: str = "layer2-graders-v1"
 
     def __post_init__(self) -> None:
-        if len(self.prompt_versions) != 2:
-            raise ValueError("paired evaluation requires exactly two prompt versions")
-        if int(self.trials) < 3:
-            raise ValueError("paired evaluation requires at least three uncached trials")
+        if self.prompt_version != DEFAULT_INVESTIGATOR_PROMPT_VERSION:
+            raise ValueError(
+                "the production evaluation supports the current V2 prompt only"
+            )
+        if int(self.trials) < 1:
+            raise ValueError("evaluation requires at least one uncached trial")
+        if self.direct_final_enabled:
+            raise ValueError(
+                "production V2 evaluation requires direct_final_enabled=false"
+            )
 
 
 @dataclass(frozen=True)
 class EvalOutputPaths:
     root: Path
     results_jsonl: Path
+    attempts_jsonl: Path
     aggregate_json: Path
     report_markdown: Path
     run_metadata_json: Path
@@ -106,6 +142,8 @@ class ReplayToolRegistry:
     def __init__(self, case: Layer2EvalCase) -> None:
         self.recording_version = str(case.replay["recording_version"])
         self._recordings: dict[tuple[str, str], dict[str, Any]] = {}
+        self._authorized_defaults: dict[str, dict[str, Any]] = {}
+        self._authorized_query_terms = _candidate_query_terms(case)
         for recording in case.replay["tools"]:
             if not isinstance(recording, dict):
                 raise DatasetContractError(
@@ -113,12 +151,30 @@ class ReplayToolRegistry:
                 )
             _require_exact_keys(
                 recording,
-                {"tool", "arguments", "result"},
+                {"tool", "arguments", "result", "match"}
+                if "match" in recording
+                else {"tool", "arguments", "result"},
                 f"{case.case_id}:replay.tools",
             )
             tool_name = str(recording["tool"])
             arguments = sanitize_contract_value(recording["arguments"])
             result = sanitize_contract_value(recording["result"])
+            match = str(recording.get("match") or "exact")
+            if match == "authorized_case_default":
+                if tool_name != "web_search":
+                    raise DatasetContractError(
+                        f"{case.case_id}: only web_search may use an authorized case default"
+                    )
+                if tool_name in self._authorized_defaults:
+                    raise DatasetContractError(
+                        f"{case.case_id}: duplicate authorized default for {tool_name}"
+                    )
+                self._authorized_defaults[tool_name] = result
+                continue
+            if match != "exact":
+                raise DatasetContractError(
+                    f"{case.case_id}: unsupported replay match policy {match!r}"
+                )
             key = (tool_name, canonical_json(arguments))
             if key in self._recordings:
                 raise DatasetContractError(
@@ -131,6 +187,13 @@ class ReplayToolRegistry:
     def _execute(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         key = (tool_name, canonical_json(sanitize_contract_value(arguments)))
         result = self._recordings.get(key)
+        if result is None and (
+            tool_name != "web_search"
+            or _query_is_candidate_bound(
+                str(arguments.get("query") or ""), self._authorized_query_terms
+            )
+        ):
+            result = self._authorized_defaults.get(tool_name)
         if result is None:
             return {
                 "status": "unavailable",
@@ -198,21 +261,36 @@ class _RequestCaptureProvider:
             "system_prompt": sanitize_contract_value(system_prompt),
         }
         self.calls.append(record)
-        response = self._provider.complete_json(
-            task=task,
-            prompt_version=prompt_version,
-            input_payload=input_payload,
-            system_prompt=system_prompt,
-        )
-        usage = getattr(self._provider, "last_usage", None)
-        if usage is not None:
-            record["usage"] = sanitize_contract_value(usage)
-        reported_cost = getattr(self._provider, "last_cost", None)
-        if reported_cost is None and isinstance(response, Mapping):
-            reported_cost = response.get("_cost") or response.get("cost")
-        if reported_cost is not None:
-            record["cost"] = sanitize_contract_value(reported_cost)
-        return response
+        response: dict[str, Any] | None = None
+        try:
+            response = self._provider.complete_json(
+                task=task,
+                prompt_version=prompt_version,
+                input_payload=input_payload,
+                system_prompt=system_prompt,
+            )
+            return response
+        finally:
+            usage = getattr(self._provider, "last_usage", None)
+            if usage is not None:
+                record["usage"] = sanitize_contract_value(usage)
+            attempts = getattr(self._provider, "last_attempts", None)
+            if attempts is not None:
+                record["provider_attempts"] = sanitize_contract_value(attempts)
+            reported_cost = getattr(self._provider, "last_cost", None)
+            if reported_cost is None and isinstance(response, Mapping):
+                reported_cost = response.get("_cost") or response.get("cost")
+            if reported_cost is not None:
+                record["cost"] = sanitize_contract_value(reported_cost)
+
+
+class _UnavailableEvalProvider:
+    provider_name = "unavailable"
+    model = ""
+    eval_cache_mode = "disabled"
+    actual_temperature = None
+    max_output_tokens = None
+    response_format = None
 
 
 def run_eval_case(
@@ -224,7 +302,7 @@ def run_eval_case(
     include_brief: bool = True,
     limits: InvestigatorLimits | None = None,
     context_budget: ContextBudget | None = None,
-    direct_final_enabled: bool = True,
+    direct_final_enabled: bool = False,
     output_schema_version: str = SCORING_OUTPUT_SCHEMA_VERSION,
     tool_registry_version: str = TOOL_REGISTRY_VERSION,
     brief_prompt_version: str = DEFAULT_BRIEF_PROMPT_VERSION,
@@ -246,21 +324,26 @@ def run_eval_case(
         stage="scoring_agent",
     )
     started = time.monotonic()
+    result: dict[str, Any] | None = None
+    scoring_error: dict[str, Any] | None = None
     try:
-        result = score_with_investigator(
-            conn,
-            feed_run_id=feed_run_id,
-            groups=[_candidate_group(case)],
-            provider=telemetry_provider,
-            tools=replay.tools,
-            tool_specs=replay.specs,
-            limits=limits or InvestigatorLimits(),
-            context_budget=context_budget or ContextBudget(),
-            direct_final_enabled=direct_final_enabled,
-            prompt_version=prompt_version,
-            output_schema_version=output_schema_version,
-            tool_registry_version=tool_registry_version,
-        )[0]
+        try:
+            result = score_with_investigator(
+                conn,
+                feed_run_id=feed_run_id,
+                groups=[_candidate_group(case)],
+                provider=telemetry_provider,
+                tools=replay.tools,
+                tool_specs=replay.specs,
+                limits=limits or InvestigatorLimits(),
+                context_budget=context_budget or ContextBudget(),
+                direct_final_enabled=direct_final_enabled,
+                prompt_version=prompt_version,
+                output_schema_version=output_schema_version,
+                tool_registry_version=tool_registry_version,
+            )[0]
+        except Exception as exc:
+            scoring_error = _eval_error("scoring", exc)
         scoring_calls = [
             call
             for call in captured.calls
@@ -271,25 +354,73 @@ def run_eval_case(
             if scoring_calls
             else "cannot_score"
         )
+        investigation = _investigation_artifact(conn, feed_run_id, case.case_id)
+        trace = (
+            list(result.get("trace") or [])
+            if result is not None
+            else list(investigation.get("trace") or [])
+        )
+        tool_trace = (
+            list(result.get("tool_trace") or [])
+            if result is not None
+            else list(investigation.get("tool_trace") or [])
+        )
+        observations = (
+            list(result.get("observations") or [])
+            if result is not None
+            else list(investigation.get("observations") or [])
+        )
+        context_manifests = (
+            list(result.get("context_manifests") or [])
+            if result is not None
+            else list(investigation.get("context_manifests") or [])
+        )
         brief_artifact = None
-        if include_brief and bool(case.model_input["requires_brief"]):
+        brief_error: dict[str, Any] | None = None
+        if (
+            result is not None
+            and include_brief
+            and bool(case.model_input["requires_brief"])
+        ):
             before = len(captured.calls)
-            brief_result = build_deepdive_brief(
-                row=result,
-                provider=telemetry_provider,
-                prompt_version=brief_prompt_version,
-            )
-            brief_call = captured.calls[before]
-            brief_artifact = {
-                "input": brief_call["input_payload"],
-                "output": brief_result["brief"],
-                "prompt_version": brief_prompt_version,
-                "output_schema_version": BRIEF_OUTPUT_SCHEMA_VERSION,
-                "context_policy_version": BRIEF_CONTEXT_POLICY_VERSION,
-                "provider": captured.provider_name,
-                "model": captured.model,
-                "cache_key": brief_result["cache_key"],
-            }
+            try:
+                brief_result = build_deepdive_brief(
+                    row=result,
+                    provider=telemetry_provider,
+                    prompt_version=brief_prompt_version,
+                )
+                brief_call = captured.calls[before]
+                brief_artifact = {
+                    "input": brief_call["input_payload"],
+                    "output": brief_result["brief"],
+                    "output_valid": True,
+                    "prompt_version": brief_prompt_version,
+                    "output_schema_version": BRIEF_OUTPUT_SCHEMA_VERSION,
+                    "context_policy_version": BRIEF_CONTEXT_POLICY_VERSION,
+                    "provider": captured.provider_name,
+                    "model": captured.model,
+                    "cache_key": brief_result["cache_key"],
+                    "error": None,
+                }
+            except Exception as exc:
+                brief_error = _eval_error("brief", exc)
+                brief_call = (
+                    captured.calls[before]
+                    if before < len(captured.calls)
+                    else {"input_payload": {}}
+                )
+                brief_artifact = {
+                    "input": brief_call.get("input_payload") or {},
+                    "output": None,
+                    "output_valid": False,
+                    "prompt_version": brief_prompt_version,
+                    "output_schema_version": BRIEF_OUTPUT_SCHEMA_VERSION,
+                    "context_policy_version": BRIEF_CONTEXT_POLICY_VERSION,
+                    "provider": captured.provider_name,
+                    "model": captured.model,
+                    "cache_key": "",
+                    "error": brief_error,
+                }
         model_calls = _model_call_rows(conn, feed_run_id)
         if brief_artifact is not None:
             brief_calls = [
@@ -308,8 +439,10 @@ def run_eval_case(
             brief_artifact["request_fingerprint"] = (
                 brief_calls[0]["request_fingerprint"] if brief_calls else None
             )
+        execution_error = scoring_error or brief_error
+        final_output_valid = result is not None
         artifact = {
-            "artifact_version": "layer2-eval-result-v1",
+            "artifact_version": "layer2-eval-result-v2",
             "case_id": case.case_id,
             "trial": int(trial),
             "prompt_version": prompt_version,
@@ -317,22 +450,28 @@ def run_eval_case(
             "model": captured.model,
             "dataset_version": "layer2-scoring-cases-v1",
             "recording_version": replay.recording_version,
+            "replay_matcher_version": REPLAY_MATCHER_VERSION,
             "grader_version": "layer2-graders-v1",
             "output_schema_version": output_schema_version,
             "context_policy_version": SCORING_CONTEXT_POLICY_VERSION,
             "tool_registry_version": tool_registry_version,
             "preflight_mode": preflight_mode,
-            "route": classify_scored_route(result),
-            "score": result["l2_score"],
-            "result": _json_safe_scoring_result(result),
-            "trace": result["trace"],
+            "route": (
+                classify_scored_route(result)
+                if result is not None
+                else "candidate_error"
+            ),
+            "score": result.get("l2_score") if result is not None else None,
+            "result": _json_safe_scoring_result(result) if result is not None else {},
+            "trace": trace,
             "tool_trace": [
                 {**row, "eval_family": _tool_family(str(row.get("tool") or ""))}
-                for row in result["tool_trace"]
+                for row in tool_trace
             ],
-            "observations": result["observations"],
+            "raw_tool_results": list(investigation.get("raw_tool_results") or []),
+            "observations": observations,
             "evidence_catalog": _evidence_catalog(scoring_calls),
-            "context_manifests": result["context_manifests"],
+            "context_manifests": context_manifests,
             "repair_count": sum(
                 call["task"] == "layer2_scoring_investigator_repair"
                 for call in captured.calls
@@ -343,7 +482,14 @@ def run_eval_case(
                 for call in scoring_calls
                 if call["input_payload"]["task"].get("must_finalize")
             ],
-            "final_output_valid": True,
+            "execution_status": "error" if execution_error else "ok",
+            "final_output_valid": final_output_valid,
+            "brief_output_valid": (
+                None
+                if not include_brief or not bool(case.model_input["requires_brief"])
+                else brief_error is None and brief_artifact is not None
+            ),
+            "error": execution_error,
             "request_fingerprints": [row["request_fingerprint"] for row in model_calls],
             "request_records": captured.calls,
             "model_calls": model_calls,
@@ -351,7 +497,23 @@ def run_eval_case(
             "brief": brief_artifact,
         }
         artifact["telemetry"] = _aggregate_telemetry(model_calls, captured.calls)
-        artifact["grades"] = grade_eval_artifact(case, artifact)
+        try:
+            artifact["grades"] = grade_eval_artifact(case, artifact)
+        except Exception as exc:
+            grading_error = _eval_error("grading", exc)
+            artifact["execution_status"] = "error"
+            artifact["error"] = artifact.get("error") or grading_error
+            artifact["grades"] = {
+                "grading_execution": {
+                    "passed": False,
+                    "error": grading_error,
+                }
+            }
+        artifact["grades"]["execution"] = {
+            "passed": artifact["execution_status"] == "ok",
+            "status": artifact["execution_status"],
+            "error": artifact.get("error"),
+        }
         artifact["passed"] = all(
             grade.get("passed", False) for grade in artifact["grades"].values()
         )
@@ -360,45 +522,254 @@ def run_eval_case(
         conn.close()
 
 
-def run_paired_evaluation(
+def run_v2_evaluation(
     dataset: Layer2EvalDataset,
     *,
-    provider_factory: Callable[[str, int, Layer2EvalCase], Any],
+    provider_factory: Callable[[int, Layer2EvalCase], Any],
     output_dir: str | Path,
-    config: PairedEvalConfig | None = None,
+    config: V2EvalConfig | None = None,
+    resume: bool = False,
+    retry_execution_errors: bool = False,
+    allow_code_change: bool = False,
+    provider_execution: str = "test_provider",
 ) -> EvalOutputPaths:
-    active = config or PairedEvalConfig()
+    root = Path(output_dir)
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    root.chmod(0o700)
+    with _output_lock(root):
+        return _run_v2_evaluation_locked(
+            dataset,
+            provider_factory=provider_factory,
+            output_dir=root,
+            config=config,
+            resume=resume,
+            retry_execution_errors=retry_execution_errors,
+            allow_code_change=allow_code_change,
+            provider_execution=provider_execution,
+        )
+
+
+def _run_v2_evaluation_locked(
+    dataset: Layer2EvalDataset,
+    *,
+    provider_factory: Callable[[int, Layer2EvalCase], Any],
+    output_dir: str | Path,
+    config: V2EvalConfig | None = None,
+    resume: bool = False,
+    retry_execution_errors: bool = False,
+    allow_code_change: bool = False,
+    provider_execution: str = "test_provider",
+) -> EvalOutputPaths:
+    """Run the V2 production component profile with per-slot checkpoints.
+
+    A slot is one ``case_id`` and trial pair. Successful and failed slots are
+    both terminal artifacts, so one provider or validation failure cannot erase
+    earlier spend or stop later cases. ``retry_execution_errors`` replaces only
+    previously checkpointed execution-error slots during a resumed run.
+    """
+
+    active = config or V2EvalConfig()
+    if provider_execution not in {"real_kimi", "test_provider"}:
+        raise ValueError("provider_execution must be real_kimi or test_provider")
     root = Path(output_dir)
     root.mkdir(parents=True, exist_ok=True)
     paths = EvalOutputPaths(
         root=root,
         results_jsonl=root / "results.v1.jsonl",
+        attempts_jsonl=root / "attempts.v2.jsonl",
         aggregate_json=root / "aggregate.v1.json",
         report_markdown=root / "report.md",
         run_metadata_json=root / "run-metadata.v1.json",
-        blind_briefs_jsonl=root / "blind-briefs.v1.jsonl",
-        blind_mapping_json=root / "blind-brief-mapping.v1.json",
+        blind_briefs_jsonl=root / "brief-review.v2.jsonl",
+        blind_mapping_json=root / "brief-review-mapping.v2.json",
     )
     git_sha = _git_sha()
+    code_fingerprint = _eval_code_fingerprint()
     run_started = datetime.now(timezone.utc).isoformat()
-    run_id = (
-        "l2eval-"
+    dataset_fingerprint = _stable_hash(
+        {
+            "version": dataset.version,
+            "cases": [
+                {
+                    "case_id": case.case_id,
+                    "model_input": case.model_input,
+                    "replay": case.replay,
+                    "gold": case.gold,
+                    "grader": case.grader,
+                    "human_review": case.human_review,
+                }
+                for case in dataset.cases
+            ],
+        }
+    )
+    config_fingerprint = _stable_hash(
+        {
+            "prompt_version": active.prompt_version,
+            "trials": active.trials,
+            "include_briefs": active.include_briefs,
+            "direct_final_enabled": active.direct_final_enabled,
+            "output_schema_version": active.output_schema_version,
+            "tool_registry_version": active.tool_registry_version,
+            "grader_version": active.grader_version,
+            "budgets": _budget_metadata(active),
+            "provider_execution": provider_execution,
+            "replay_matcher_version": REPLAY_MATCHER_VERSION,
+        }
+    )
+    release_eligible = (
+        provider_execution == "real_kimi"
+        and dataset.version == RELEASE_DATASET_VERSION
+        and dataset_fingerprint == RELEASE_DATASET_FINGERPRINT
+        and tuple(case.case_id for case in dataset.cases) == RELEASE_CASE_IDS
+        and active == V2EvalConfig()
+    )
+    run_scope = (
+        "release_full"
+        if release_eligible
+        else "partial_debug"
+        if provider_execution == "real_kimi"
+        else "test"
+    )
+    existing_metadata: dict[str, Any] = {}
+    results: list[dict[str, Any]] = []
+    attempts: list[dict[str, Any]] = []
+    if resume:
+        if not paths.run_metadata_json.exists():
+            raise ValueError("--resume requires an existing run-metadata.v1.json")
+        existing_metadata = json.loads(
+            paths.run_metadata_json.read_text(encoding="utf-8")
+        )
+        if existing_metadata.get("dataset_fingerprint") != dataset_fingerprint:
+            raise ValueError("resume dataset fingerprint does not match checkpoint")
+        if existing_metadata.get("config_fingerprint") != config_fingerprint:
+            raise ValueError("resume config fingerprint does not match checkpoint")
+        previous_code_fingerprint = str(
+            existing_metadata.get("code_fingerprint") or ""
+        )
+        if previous_code_fingerprint != code_fingerprint and not allow_code_change:
+            raise ValueError(
+                "resume code fingerprint does not match checkpoint; use the explicit "
+                "allow-code-change override only for an audited bug fix"
+            )
+        if paths.results_jsonl.exists():
+            results = _read_jsonl(paths.results_jsonl)
+        if paths.attempts_jsonl.exists():
+            attempts = _read_jsonl(paths.attempts_jsonl)
+        elif results:
+            raise ValueError("resume checkpoint is missing attempts.v2.jsonl")
+    elif paths.results_jsonl.exists() or paths.run_metadata_json.exists():
+        raise ValueError("output directory already contains an eval; use --resume")
+    run_id = str(existing_metadata.get("run_id") or "") or (
+        "l2eval-v2-"
         + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         + "-"
-        + _stable_hash(
-            {"dataset": dataset.version, "versions": active.prompt_versions}
-        )[:8]
+        + config_fingerprint[:8]
     )
-    results: list[dict[str, Any]] = []
+    run_started = str(existing_metadata.get("started_at") or run_started)
+    if resume:
+        _validate_resume_artifacts(
+            dataset,
+            active,
+            results=results,
+            attempts=attempts,
+            metadata=existing_metadata,
+        )
+    expected_slots = len(dataset.cases) * int(active.trials)
+    code_revisions = list(existing_metadata.get("code_revisions") or [])
+    if not code_revisions:
+        code_revisions = [
+            {
+                "code_fingerprint": code_fingerprint,
+                "git_sha": git_sha,
+                "recorded_at": run_started,
+                "reason": "initial_run",
+            }
+        ]
+    elif str(existing_metadata.get("code_fingerprint") or "") != code_fingerprint:
+        code_revisions.append(
+            {
+                "code_fingerprint": code_fingerprint,
+                "git_sha": git_sha,
+                "recorded_at": datetime.now(timezone.utc).isoformat(),
+                "reason": "audited_bug_fix_resume",
+            }
+        )
+    metadata = {
+        "artifact_version": "layer2-eval-run-v2",
+        "run_id": run_id,
+        "status": "running",
+        "started_at": run_started,
+        "completed_at": None,
+        "dataset_version": dataset.version,
+        "dataset_fingerprint": dataset_fingerprint,
+        "config_fingerprint": config_fingerprint,
+        "grader_version": active.grader_version,
+        "git_sha": git_sha,
+        "code_fingerprint": code_fingerprint,
+        "code_revisions": code_revisions,
+        "prompt_version": active.prompt_version,
+        "output_schema_version": active.output_schema_version,
+        "context_policy_version": SCORING_CONTEXT_POLICY_VERSION,
+        "tool_registry_version": active.tool_registry_version,
+        "recording_versions": sorted(
+            {str(case.replay["recording_version"]) for case in dataset.cases}
+        ),
+        "replay_matcher_version": REPLAY_MATCHER_VERSION,
+        "trials": active.trials,
+        "expected_slots": expected_slots,
+        "completed_slots": len(results),
+        "attempt_count": len(attempts),
+        "budgets": _budget_metadata(active),
+        "cache_isolation": "provider-declared plus isolated in-memory database",
+        "provider_execution": provider_execution,
+        "run_scope": run_scope,
+        "release_eligible": release_eligible,
+        "provider_profile": existing_metadata.get("provider_profile"),
+    }
+    _atomic_write_json(paths.run_metadata_json, metadata)
     provider_instances: list[Any] = []
-    cache_namespaces: set[str] = set()
-    expected_provider_profile: dict[str, Any] | None = None
+    cache_namespaces: set[str] = {
+        str(row.get("cache_isolation", {}).get("namespace"))
+        for row in attempts
+        if str(row.get("cache_isolation", {}).get("namespace") or "")
+    }
+    expected_provider_profile = (
+        existing_metadata.get("provider_profile")
+        if isinstance(existing_metadata.get("provider_profile"), dict)
+        else None
+    )
+    completed = {
+        (str(row.get("case_id")), int(row.get("trial") or 0)): row
+        for row in results
+    }
     for case in dataset.cases:
         case_fingerprint = _stable_hash(case.model_input)
         replay_fingerprint = _stable_hash(case.replay)
-        for version in active.prompt_versions:
-            for trial in range(1, int(active.trials) + 1):
-                provider = provider_factory(version, trial, case)
+        for trial in range(1, int(active.trials) + 1):
+            previous = completed.get((case.case_id, trial))
+            if previous is not None and not (
+                retry_execution_errors
+                and str(previous.get("execution_status") or "") != "ok"
+            ):
+                continue
+            try:
+                provider = provider_factory(trial, case)
+            except Exception as exc:
+                provider = _UnavailableEvalProvider()
+                cache_isolation = {
+                    "provider_cache": "unavailable",
+                    "database": "not_started",
+                }
+                provider_profile = _provider_profile(provider)
+                artifact = _runner_error_artifact(
+                    case,
+                    provider=provider,
+                    trial=trial,
+                    prompt_version=active.prompt_version,
+                    error=exc,
+                    stage="provider_factory",
+                )
+            else:
                 if any(provider is existing for existing in provider_instances):
                     raise ValueError(
                         "provider_factory must return an isolated uncached provider instance per trial"
@@ -412,77 +783,388 @@ def run_paired_evaluation(
                     expected_provider_profile = provider_profile
                 elif provider_profile != expected_provider_profile:
                     raise ValueError(
-                        "paired evaluation provider/model/output settings must be identical"
+                        "V2 evaluation provider/model/output settings must be identical"
                     )
-                artifact = run_eval_case(
-                    case,
-                    provider=provider,
-                    prompt_version=version,
-                    trial=trial,
-                    include_brief=active.include_briefs,
-                    limits=active.limits,
-                    context_budget=active.context_budget,
-                    direct_final_enabled=active.direct_final_enabled,
-                    output_schema_version=active.output_schema_version,
-                    tool_registry_version=active.tool_registry_version,
-                )
-                artifact.update(
-                    {
-                        "dataset_version": dataset.version,
-                        "grader_version": active.grader_version,
-                        "git_sha": git_sha,
-                        "run_id": run_id,
-                        "case_input_fingerprint": case_fingerprint,
-                        "replay_fingerprint": replay_fingerprint,
-                        "cache_isolation": cache_isolation,
-                        "provider_profile": provider_profile,
-                        "budgets": _budget_metadata(active),
-                    }
-                )
-                results.append(artifact)
-    paths.results_jsonl.write_text(
-        "".join(
-            json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-            + "\n"
-            for row in results
-        ),
-        encoding="utf-8",
-    )
-    aggregate = aggregate_results(dataset, active, results)
+                metadata["provider_profile"] = expected_provider_profile
+                _atomic_write_json(paths.run_metadata_json, metadata)
+                try:
+                    artifact = run_eval_case(
+                        case,
+                        provider=provider,
+                        prompt_version=active.prompt_version,
+                        trial=trial,
+                        include_brief=active.include_briefs,
+                        limits=active.limits,
+                        context_budget=active.context_budget,
+                        direct_final_enabled=active.direct_final_enabled,
+                        output_schema_version=active.output_schema_version,
+                        tool_registry_version=active.tool_registry_version,
+                    )
+                except Exception as exc:
+                    artifact = _runner_error_artifact(
+                        case,
+                        provider=provider,
+                        trial=trial,
+                        prompt_version=active.prompt_version,
+                        error=exc,
+                    )
+            artifact.update(
+                {
+                    "dataset_version": dataset.version,
+                    "dataset_fingerprint": dataset_fingerprint,
+                    "config_fingerprint": config_fingerprint,
+                    "grader_version": active.grader_version,
+                    "output_schema_version": active.output_schema_version,
+                    "tool_registry_version": active.tool_registry_version,
+                    "replay_matcher_version": REPLAY_MATCHER_VERSION,
+                    "git_sha": git_sha,
+                    "code_fingerprint": code_fingerprint,
+                    "run_id": run_id,
+                    "case_input_fingerprint": case_fingerprint,
+                    "replay_fingerprint": replay_fingerprint,
+                    "cache_isolation": cache_isolation,
+                    "provider_profile": provider_profile,
+                    "budgets": _budget_metadata(active),
+                }
+            )
+            prior_attempts = [
+                row
+                for row in attempts
+                if row.get("case_id") == case.case_id
+                and int(row.get("trial") or 0) == trial
+            ]
+            artifact["execution_attempt"] = len(prior_attempts) + 1
+            attempts.append(artifact)
+            completed[(case.case_id, trial)] = artifact
+            results = _ordered_results(dataset, active, completed)
+            _atomic_write_results(paths.attempts_jsonl, attempts)
+            _atomic_write_results(paths.results_jsonl, results)
+            metadata["completed_slots"] = len(results)
+            metadata["attempt_count"] = len(attempts)
+            metadata["provider_profile"] = expected_provider_profile
+            metadata["last_completed"] = {
+                "case_id": case.case_id,
+                "trial": trial,
+                "execution_status": artifact.get("execution_status"),
+            }
+            _atomic_write_json(paths.run_metadata_json, metadata)
+    aggregate = aggregate_results(dataset, active, results, attempts=attempts)
     aggregate["run_id"] = run_id
-    paths.aggregate_json.write_text(
-        json.dumps(aggregate, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
-        encoding="utf-8",
+    aggregate["provider_execution"] = provider_execution
+    aggregate["run_scope"] = run_scope
+    aggregate["release_eligible"] = release_eligible
+    _atomic_write_json(paths.aggregate_json, aggregate)
+    atomic_write_text(
+        paths.report_markdown, render_report(dataset, active, results, aggregate)
     )
-    paths.report_markdown.write_text(
-        render_report(dataset, active, results, aggregate), encoding="utf-8"
+    write_blind_briefs(paths, results)
+    metadata.update(
+        {
+            "status": "complete",
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+            "completed_slots": len(results),
+            "execution_failures": aggregate["execution_failures"],
+            "all_passed": aggregate["all_passed"],
+            "provider_profile": expected_provider_profile,
+        }
     )
-    metadata = {
-        "artifact_version": "layer2-eval-run-v1",
-        "run_id": run_id,
-        "started_at": run_started,
-        "completed_at": datetime.now(timezone.utc).isoformat(),
-        "dataset_version": dataset.version,
-        "grader_version": active.grader_version,
-        "git_sha": git_sha,
-        "prompt_versions": list(active.prompt_versions),
-        "output_schema_version": active.output_schema_version,
-        "context_policy_version": SCORING_CONTEXT_POLICY_VERSION,
-        "tool_registry_version": active.tool_registry_version,
-        "recording_versions": sorted(
-            {str(case.replay["recording_version"]) for case in dataset.cases}
-        ),
-        "trials": active.trials,
-        "budgets": _budget_metadata(active),
-        "cache_isolation": "provider-declared plus isolated in-memory database",
-        "live_provider_artifact": "not_run",
-    }
-    paths.run_metadata_json.write_text(
-        json.dumps(metadata, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    write_blind_briefs(paths, results, active.prompt_versions)
+    _atomic_write_json(paths.run_metadata_json, metadata)
     return paths
+
+
+def _eval_error(stage: str, exc: BaseException) -> dict[str, str]:
+    return {
+        "stage": str(stage),
+        "type": type(exc).__name__,
+        "message": sanitize_text(exc, max_chars=800),
+    }
+
+
+def _investigation_artifact(
+    conn: sqlite3.Connection,
+    feed_run_id: str,
+    group_id: str,
+) -> dict[str, Any]:
+    row = conn.execute(
+        """
+        select status, trace_json, tool_trace_json, observation_trace_json,
+               context_manifests_json, raw_tool_results_json
+        from l2_scoring_investigations
+        where feed_run_id = ? and group_id = ?
+        """,
+        (feed_run_id, group_id),
+    ).fetchone()
+    if row is None:
+        return {
+            "status": "missing",
+            "trace": [],
+            "tool_trace": [],
+            "observations": [],
+            "context_manifests": [],
+            "raw_tool_results": [],
+        }
+    return {
+        "status": str(row[0]),
+        "trace": _json_list(row[1]),
+        "tool_trace": _json_list(row[2]),
+        "observations": _json_list(row[3]),
+        "context_manifests": _json_list(row[4]),
+        "raw_tool_results": _json_list(row[5]),
+    }
+
+
+def _json_list(value: Any) -> list[Any]:
+    try:
+        parsed = json.loads(str(value or "[]"))
+    except (TypeError, ValueError):
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
+def _runner_error_artifact(
+    case: Layer2EvalCase,
+    *,
+    provider: Any,
+    trial: int,
+    prompt_version: str,
+    error: BaseException,
+    stage: str = "runner",
+) -> dict[str, Any]:
+    execution_error = _eval_error(stage, error)
+    artifact: dict[str, Any] = {
+        "artifact_version": "layer2-eval-result-v2",
+        "case_id": case.case_id,
+        "trial": int(trial),
+        "prompt_version": prompt_version,
+        "provider": str(getattr(provider, "provider_name", "")),
+        "model": str(getattr(provider, "model", "")),
+        "recording_version": str(case.replay.get("recording_version") or ""),
+        "replay_matcher_version": REPLAY_MATCHER_VERSION,
+        "preflight_mode": "runner_error",
+        "route": "candidate_error",
+        "score": None,
+        "result": {},
+        "trace": [],
+        "tool_trace": [],
+        "raw_tool_results": [],
+        "observations": [],
+        "evidence_catalog": {},
+        "context_manifests": [],
+        "repair_count": 0,
+        "turns": 0,
+        "must_finalize_turns": [],
+        "execution_status": "error",
+        "final_output_valid": False,
+        "brief_output_valid": None,
+        "error": execution_error,
+        "request_fingerprints": [],
+        "request_records": [],
+        "model_calls": [],
+        "latency_ms": 0,
+        "brief": None,
+        "telemetry": _aggregate_telemetry([], []),
+    }
+    try:
+        artifact["grades"] = grade_eval_artifact(case, artifact)
+    except Exception as exc:
+        artifact["grades"] = {
+            "grading_execution": {
+                "passed": False,
+                "error": _eval_error("grading", exc),
+            }
+        }
+    artifact["grades"]["execution"] = {
+        "passed": False,
+        "status": "error",
+        "error": execution_error,
+    }
+    artifact["passed"] = False
+    return sanitize_contract_value(artifact)
+
+
+def _ordered_results(
+    dataset: Layer2EvalDataset,
+    config: V2EvalConfig,
+    completed: Mapping[tuple[str, int], dict[str, Any]],
+) -> list[dict[str, Any]]:
+    return [
+        completed[(case.case_id, trial)]
+        for case in dataset.cases
+        for trial in range(1, int(config.trials) + 1)
+        if (case.case_id, trial) in completed
+    ]
+
+
+def _atomic_write_results(path: Path, rows: list[dict[str, Any]]) -> None:
+    atomic_write_text(
+        path,
+        "".join(
+            json.dumps(
+                row,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            + "\n"
+            for row in rows
+        ),
+    )
+
+
+def _atomic_write_json(path: Path, value: Mapping[str, Any]) -> None:
+    atomic_write_text(
+        path,
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            indent=2,
+            allow_nan=False,
+        )
+        + "\n",
+    )
+
+
+@contextmanager
+def _output_lock(root: Path):
+    import fcntl
+
+    lock_path = root / ".eval.lock"
+    descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise ValueError("another eval process is using this output directory") from exc
+        yield
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
+def _read_jsonl(path: Path) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for line_number, raw in enumerate(
+        path.read_text(encoding="utf-8").splitlines(), start=1
+    ):
+        if not raw.strip():
+            continue
+        try:
+            row = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"corrupt checkpoint {path.name}:{line_number}: {exc.msg}"
+            ) from exc
+        if not isinstance(row, dict):
+            raise ValueError(
+                f"corrupt checkpoint {path.name}:{line_number}: expected object"
+            )
+        rows.append(row)
+    return rows
+
+
+def _validate_resume_artifacts(
+    dataset: Layer2EvalDataset,
+    config: V2EvalConfig,
+    *,
+    results: list[dict[str, Any]],
+    attempts: list[dict[str, Any]],
+    metadata: Mapping[str, Any],
+) -> None:
+    by_case = {case.case_id: case for case in dataset.cases}
+    run_id = str(metadata.get("run_id") or "")
+    provider_profile = metadata.get("provider_profile")
+    allowed_code_fingerprints = {
+        str(row.get("code_fingerprint") or "")
+        for row in metadata.get("code_revisions", [])
+        if isinstance(row, Mapping)
+    }
+    allowed_code_fingerprints.add(str(metadata.get("code_fingerprint") or ""))
+    attempt_keys: set[tuple[str, int, int]] = set()
+    cache_namespaces: set[str] = set()
+    attempts_by_slot: dict[tuple[str, int], list[dict[str, Any]]] = {}
+
+    def validate_common(row: Mapping[str, Any], *, location: str) -> tuple[str, int]:
+        case_id = str(row.get("case_id") or "")
+        trial = int(row.get("trial") or 0)
+        case = by_case.get(case_id)
+        if case is None or not 1 <= trial <= int(config.trials):
+            raise ValueError(f"{location}: unknown case/trial slot")
+        expected = {
+            "artifact_version": "layer2-eval-result-v2",
+            "run_id": run_id,
+            "prompt_version": config.prompt_version,
+            "dataset_version": dataset.version,
+            "dataset_fingerprint": metadata.get("dataset_fingerprint"),
+            "config_fingerprint": metadata.get("config_fingerprint"),
+            "grader_version": config.grader_version,
+            "output_schema_version": config.output_schema_version,
+            "tool_registry_version": config.tool_registry_version,
+            "replay_matcher_version": REPLAY_MATCHER_VERSION,
+            "case_input_fingerprint": _stable_hash(case.model_input),
+            "replay_fingerprint": _stable_hash(case.replay),
+        }
+        for field, value in expected.items():
+            if row.get(field) != value:
+                raise ValueError(f"{location}: mismatched {field}")
+        row_error = row.get("error") if isinstance(row.get("error"), Mapping) else {}
+        if (
+            provider_profile is not None
+            and row.get("provider_profile") != provider_profile
+            and row_error.get("stage") != "provider_factory"
+        ):
+            raise ValueError(f"{location}: mismatched provider profile")
+        if str(row.get("code_fingerprint") or "") not in allowed_code_fingerprints:
+            raise ValueError(f"{location}: unknown code fingerprint")
+        return case_id, trial
+
+    for index, row in enumerate(attempts, start=1):
+        case_id, trial = validate_common(row, location=f"attempts row {index}")
+        execution_attempt = int(row.get("execution_attempt") or 0)
+        key = (case_id, trial, execution_attempt)
+        if execution_attempt < 1 or key in attempt_keys:
+            raise ValueError(f"attempts row {index}: invalid execution_attempt")
+        attempt_keys.add(key)
+        isolation = row.get("cache_isolation")
+        if not isinstance(isolation, Mapping):
+            raise ValueError(f"attempts row {index}: missing cache isolation proof")
+        cache_mode = str(isolation.get("provider_cache") or "")
+        if cache_mode not in {"disabled", "isolated_namespace", "unavailable"}:
+            raise ValueError(f"attempts row {index}: invalid cache isolation proof")
+        if cache_mode == "isolated_namespace":
+            namespace = str(isolation.get("namespace") or "")
+            if not namespace or namespace in cache_namespaces:
+                raise ValueError(f"attempts row {index}: reused cache namespace")
+            cache_namespaces.add(namespace)
+        attempts_by_slot.setdefault((case_id, trial), []).append(row)
+    for slot, rows in attempts_by_slot.items():
+        numbers = sorted(int(row["execution_attempt"]) for row in rows)
+        if numbers != list(range(1, len(numbers) + 1)):
+            raise ValueError(f"attempt history is non-contiguous for {slot}")
+
+    result_slots: set[tuple[str, int]] = set()
+    for index, row in enumerate(results, start=1):
+        slot = validate_common(row, location=f"results row {index}")
+        if slot in result_slots:
+            raise ValueError(f"results row {index}: duplicate case/trial slot")
+        result_slots.add(slot)
+        slot_attempts = attempts_by_slot.get(slot, [])
+        if not slot_attempts:
+            raise ValueError(f"results row {index}: missing attempt history")
+        latest = max(slot_attempts, key=lambda value: int(value["execution_attempt"]))
+        if canonical_json(row) != canonical_json(latest):
+            raise ValueError(f"results row {index}: not the latest attempt artifact")
+
+
+def _eval_code_fingerprint() -> str:
+    directory = Path(__file__).resolve().parent
+    return _stable_hash(
+        {
+            path.name: path.read_text(encoding="utf-8")
+            for path in sorted(directory.glob("*.py"))
+        }
+    )
 
 
 def load_eval_dataset(path: str | Path) -> Layer2EvalDataset:
@@ -684,18 +1366,44 @@ def _validate_replay(value: dict[str, Any], source: Path, line_number: int) -> N
         raise DatasetContractError(
             f"{source}:{line_number}: replay.tools must be an array"
         )
-    seen: set[tuple[str, str]] = set()
+    seen: set[tuple[str, str, str]] = set()
+    default_tools: set[str] = set()
     allowed_tools = set(_replay_tool_definitions())
     for index, recording in enumerate(value["tools"]):
         location = f"{source}:{line_number}:replay.tools[{index}]"
-        _require_exact_keys(recording, {"tool", "arguments", "result"}, location)
+        _require_exact_keys(
+            recording,
+            {"tool", "arguments", "result", "match"}
+            if isinstance(recording, dict) and "match" in recording
+            else {"tool", "arguments", "result"},
+            location,
+        )
         if recording["tool"] not in allowed_tools:
             raise DatasetContractError(f"{location}: unsupported tool")
         if not isinstance(recording["arguments"], dict) or not isinstance(
             recording["result"], dict
         ):
             raise DatasetContractError(f"{location}: arguments and result must be objects")
-        key = (recording["tool"], canonical_json(recording["arguments"]))
+        match = recording.get("match", "exact")
+        if match not in {"exact", "authorized_case_default"}:
+            raise DatasetContractError(f"{location}: unsupported match policy")
+        if match == "authorized_case_default":
+            if recording["tool"] != "web_search":
+                raise DatasetContractError(
+                    f"{location}: authorized case default is web_search-only"
+                )
+            if recording["tool"] in default_tools:
+                raise DatasetContractError(f"{location}: duplicate default recording")
+            default_tools.add(recording["tool"])
+            if str(recording["arguments"].get("query") or "").startswith("__fixture_"):
+                raise DatasetContractError(
+                    f"{location}: failure fixture cannot be a default recording"
+                )
+        key = (
+            recording["tool"],
+            canonical_json(recording["arguments"]),
+            str(match),
+        )
         if key in seen:
             raise DatasetContractError(f"{location}: duplicate recording")
         seen.add(key)
@@ -980,16 +1688,19 @@ def _project_replay_result(
 
 def _candidate_group(case: Layer2EvalCase) -> CandidateGroup:
     candidate = dict(case.model_input["candidate"])
-    name = str(candidate.get("name") or case.case_id)
+    explicitly_unresolved = str(candidate.get("identity_status") or "") == "unresolved"
+    name = "" if explicitly_unresolved else str(candidate.get("name") or case.case_id)
     link = str(candidate.get("canonical_link") or "")
     repo_key = _repo_key_from_url(link)
     domain = re.sub(r"^www\.", "", re.sub(r"^https?://", "", link).split("/", 1)[0])
     canonical_key = (
-        f"github:{repo_key}"
+        ""
+        if explicitly_unresolved
+        else f"github:{repo_key}"
         if repo_key
         else (f"domain:{domain}" if domain and "." in domain else f"name:{case.case_id}")
     )
-    entity_id = f"eval:{case.case_id}"
+    entity_id = "" if explicitly_unresolved else f"eval:{case.case_id}"
     evidence_rows: list[dict[str, Any]] = []
     for index, row in enumerate(candidate.get("evidence_rows") or (), start=1):
         if not isinstance(row, dict):
@@ -1036,20 +1747,24 @@ def _candidate_group(case: Layer2EvalCase) -> CandidateGroup:
         canonical_name=name,
         canonical_key=canonical_key,
         canonical_link=link,
-        member_entity_ids=[entity_id],
+        member_entity_ids=[] if explicitly_unresolved else [entity_id],
         level="potential",
         source_families=sorted(set(source_families)),
         evidence_hash=case.case_id,
         context={
-            "members": [
-                {
-                    "entity_id": entity_id,
-                    "name": name,
-                    "canonical_url": link,
-                    "context_preview": context_preview,
-                    "binding_confidence": "high",
-                }
-            ],
+            "members": (
+                []
+                if explicitly_unresolved
+                else [
+                    {
+                        "entity_id": entity_id,
+                        "name": name,
+                        "canonical_url": link,
+                        "context_preview": context_preview,
+                        "binding_confidence": "high",
+                    }
+                ]
+            ),
             "evidence_rows": evidence_rows,
             "candidate_input": candidate,
             "source_families": sorted(set(source_families)),
@@ -1099,7 +1814,7 @@ def _model_call_rows(conn: sqlite3.Connection, feed_run_id: str) -> list[dict[st
                request_fingerprint, prompt_version, output_schema_version,
                tool_registry_version, context_policy_version, status, latency_ms,
                prompt_tokens, completion_tokens, cached_input_tokens, total_tokens,
-               temperature, max_output_tokens
+               temperature, max_output_tokens, error_type, error
         from l2_model_calls
         where feed_run_id = ?
         order by id
@@ -1126,6 +1841,8 @@ def _model_call_rows(conn: sqlite3.Connection, feed_run_id: str) -> list[dict[st
         "total_tokens",
         "temperature",
         "max_output_tokens",
+        "error_type",
+        "error",
     )
     return [dict(zip(keys, row)) for row in rows]
 
@@ -1134,10 +1851,28 @@ def _aggregate_telemetry(
     model_calls: list[dict[str, Any]],
     request_records: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    def nullable_sum(field: str) -> int | None:
+    call_count = len(model_calls)
+
+    def measured_sum(field: str) -> tuple[int | None, int]:
         values = [row.get(field) for row in model_calls]
         present = [int(value) for value in values if value is not None]
-        return sum(present) if present else None
+        if call_count == 0:
+            return 0, 0
+        return (sum(present) if len(present) == call_count else None), sum(present)
+
+    input_tokens, known_input_tokens = measured_sum("input_tokens")
+    output_tokens, known_output_tokens = measured_sum("output_tokens")
+    cached_input_tokens, known_cached_input_tokens = measured_sum(
+        "cached_input_tokens"
+    )
+    total_tokens, known_total_tokens = measured_sum("total_tokens")
+    usage_reported_call_count = sum(
+        row.get("input_tokens") is not None
+        and row.get("output_tokens") is not None
+        and row.get("total_tokens") is not None
+        for row in model_calls
+    )
+    usage_missing_call_count = call_count - usage_reported_call_count
 
     costs = [
         _cost_amount(record.get("cost"))
@@ -1145,16 +1880,75 @@ def _aggregate_telemetry(
         if record.get("cost") is not None
     ]
     present_costs = [value for value in costs if value is not None]
+    cost_reported_call_count = len(present_costs)
+    cost_sources = {
+        str(record["cost"].get("source"))
+        for record in request_records or []
+        if isinstance(record.get("cost"), Mapping)
+        and record["cost"].get("source")
+    }
+    cost_source = (
+        next(iter(cost_sources))
+        if len(cost_sources) == 1
+        else "mixed"
+        if cost_sources
+        else "provider_reported"
+        if present_costs
+        else "missing"
+    )
+    currencies = {
+        str(record["cost"].get("currency") or "")
+        for record in request_records or []
+        if isinstance(record.get("cost"), Mapping)
+        and record["cost"].get("currency")
+    }
+    provider_attempts = [
+        attempt
+        for record in request_records or []
+        for attempt in (
+            record.get("provider_attempts")
+            if isinstance(record.get("provider_attempts"), list)
+            else [{}]
+        )
+        if isinstance(attempt, Mapping)
+    ]
+    if call_count == 0:
+        cost_amount: float | None = 0.0
+        known_partial_cost = 0.0
+        cost_source = "measured_no_model_calls"
+        cost_complete = True
+        currency = "USD"
+    else:
+        cost_complete = cost_reported_call_count == call_count
+        cost_amount = round(sum(present_costs), 8) if cost_complete else None
+        known_partial_cost = round(sum(present_costs), 8)
+        currency = next(iter(currencies)) if len(currencies) == 1 else "mixed" if currencies else "USD"
     return {
-        "input_tokens": nullable_sum("input_tokens"),
-        "output_tokens": nullable_sum("output_tokens"),
-        "cached_input_tokens": nullable_sum("cached_input_tokens"),
-        "total_tokens": nullable_sum("total_tokens"),
+        "logical_call_count": call_count,
+        "provider_attempt_count": len(provider_attempts),
+        "failed_provider_attempt_count": sum(
+            str(row.get("status") or "") == "error" for row in provider_attempts
+        ),
+        "usage_reported_call_count": usage_reported_call_count,
+        "usage_missing_call_count": usage_missing_call_count,
+        "usage_complete": usage_missing_call_count == 0,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cached_input_tokens": cached_input_tokens,
+        "total_tokens": total_tokens,
+        "known_partial_input_tokens": known_input_tokens,
+        "known_partial_output_tokens": known_output_tokens,
+        "known_partial_cached_input_tokens": known_cached_input_tokens,
+        "known_partial_total_tokens": known_total_tokens,
         "latency_ms": sum(int(row.get("latency_ms") or 0) for row in model_calls),
         "cost": {
-            "amount": round(sum(present_costs), 8) if present_costs else None,
-            "currency": "USD",
-            "source": "provider_reported" if present_costs else "missing",
+            "amount": cost_amount,
+            "known_partial_amount": known_partial_cost,
+            "currency": currency,
+            "source": cost_source,
+            "reported_call_count": cost_reported_call_count,
+            "missing_call_count": call_count - cost_reported_call_count,
+            "complete": cost_complete,
         },
     }
 
@@ -1177,6 +1971,39 @@ def _tool_family(name: str) -> str:
     return definition.family if definition else "unknown"
 
 
+def _candidate_query_terms(case: Layer2EvalCase) -> set[str]:
+    candidate = case.model_input.get("candidate")
+    if not isinstance(candidate, Mapping):
+        return set()
+    identity_text = " ".join(
+        str(candidate.get(key) or "")
+        for key in ("name", "canonical_link")
+    )
+    stop_words = {
+        "about",
+        "agent",
+        "evidence",
+        "example",
+        "https",
+        "needed",
+        "product",
+        "project",
+        "workflow",
+    }
+    return {
+        token
+        for token in re.findall(r"[a-z0-9]+", identity_text.lower())
+        if len(token) >= 3 and token not in stop_words
+    }
+
+
+def _query_is_candidate_bound(query: str, identity_terms: set[str]) -> bool:
+    query_terms = set(re.findall(r"[a-z0-9]+", str(query).lower()))
+    return len(query_terms & identity_terms) >= min(2, len(identity_terms)) and bool(
+        identity_terms
+    )
+
+
 def _stable_hash(value: Any) -> str:
     import hashlib
 
@@ -1195,7 +2022,7 @@ def _git_sha() -> str:
         return "unknown"
 
 
-def _budget_metadata(config: PairedEvalConfig) -> dict[str, Any]:
+def _budget_metadata(config: V2EvalConfig) -> dict[str, Any]:
     return {
         "max_investigation_turns": config.limits.max_investigation_turns,
         "max_scoring_attempts": config.limits.max_scoring_attempts,
@@ -1222,11 +2049,38 @@ def _provider_profile(provider: Any) -> dict[str, Any]:
         {
             "provider": str(getattr(provider, "provider_name", "")),
             "model": str(getattr(provider, "model", "")),
+            "endpoint": _safe_endpoint_identity(
+                str(getattr(provider, "base_url", ""))
+            ),
             "actual_temperature": getattr(provider, "actual_temperature", None),
             "max_output_tokens": getattr(provider, "max_output_tokens", None),
             "response_format": getattr(provider, "response_format", None),
+            "timeout_seconds": getattr(provider, "timeout", None),
+            "max_retries": getattr(provider, "max_retries", None),
+            "retry_backoff_seconds": getattr(
+                provider, "retry_backoff_seconds", None
+            ),
+            "input_cost_per_million": getattr(
+                provider, "input_cost_per_million", None
+            ),
+            "cached_input_cost_per_million": getattr(
+                provider, "cached_input_cost_per_million", None
+            ),
+            "output_cost_per_million": getattr(
+                provider, "output_cost_per_million", None
+            ),
+            "cost_currency": getattr(provider, "cost_currency", None),
+            "pricing_revision": getattr(provider, "pricing_revision", None),
         }
     )
+
+
+def _safe_endpoint_identity(value: str) -> str:
+    parsed = urlparse(value)
+    if not parsed.scheme or not parsed.hostname:
+        return ""
+    port = f":{parsed.port}" if parsed.port else ""
+    return f"{parsed.scheme.lower()}://{parsed.hostname.lower()}{port}{parsed.path.rstrip('/')}"
 
 
 def _provider_cache_isolation(
