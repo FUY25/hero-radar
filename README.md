@@ -99,11 +99,11 @@ python3 -m pipeline.decision.run_layer2_component_eval \
   --live-kimi \
   --secrets-file /absolute/path/to/pipeline/secrets.local.json \
   --trials 3 \
-  --input-cost-per-million 0.60 \
-  --cached-input-cost-per-million 0.10 \
-  --output-cost-per-million 3.00 \
-  --cost-currency USD \
-  --pricing-revision kimi-k2.5-official-2026-07-10 \
+  --input-cost-per-million 4.00 \
+  --cached-input-cost-per-million 0.70 \
+  --output-cost-per-million 21.00 \
+  --cost-currency CNY \
+  --pricing-revision moonshot-cn-kimi-k2.5-2026-07-10 \
   --output-dir evals/layer2/results/my-run
 ```
 
