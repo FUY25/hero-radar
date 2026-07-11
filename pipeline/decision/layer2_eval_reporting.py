@@ -203,7 +203,10 @@ def _run_telemetry_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         8,
     )
     currencies = {
-        str(row.get("currency")) for row in cost_rows if row.get("currency")
+        str(cost_row.get("currency"))
+        for telemetry_row, cost_row in zip(telemetry, cost_rows)
+        if int(telemetry_row.get("logical_call_count") or 0) > 0
+        and cost_row.get("currency")
     }
     return {
         "logical_call_count": sum(
@@ -233,7 +236,11 @@ def _run_telemetry_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "known_partial_cost": known_cost,
         "cost_complete": cost_complete,
         "cost_currency": (
-            next(iter(currencies)) if len(currencies) == 1 else "mixed"
+            next(iter(currencies))
+            if len(currencies) == 1
+            else "mixed"
+            if currencies
+            else "none"
         ),
     }
 

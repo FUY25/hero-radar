@@ -44,6 +44,49 @@ def _valid_low_final_response():
 
 
 class Layer2ComponentEvalTest(unittest.TestCase):
+    def test_run_summary_ignores_zero_call_placeholder_currency(self):
+        from pipeline.decision.layer2_eval_reporting import _run_telemetry_summary
+
+        summary = _run_telemetry_summary(
+            [
+                {
+                    "telemetry": {
+                        "logical_call_count": 1,
+                        "usage_complete": True,
+                        "input_tokens": 10,
+                        "output_tokens": 5,
+                        "total_tokens": 15,
+                        "latency_ms": 10,
+                        "cost": {
+                            "amount": 0.01,
+                            "known_partial_amount": 0.01,
+                            "currency": "CNY",
+                            "complete": True,
+                        },
+                    }
+                },
+                {
+                    "telemetry": {
+                        "logical_call_count": 0,
+                        "usage_complete": True,
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "total_tokens": 0,
+                        "latency_ms": 0,
+                        "cost": {
+                            "amount": 0.0,
+                            "known_partial_amount": 0.0,
+                            "currency": "USD",
+                            "complete": True,
+                        },
+                    }
+                },
+            ]
+        )
+
+        self.assertEqual(summary["cost_currency"], "CNY")
+        self.assertEqual(summary["cost"], 0.01)
+
     def test_v2_eval_config_matches_the_production_prompt_and_direct_final_profile(self):
         from pipeline.decision.layer2_eval import V2EvalConfig
 
