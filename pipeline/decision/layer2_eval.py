@@ -41,12 +41,17 @@ from pipeline.decision.request_contract import canonical_json, sanitize_contract
 from pipeline.decision.schema import init_decision_db
 
 
-CASE_CONTRACT_VERSION = "layer2-eval-case-v1"
+CASE_CONTRACT_VERSION = "layer2-eval-case-v2"
+SUPPORTED_CASE_CONTRACT_VERSIONS = {
+    "layer2-eval-case-v1",
+    CASE_CONTRACT_VERSION,
+}
 REPLAY_MATCHER_VERSION = "layer2-replay-match-v2"
-RELEASE_DATASET_VERSION = "layer2-scoring-cases-v1"
+RELEASE_DATASET_VERSION = "layer2-scoring-cases-v2"
 RELEASE_DATASET_FINGERPRINT = (
-    "2c7b65e2297c4a2d9503922ff9f5fcb4164176c12f5035415352d46c44a14d51"
+    "27007e0e489a46e40399e43fe5eb978490324ad9bab5d6875ad80c0904f622a4"
 )
+RELEASE_GRADER_VERSION = "layer2-graders-v2"
 RELEASE_CASE_IDS = (
     "openclaw",
     "hermes-agent",
@@ -101,7 +106,7 @@ class V2EvalConfig:
     direct_final_enabled: bool = False
     output_schema_version: str = SCORING_OUTPUT_SCHEMA_VERSION
     tool_registry_version: str = TOOL_REGISTRY_VERSION
-    grader_version: str = "layer2-graders-v1"
+    grader_version: str = RELEASE_GRADER_VERSION
 
     def __post_init__(self) -> None:
         if self.prompt_version != DEFAULT_INVESTIGATOR_PROMPT_VERSION:
@@ -314,6 +319,18 @@ def run_eval_case(
     conn = sqlite3.connect(":memory:")
     init_decision_db(conn)
     replay = ReplayToolRegistry(case)
+    tool_policy = str(case.grader.get("tool_policy") or "required")
+    if tool_policy == "forbidden":
+        active_tools: dict[str, Any] = {}
+        active_specs: dict[str, ToolSpec] = {}
+    else:
+        allowed_names = set(case.gold.get("allowed_tool_names") or replay.tools)
+        active_tools = {
+            name: tool for name, tool in replay.tools.items() if name in allowed_names
+        }
+        active_specs = {
+            name: spec for name, spec in replay.specs.items() if name in allowed_names
+        }
     captured = _RequestCaptureProvider(provider)
     feed_run_id = f"eval:{case.case_id}:{prompt_version}:trial-{int(trial)}"
     telemetry_provider = TelemetryLLMProvider(
@@ -333,8 +350,8 @@ def run_eval_case(
                 feed_run_id=feed_run_id,
                 groups=[_candidate_group(case)],
                 provider=telemetry_provider,
-                tools=replay.tools,
-                tool_specs=replay.specs,
+                tools=active_tools,
+                tool_specs=active_specs,
                 limits=limits or InvestigatorLimits(),
                 context_budget=context_budget or ContextBudget(),
                 direct_final_enabled=direct_final_enabled,
@@ -448,10 +465,10 @@ def run_eval_case(
             "prompt_version": prompt_version,
             "provider": captured.provider_name,
             "model": captured.model,
-            "dataset_version": "layer2-scoring-cases-v1",
+            "dataset_version": RELEASE_DATASET_VERSION,
             "recording_version": replay.recording_version,
             "replay_matcher_version": REPLAY_MATCHER_VERSION,
-            "grader_version": "layer2-graders-v1",
+            "grader_version": RELEASE_GRADER_VERSION,
             "output_schema_version": output_schema_version,
             "context_policy_version": SCORING_CONTEXT_POLICY_VERSION,
             "tool_registry_version": tool_registry_version,
@@ -515,7 +532,9 @@ def run_eval_case(
             "error": artifact.get("error"),
         }
         artifact["passed"] = all(
-            grade.get("passed", False) for grade in artifact["grades"].values()
+            grade.get("passed", False)
+            or grade.get("release_blocking") is False
+            for grade in artifact["grades"].values()
         )
         return sanitize_contract_value(artifact)
     finally:
@@ -1229,10 +1248,13 @@ def load_eval_dataset(path: str | Path) -> Layer2EvalDataset:
             },
             f"{source}:{line_number}",
         )
-        if row["contract_version"] != CASE_CONTRACT_VERSION:
+        contract_version = str(row["contract_version"])
+        if contract_version not in SUPPORTED_CASE_CONTRACT_VERSIONS:
             raise DatasetContractError(
                 f"{source}:{line_number}: unsupported contract_version"
             )
+        if contract_version == "layer2-eval-case-v1":
+            _upgrade_v1_case_contract(row)
         current_version = _required_string(row, "dataset_version", line_number)
         if dataset_version and current_version != dataset_version:
             raise DatasetContractError(
@@ -1259,6 +1281,7 @@ def load_eval_dataset(path: str | Path) -> Layer2EvalDataset:
         _validate_gold(row["gold"], source, line_number)
         _validate_grader(row["grader"], source, line_number)
         _validate_human_review(row["human_review"], source, line_number)
+        _validate_case_alignment(row, source, line_number)
         cases.append(
             Layer2EvalCase(
                 case_id=case_id,
@@ -1272,6 +1295,62 @@ def load_eval_dataset(path: str | Path) -> Layer2EvalDataset:
     if not cases:
         raise DatasetContractError(f"{source}: dataset is empty")
     return Layer2EvalDataset(version=dataset_version, cases=tuple(cases))
+
+
+def _upgrade_v1_case_contract(row: dict[str, Any]) -> None:
+    """Keep schema_smoke and archived V1 corpora readable without mutating files."""
+
+    gold = row["gold"]
+    grader = row["grader"]
+    gold.setdefault("candidate_relevance", gold.get("score_band", "low"))
+    if gold.get("should_print"):
+        readiness = "ready"
+    elif gold.get("is_product_or_repo"):
+        readiness = "insufficient_evidence"
+    else:
+        readiness = "not_applicable"
+    gold.setdefault("publication_readiness", readiness)
+    grader.setdefault(
+        "tool_policy",
+        "required" if gold.get("required_tool_names") else "optional",
+    )
+    grader.setdefault("forbidden_output_substrings", [])
+
+
+def _validate_case_alignment(
+    row: Mapping[str, Any], source: Path, line_number: int
+) -> None:
+    if str(row.get("contract_version")) != CASE_CONTRACT_VERSION:
+        return
+    gold = row["gold"]
+    grader = row["grader"]
+    replay = row["replay"]
+    location = f"{source}:{line_number}"
+    policy = grader["tool_policy"]
+    allowed = set(gold["allowed_tool_names"])
+    required = set(gold["required_tool_names"])
+    recorded = {
+        str(recording.get("tool"))
+        for recording in replay["tools"]
+        if isinstance(recording, Mapping)
+    }
+    if policy == "required" and (not required or not required.issubset(recorded)):
+        raise DatasetContractError(
+            f"{location}: required tool policy needs a recording for every required tool"
+        )
+    if policy == "forbidden" and (allowed or required):
+        raise DatasetContractError(
+            f"{location}: forbidden tool policy cannot allow or require tools"
+        )
+    if policy == "optional" and required:
+        raise DatasetContractError(
+            f"{location}: optional tool policy cannot require tools"
+        )
+    readiness = gold["publication_readiness"]
+    if bool(gold["should_print"]) != (readiness == "ready"):
+        raise DatasetContractError(
+            f"{location}: should_print must agree with publication_readiness"
+        )
 
 
 def legacy_schema_smoke_cases(path: str | Path) -> list[dict[str, Any]]:
@@ -1449,6 +1528,8 @@ def _validate_gold(value: dict[str, Any], source: Path, line_number: int) -> Non
         {
             "score_band",
             "score_interval",
+            "candidate_relevance",
+            "publication_readiness",
             "preflight_mode",
             "allowed_tool_names",
             "required_tool_names",
@@ -1463,6 +1544,16 @@ def _validate_gold(value: dict[str, Any], source: Path, line_number: int) -> Non
     )
     if value["score_band"] not in {"low", "medium", "high"}:
         raise DatasetContractError(f"{source}:{line_number}: invalid score band")
+    if value["candidate_relevance"] not in {"low", "medium", "high"}:
+        raise DatasetContractError(f"{source}:{line_number}: invalid candidate relevance")
+    if value["publication_readiness"] not in {
+        "ready",
+        "insufficient_evidence",
+        "not_applicable",
+    }:
+        raise DatasetContractError(
+            f"{source}:{line_number}: invalid publication readiness"
+        )
     if value["preflight_mode"] not in {
         "score_from_context",
         "investigate",
@@ -1527,8 +1618,10 @@ def _validate_grader(value: dict[str, Any], source: Path, line_number: int) -> N
     _require_exact_keys(
         value,
         {
+            "tool_policy",
             "allowed_tool_families",
             "forbidden_tool_families",
+            "forbidden_output_substrings",
             "expected_tool_outcome",
             "require_known_gap_after_failure",
             "max_repairs",
@@ -1537,6 +1630,8 @@ def _validate_grader(value: dict[str, Any], source: Path, line_number: int) -> N
         f"{source}:{line_number}:grader",
     )
     allowed_families = {definition.family for definition in _replay_tool_definitions().values()}
+    if value["tool_policy"] not in {"forbidden", "optional", "required"}:
+        raise DatasetContractError(f"{source}:{line_number}: invalid tool policy")
     for field in ("allowed_tool_families", "forbidden_tool_families"):
         families = value[field]
         if not isinstance(families, list) or not all(isinstance(name, str) for name in families):
@@ -1548,6 +1643,13 @@ def _validate_grader(value: dict[str, Any], source: Path, line_number: int) -> N
     outcome = value["expected_tool_outcome"]
     if outcome is not None and not isinstance(outcome, str):
         raise DatasetContractError(f"{source}:{line_number}: expected_tool_outcome must be string or null")
+    forbidden_substrings = value["forbidden_output_substrings"]
+    if not isinstance(forbidden_substrings, list) or not all(
+        isinstance(item, str) and item for item in forbidden_substrings
+    ):
+        raise DatasetContractError(
+            f"{source}:{line_number}: forbidden_output_substrings must be a string array"
+        )
     if not isinstance(value["require_known_gap_after_failure"], bool):
         raise DatasetContractError(f"{source}:{line_number}: gap requirement must be boolean")
     for field in ("max_repairs", "max_turns"):

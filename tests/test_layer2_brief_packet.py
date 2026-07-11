@@ -111,6 +111,39 @@ class Layer2BriefPacketTest(unittest.TestCase):
         self.assertNotIn("schema", payload)
         self.assertIn("output_schema", payload)
 
+    def test_failed_tool_observations_are_information_gaps_not_project_facts(self):
+        from pipeline.decision.layer2_brief_packet import build_brief_writer_packet
+
+        packet = build_brief_writer_packet(
+            {
+                "group": self.make_group(),
+                "object_type": "repo",
+                "l2_score": 50,
+                "observations": [
+                    {
+                        "observation_id": "tool:t1:0",
+                        "status": "unavailable",
+                        "facts": {"error": "recording_not_found"},
+                        "relevant_axes": ["technical_substance"],
+                    }
+                ],
+            },
+            output_schema={"$id": "layer2-brief-output-v1", "type": "object"},
+        )
+
+        self.assertEqual(packet["candidate"]["project_facts"], [])
+        self.assertEqual(
+            packet["candidate"]["information_gaps"],
+            [
+                {
+                    "observation_id": "tool:t1:0",
+                    "status": "unavailable",
+                    "reason": "recording_not_found",
+                }
+            ],
+        )
+        self.assertEqual(packet["candidate"]["top_evidence_refs"], [])
+
 
 if __name__ == "__main__":
     unittest.main()

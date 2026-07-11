@@ -47,7 +47,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--dataset",
-        default="evals/layer2/datasets/scoring_cases.v1.jsonl",
+        default="evals/layer2/datasets/scoring_cases.v2.jsonl",
     )
     parser.add_argument("--output-dir")
     parser.add_argument("--pipeline-config", default="pipeline/config.json")

@@ -115,6 +115,25 @@ def aggregate_results(
         }
         for name in grader_names
     }
+    dimension_graders = {
+        "execution": ("execution", "preflight", "telemetry"),
+        "decision": ("score", "route"),
+        "efficiency": ("tool_trajectory", "stopping_and_repair"),
+        "safety": (
+            "evidence_references",
+            "failed_tool_claims",
+            "known_gaps",
+            "brief",
+            "prompt_injection_safety",
+        ),
+    }
+    by_dimension = {}
+    for dimension, names in dimension_graders.items():
+        passed = sum(
+            all(bool(row.get("grades", {}).get(name, {}).get("passed")) for name in names)
+            for row in results
+        )
+        by_dimension[dimension] = {"passed": passed, "failed": len(results) - passed}
     by_tool_family: dict[str, dict[str, int]] = {}
     by_failure_type: dict[str, int] = {}
     for row in spend_rows:
@@ -149,6 +168,7 @@ def aggregate_results(
         "execution_failures": execution_failures,
         "by_case": by_case,
         "by_grader": by_grader,
+        "by_dimension": by_dimension,
         "by_tool_family": by_tool_family,
         "by_failure_type": by_failure_type,
         "all_passed": (
@@ -280,7 +300,16 @@ def render_report(
         ),
         execution_description,
         "",
-        "| Case | Trial | Execution | Final valid | Score / pass | Preflight | Route | Tools | Repairs | Grounding | Brief | Total tokens | Latency ms | Cost USD | Error |",
+        "## Quality dimensions",
+        "",
+        "| Dimension | Passed | Failed |",
+        "| --- | ---: | ---: |",
+        *[
+            f"| {name} | {counts['passed']} | {counts['failed']} |"
+            for name, counts in aggregate.get("by_dimension", {}).items()
+        ],
+        "",
+        "| Case | Trial | Execution | Final valid | Score / pass | Preflight | Route | Tools | Repairs | Grounding | Brief | Total tokens | Latency ms | Cost | Error |",
         "| --- | ---: | --- | --- | --- | --- | --- | --- | ---: | --- | --- | ---: | ---: | ---: | --- |",
     ]
     by_key = {(row["case_id"], row["trial"]): row for row in results}

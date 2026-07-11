@@ -12,6 +12,7 @@ def build_brief_writer_packet(
 ) -> dict[str, Any]:
     group = row["group"]
     project_facts: list[dict[str, Any]] = []
+    information_gaps: list[dict[str, str]] = []
     evidence_refs: list[str] = []
 
     for polarity, key in [
@@ -56,6 +57,22 @@ def build_brief_writer_packet(
             facts = raw_observation.get("facts")
             if not observation_id or not isinstance(facts, Mapping) or not facts:
                 continue
+            status = str(raw_observation.get("status") or "ok")
+            if status not in {"ok", "success"}:
+                reason = str(
+                    facts.get("error")
+                    or facts.get("message")
+                    or raw_observation.get("error")
+                    or status
+                ).strip()
+                information_gaps.append(
+                    {
+                        "observation_id": observation_id,
+                        "status": status,
+                        "reason": reason[:240],
+                    }
+                )
+                continue
             project_facts.append(
                 {
                     "fact": {
@@ -85,6 +102,7 @@ def build_brief_writer_packet(
             },
             "object_type": str(row.get("object_type") or "unknown"),
             "project_facts": project_facts,
+            "information_gaps": information_gaps[:8],
             "top_evidence_refs": evidence_refs,
         },
         "decision": {
