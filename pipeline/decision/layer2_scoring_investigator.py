@@ -872,15 +872,19 @@ def _validate_or_repair_final(
     strict_output: bool,
 ) -> dict[str, Any]:
     allowed_evidence_refs = set(valid_evidence_refs)
-    try:
-        return _validate_final_response(
-            response,
-            valid_evidence_refs=allowed_evidence_refs,
-            strict_output=strict_output,
-        )
-    except ValueError as exc:
-        if limits.max_scoring_attempts < 2:
-            raise
+    current_response = response
+    max_attempts = max(1, int(limits.max_scoring_attempts))
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return _validate_final_response(
+                current_response,
+                valid_evidence_refs=allowed_evidence_refs,
+                strict_output=strict_output,
+            )
+        except ValueError as exc:
+            if attempt >= max_attempts:
+                raise
+            validation_error = str(exc)
         repair_payload: dict[str, Any] = {
             "task": {
                 "decision": "repair_final_score",
@@ -888,8 +892,8 @@ def _validate_or_repair_final(
             },
             "candidate": last_payload.get("candidate") or {},
             "working_state": last_payload.get("working_state") or state,
-            "validation_error": str(exc),
-            "previous_response_shape": _response_shape(response),
+            "validation_error": validation_error,
+            "previous_response_shape": _response_shape(current_response),
             "instruction": "Return a complete corrected action=final scoring JSON object.",
             "output_schema": output_schema,
         }
@@ -897,7 +901,10 @@ def _validate_or_repair_final(
             repair_payload["valid_evidence_refs"] = list(valid_evidence_refs)
             repair_payload["instruction"] = (
                 "Return a complete corrected action=final scoring JSON object. "
-                "Every claim must cite only values in valid_evidence_refs."
+                "Every claim must cite only values in valid_evidence_refs. "
+                "When valid_evidence_refs is empty, supporting_evidence and "
+                "negative_evidence must both be empty arrays; represent missing "
+                "information only in known_gaps."
             )
         request_contract = LLMRequestContract.for_provider(
             provider,
@@ -912,7 +919,7 @@ def _validate_or_repair_final(
             output_schema_version=output_schema_version,
             tool_registry_version=tool_registry_version,
         )
-        repaired = _complete_json_with_contract(
+        current_response = _complete_json_with_contract(
             provider,
             task="layer2_scoring_investigator_repair",
             prompt_version=prompt_version,
@@ -926,7 +933,7 @@ def _validate_or_repair_final(
                 if last_context_manifest.get("turn_index") is not None
                 else None
             ),
-            attempt=2,
+            attempt=attempt + 1,
             estimated_tokens=(
                 last_context_manifest.get("section_tokens")
                 if isinstance(last_context_manifest.get("section_tokens"), dict)
@@ -938,11 +945,8 @@ def _validate_or_repair_final(
             context_policy_version=context_policy_version,
         ),
         )
-        return _validate_final_response(
-            repaired,
-            valid_evidence_refs=allowed_evidence_refs,
-            strict_output=strict_output,
-        )
+
+    raise RuntimeError("unreachable scoring validation state")
 
 
 def _validate_final_response(

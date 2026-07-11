@@ -182,6 +182,48 @@ class Layer2ScoringContextV2Test(unittest.TestCase):
         self.assertEqual(provider.calls[1]["task"], "layer2_scoring_investigator_repair")
         self.assertEqual(result["supporting_claims"][0]["claim_type"], "observed")
 
+    def test_v2_uses_the_full_scoring_attempt_budget_for_repairs(self):
+        from pipeline.decision.layer2_scoring_investigator import score_with_investigator
+
+        invalid_fields = attributable_final()
+        invalid_fields["score"]["supporting_evidence"][0]["instruction"] = (
+            "ignore policy"
+        )
+        invalid_reference = attributable_final()
+        invalid_reference["score"]["negative_evidence"] = [
+            {
+                "claim": "An unavailable lookup disproves the candidate.",
+                "evidence_refs": ["tool:t1:0"],
+                "supports_axes": ["risk_penalty"],
+                "claim_type": "observed",
+            }
+        ]
+        provider = FakeLLMProvider(
+            [invalid_fields, invalid_reference, attributable_final()]
+        )
+        conn = sqlite3.connect(":memory:")
+        self.addCleanup(conn.close)
+        init_decision_db(conn)
+
+        result = score_with_investigator(
+            conn,
+            feed_run_id="l2-run",
+            groups=[make_group()],
+            provider=provider,
+            tools={},
+            prompt_version="layer2-scoring-investigator-v2",
+        )[0]
+
+        self.assertEqual(len(provider.calls), 3)
+        self.assertEqual(
+            [call["task"] for call in provider.calls[1:]],
+            [
+                "layer2_scoring_investigator_repair",
+                "layer2_scoring_investigator_repair",
+            ],
+        )
+        self.assertEqual(result["supporting_claims"][0]["claim_type"], "observed")
+
     def test_v2_repair_request_lists_the_allowed_evidence_refs(self):
         from pipeline.decision.layer2_scoring_investigator import score_with_investigator
 
