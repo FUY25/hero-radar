@@ -5,7 +5,7 @@ import random
 import urllib.error
 from typing import Any
 
-from pipeline.decision.kimi_provider import KimiProvider
+from pipeline.decision.kimi_provider import KimiEmptyContentError, KimiProvider
 from pipeline.decision.rate_limit import StartRateLimiter
 
 
@@ -120,6 +120,9 @@ class RateLimitedKimiEvalProvider:
                         "usage": usage,
                         "cost": cost,
                         "error_type": None,
+                        "response_diagnostics": getattr(
+                            self._provider, "last_response_diagnostics", None
+                        ),
                     }
                 )
                 self.last_usage = _sum_usage(usage_attempts)
@@ -145,6 +148,9 @@ class RateLimitedKimiEvalProvider:
                         "usage": usage,
                         "cost": cost,
                         "error_type": type(exc).__name__,
+                        "response_diagnostics": getattr(
+                            self._provider, "last_response_diagnostics", None
+                        ),
                     }
                 )
                 self.last_usage = _sum_usage(usage_attempts)
@@ -268,6 +274,8 @@ def _sum_costs(
 
 
 def _retryable_error(exc: BaseException) -> bool:
+    if isinstance(exc, KimiEmptyContentError):
+        return False
     if isinstance(exc, urllib.error.HTTPError):
         return int(exc.code) in {408, 409, 425, 429, 500, 502, 503, 504}
     return isinstance(

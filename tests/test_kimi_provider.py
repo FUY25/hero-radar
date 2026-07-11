@@ -223,6 +223,67 @@ class KimiProviderTest(unittest.TestCase):
         self.assertEqual([row["status"] for row in provider.last_attempts], ["error", "ok"])
         self.assertEqual(waits, [1.0])
 
+    def test_eval_provider_does_not_retry_deterministic_empty_content(self):
+        from pipeline.decision.kimi_provider import KimiEmptyContentError
+        from pipeline.decision.layer2_eval_provider import RateLimitedKimiEvalProvider
+        from pipeline.decision.rate_limit import StartRateLimiter
+
+        class EmptyInner:
+            model = "kimi-k2.5"
+            base_url = "https://api.moonshot.cn/v1"
+            api_key = "configured"
+            timeout = 90
+            max_retries = 0
+            max_output_tokens = 3000
+            actual_temperature = 1
+            response_format = {"type": "json_object"}
+            last_usage = None
+            last_cost = None
+            last_response_diagnostics = None
+
+            def __init__(self):
+                self.calls = 0
+
+            def complete_json(self, **_call):
+                self.calls += 1
+                self.last_usage = {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 3000,
+                    "total_tokens": 3100,
+                }
+                self.last_response_diagnostics = {
+                    "finish_reason": "length",
+                    "content_chars": 0,
+                    "reasoning_chars": 12000,
+                }
+                raise KimiEmptyContentError("empty after output limit")
+
+        provider = RateLimitedKimiEvalProvider(
+            limiter=StartRateLimiter(0),
+            api_key="configured",
+            max_retries=2,
+            retry_backoff_seconds=0,
+            input_cost_per_million=4.0,
+            output_cost_per_million=21.0,
+            cost_currency="CNY",
+        )
+        inner = EmptyInner()
+        provider._provider = inner
+
+        with self.assertRaises(KimiEmptyContentError):
+            provider.complete_json(
+                task="layer2_eval",
+                prompt_version="layer2-scoring-investigator-v2",
+                input_payload={"candidate": "repo"},
+            )
+
+        self.assertEqual(inner.calls, 1)
+        self.assertEqual(len(provider.last_attempts), 1)
+        self.assertEqual(
+            provider.last_attempts[0]["response_diagnostics"]["finish_reason"],
+            "length",
+        )
+
     def test_kimi_web_search_client_uses_builtin_tool_without_json_mode(self):
         from pipeline.decision.kimi_provider import KimiProvider, KimiWebSearchClient
 

@@ -17,6 +17,10 @@ ROOT = Path(__file__).resolve().parents[2]
 LOCAL_SECRETS_PATH = ROOT / "pipeline" / "secrets.local.json"
 
 
+class KimiEmptyContentError(RuntimeError):
+    """A completed response had no JSON content and should not be replayed blindly."""
+
+
 def load_local_kimi_config(path: Path | None = None) -> dict[str, str]:
     active_path = path or LOCAL_SECRETS_PATH
     try:
@@ -81,6 +85,7 @@ class KimiProvider:
         )
         self.last_usage: dict[str, Any] | None = None
         self.last_cost: dict[str, Any] | float | None = None
+        self.last_response_diagnostics: dict[str, Any] | None = None
 
     def __repr__(self) -> str:
         return (
@@ -191,6 +196,7 @@ class KimiProvider:
             raise RuntimeError("KIMI_API_KEY or MOONSHOT_API_KEY is not configured")
         self.last_usage = None
         self.last_cost = None
+        self.last_response_diagnostics = None
         payload = self.build_payload(
             system_prompt=system_prompt,
             user_payload=input_payload,
@@ -222,9 +228,21 @@ class KimiProvider:
                     and not isinstance(reported_cost, bool)
                     else None
                 )
-                content = body["choices"][0]["message"]["content"]
+                choice = body["choices"][0]
+                message = choice["message"]
+                content = message.get("content")
+                reasoning_content = message.get("reasoning_content")
+                self.last_response_diagnostics = {
+                    "finish_reason": choice.get("finish_reason"),
+                    "content_chars": len(str(content or "")),
+                    "reasoning_chars": len(str(reasoning_content or "")),
+                }
                 if not content:
-                    raise RuntimeError("Kimi returned empty JSON content")
+                    raise KimiEmptyContentError(
+                        "Kimi returned empty JSON content "
+                        f"(finish_reason={choice.get('finish_reason')!r}, "
+                        f"reasoning_chars={len(str(reasoning_content or ''))})"
+                    )
                 return json.loads(content)
             except (
                 TimeoutError,
